@@ -5,7 +5,8 @@ test_mesh_repair
 
 # Test outputs
 test_small.obj
-test_small_repaired.obj
+test_medium.obj
+test_output.obj
 *_repaired.obj
 
 # Editor artifacts
