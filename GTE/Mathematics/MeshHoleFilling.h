@@ -57,8 +57,9 @@ namespace gte
         // Triangulation method for hole filling
         enum class TriangulationMethod
         {
-            EarClipping,    // Use ear clipping (fast, simple)
-            CDT             // Use Constrained Delaunay Triangulation (robust, handles complex cases)
+            EarClipping,    // Use ear clipping (fast, simple) - 2D projection
+            CDT,            // Use Constrained Delaunay Triangulation (robust, handles complex cases) - 2D projection
+            EarClipping3D   // Use 3D ear clipping (handles non-planar holes) - no projection
         };
 
         // Parameters for hole filling operations.
@@ -68,12 +69,16 @@ namespace gte
             size_t maxEdges;                    // Maximum hole perimeter edges (0 = unlimited)
             bool repair;                        // Run mesh repair after filling
             TriangulationMethod method;         // Triangulation algorithm to use
+            Real planarityThreshold;            // Max planarity deviation before using 3D method (0 = always use selected method)
+            bool autoFallback;                  // Automatically fall back to 3D if 2D fails
 
             Parameters()
                 : maxArea(static_cast<Real>(0))
                 , maxEdges(std::numeric_limits<size_t>::max())
                 , repair(true)
                 , method(TriangulationMethod::EarClipping)  // Default to EC for compatibility
+                , planarityThreshold(static_cast<Real>(0))  // 0 = disabled
+                , autoFallback(true)                        // Enable automatic fallback
             {
             }
         };
@@ -136,9 +141,50 @@ namespace gte
                     continue;
                 }
 
-                // Triangulate hole using GTE's algorithms
+                // Triangulate hole using appropriate method
                 std::vector<std::array<int32_t, 3>> newTriangles;
-                if (TriangulateHole(vertices, hole, newTriangles, params.method))
+                
+                // Determine which method to use
+                TriangulationMethod actualMethod = params.method;
+                
+                // Check if we should use 3D method based on planarity
+                if (params.planarityThreshold > static_cast<Real>(0) &&
+                    (params.method == TriangulationMethod::EarClipping ||
+                     params.method == TriangulationMethod::CDT))
+                {
+                    // Compute hole normal and planarity
+                    Vector3<Real> normal = ComputeHoleNormal(vertices, hole);
+                    Real planarity = ComputeHolePlanarity(vertices, hole, normal);
+                    
+                    // Estimate hole size for relative threshold
+                    Real holeSize = EstimateHoleSize(vertices, hole);
+                    Real relativeDeviation = holeSize > static_cast<Real>(0) ? 
+                        planarity / holeSize : planarity;
+                    
+                    if (relativeDeviation > params.planarityThreshold)
+                    {
+                        // Hole is too non-planar, use 3D method
+                        actualMethod = TriangulationMethod::EarClipping3D;
+                    }
+                }
+                
+                bool success = false;
+                if (actualMethod == TriangulationMethod::EarClipping3D)
+                {
+                    success = TriangulateHole3D(vertices, hole, newTriangles);
+                }
+                else
+                {
+                    success = TriangulateHole(vertices, hole, newTriangles, actualMethod);
+                    
+                    // Automatic fallback to 3D if 2D fails
+                    if (!success && params.autoFallback)
+                    {
+                        success = TriangulateHole3D(vertices, hole, newTriangles);
+                    }
+                }
+                
+                if (success)
                 {
                     // Compute area of new triangles
                     Real holeArea = ComputeTriangulationArea(vertices, newTriangles);
@@ -371,7 +417,174 @@ namespace gte
             return -1; // Not found
         }
 
-        // Triangulate a hole using GTE's triangulation algorithms.
+        // Estimate hole size (for relative planarity threshold)
+        static Real EstimateHoleSize(
+            std::vector<Vector3<Real>> const& vertices,
+            HoleBoundary const& hole)
+        {
+            if (hole.vertices.size() < 2)
+            {
+                return static_cast<Real>(0);
+            }
+            
+            // Use perimeter as hole size estimate
+            Real perimeter = static_cast<Real>(0);
+            size_t n = hole.vertices.size();
+            for (size_t i = 0; i < n; ++i)
+            {
+                Vector3<Real> const& p0 = vertices[hole.vertices[i]];
+                Vector3<Real> const& p1 = vertices[hole.vertices[(i + 1) % n]];
+                perimeter += Length(p1 - p0);
+            }
+            
+            return perimeter;
+        }
+
+        // Triangulate a hole working directly in 3D (no projection)
+        // Ported from Geogram's ear cutting algorithm
+        static bool TriangulateHole3D(
+            std::vector<Vector3<Real>> const& vertices,
+            HoleBoundary const& hole,
+            std::vector<std::array<int32_t, 3>>& triangles)
+        {
+            if (hole.vertices.size() < 3)
+            {
+                return false;
+            }
+            
+            if (hole.vertices.size() == 3)
+            {
+                triangles.push_back({hole.vertices[0], hole.vertices[1], hole.vertices[2]});
+                return true;
+            }
+            
+            // Create working copy as EdgeTriple (stores 3 consecutive vertices)
+            struct EdgeTriple
+            {
+                int32_t v0, v1, v2;  // Three consecutive vertices
+            };
+            
+            std::vector<EdgeTriple> workingHole;
+            workingHole.reserve(hole.vertices.size());
+            
+            size_t n = hole.vertices.size();
+            for (size_t i = 0; i < n; ++i)
+            {
+                EdgeTriple et;
+                et.v0 = hole.vertices[i];
+                et.v1 = hole.vertices[(i + 1) % n];
+                et.v2 = hole.vertices[(i + 2) % n];
+                workingHole.push_back(et);
+            }
+            
+            // Ear cutting loop - select best ear at each iteration
+            while (workingHole.size() > 3)
+            {
+                int32_t bestIdx = -1;
+                Real bestScore = -std::numeric_limits<Real>::max();
+                
+                // Find best ear based on 3D geometric quality
+                for (size_t i = 0; i < workingHole.size(); ++i)
+                {
+                    size_t nextIdx = (i + 1) % workingHole.size();
+                    Real score = ComputeEarScore3D(vertices, 
+                        workingHole[i], workingHole[nextIdx]);
+                    
+                    if (score > bestScore)
+                    {
+                        bestScore = score;
+                        bestIdx = static_cast<int32_t>(i);
+                    }
+                }
+                
+                if (bestIdx < 0)
+                {
+                    return false; // Failed to find valid ear
+                }
+                
+                size_t nextIdx = (bestIdx + 1) % workingHole.size();
+                
+                // Create triangle from best ear
+                EdgeTriple const& t1 = workingHole[bestIdx];
+                EdgeTriple const& t2 = workingHole[nextIdx];
+                
+                triangles.push_back({t1.v0, t2.v1, t1.v1});
+                
+                // Update working hole by merging the two edge triples
+                EdgeTriple merged;
+                merged.v0 = t1.v0;
+                merged.v1 = t2.v1;
+                merged.v2 = workingHole[(nextIdx + 1) % workingHole.size()].v1;
+                
+                workingHole[bestIdx] = merged;
+                workingHole.erase(workingHole.begin() + nextIdx);
+            }
+            
+            // Add final triangle
+            if (workingHole.size() == 3)
+            {
+                triangles.push_back({
+                    workingHole[0].v0,
+                    workingHole[1].v0,
+                    workingHole[2].v0
+                });
+            }
+            
+            return true;
+        }
+        
+        // Compute ear quality score in 3D (ported from Geogram)
+        // Higher score = better triangle
+        template <typename EdgeTriple>
+        static Real ComputeEarScore3D(
+            std::vector<Vector3<Real>> const& vertices,
+            EdgeTriple const& t1,
+            EdgeTriple const& t2)
+        {
+            // Get triangle vertices
+            Vector3<Real> const& p10 = vertices[t1.v0];
+            Vector3<Real> const& p11 = vertices[t1.v1];
+            Vector3<Real> const& p12 = vertices[t1.v2];
+            Vector3<Real> const& p20 = vertices[t2.v0];
+            Vector3<Real> const& p21 = vertices[t2.v1];
+            Vector3<Real> const& p22 = vertices[t2.v2];
+            
+            // Compute averaged normal
+            Vector3<Real> n1 = Cross(p11 - p10, p12 - p10);
+            Vector3<Real> n2 = Cross(p21 - p20, p22 - p20);
+            Vector3<Real> n = n1 + n2;
+            
+            Real nlen = Length(n);
+            if (nlen < static_cast<Real>(1e-10))
+            {
+                return -std::numeric_limits<Real>::max(); // Degenerate
+            }
+            n /= nlen;
+            
+            // Compute edge directions
+            Vector3<Real> a = p11 - p10;
+            Vector3<Real> b = p21 - p20;
+            
+            Real alen = Length(a);
+            Real blen = Length(b);
+            
+            if (alen < static_cast<Real>(1e-10) || blen < static_cast<Real>(1e-10))
+            {
+                return -std::numeric_limits<Real>::max(); // Degenerate edge
+            }
+            
+            a /= alen;
+            b /= blen;
+            
+            // Score based on angle between edges
+            // Prefer ears that maintain smooth transitions
+            Vector3<Real> axb = Cross(a, b);
+            Real score = -std::atan2(Dot(n, axb), Dot(a, b));
+            
+            return score;
+        }
+
+        // Triangulate a hole using GTE's triangulation algorithms (with projection).
         // Projects the 3D hole to 2D, triangulates, and maps back to 3D indices.
         static bool TriangulateHole(
             std::vector<Vector3<Real>> const& vertices,

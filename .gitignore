@@ -6,8 +6,16 @@ test_mesh_repair
 # Test outputs
 test_small.obj
 test_medium.obj
+test_tiny.obj
 test_output.obj
+test_output_ec.obj
+test_output_cdt.obj
+test_tiny_ec.obj
+test_tiny_cdt.obj
+test_validated.obj
 *_repaired.obj
+*_ec.obj
+*_cdt.obj
 
 # Editor artifacts
 *.swp
