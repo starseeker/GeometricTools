@@ -83,16 +83,25 @@ namespace gte
                 return;
             }
 
-            // Step 1: Build edge-triangle topology
-            ETManifoldMesh mesh;
-            for (auto const& tri : triangles)
+            // Step 1: Build edge-to-triangle map to detect boundaries
+            std::map<std::pair<int32_t, int32_t>, std::vector<size_t>> edgeToTriangles;
+
+            for (size_t i = 0; i < triangles.size(); ++i)
             {
-                mesh.Insert(tri[0], tri[1], tri[2]);
+                auto const& tri = triangles[i];
+                for (int j = 0; j < 3; ++j)
+                {
+                    int32_t v0 = tri[j];
+                    int32_t v1 = tri[(j + 1) % 3];
+                    
+                    // Store directed edge
+                    edgeToTriangles[std::make_pair(v0, v1)].push_back(i);
+                }
             }
 
-            // Step 2: Detect holes (boundary loops)
+            // Step 2: Detect holes (boundary loops) using edge adjacency
             std::vector<HoleBoundary> holes;
-            DetectHoles(vertices, mesh, holes);
+            DetectHolesFromEdges(vertices, triangles, edgeToTriangles, holes);
 
             if (holes.empty())
             {
@@ -136,7 +145,114 @@ namespace gte
         }
 
     private:
-        // Detect boundary loops (holes) in the mesh.
+        // Detect boundary loops (holes) using edge adjacency map.
+        static void DetectHolesFromEdges(
+            std::vector<Vector3<Real>> const& vertices,
+            std::vector<std::array<int32_t, 3>> const& triangles,
+            std::map<std::pair<int32_t, int32_t>, std::vector<size_t>> const& edgeToTriangles,
+            std::vector<HoleBoundary>& holes)
+        {
+            // Track visited boundary edges
+            std::set<std::pair<int32_t, int32_t>> visitedEdges;
+
+            // Find boundary edges (edges with no opposite edge)
+            for (auto const& entry : edgeToTriangles)
+            {
+                int32_t v0 = entry.first.first;
+                int32_t v1 = entry.first.second;
+
+                // Check if the opposite edge exists
+                auto oppositeEdge = std::make_pair(v1, v0);
+                if (edgeToTriangles.find(oppositeEdge) == edgeToTriangles.end())
+                {
+                    // This is a boundary edge
+                    if (visitedEdges.find(entry.first) != visitedEdges.end())
+                    {
+                        continue; // Already processed
+                    }
+
+                    // Trace the boundary loop starting from this edge
+                    HoleBoundary hole;
+                    if (TraceHoleBoundaryFromEdges(edgeToTriangles, v0, v1, visitedEdges, hole) &&
+                        hole.vertices.size() >= 3)
+                    {
+                        holes.push_back(hole);
+                    }
+                }
+            }
+        }
+
+        // Trace a boundary loop starting from edge (v0, v1) using edge map.
+        static bool TraceHoleBoundaryFromEdges(
+            std::map<std::pair<int32_t, int32_t>, std::vector<size_t>> const& edgeToTriangles,
+            int32_t startV0,
+            int32_t startV1,
+            std::set<std::pair<int32_t, int32_t>>& visitedEdges,
+            HoleBoundary& hole)
+        {
+            int32_t currentV = startV0;
+            int32_t nextV = startV1;
+            int maxIterations = 10000; // Prevent infinite loops
+            int iterations = 0;
+
+            do
+            {
+                hole.vertices.push_back(currentV);
+
+                // Mark edge as visited
+                visitedEdges.insert(std::make_pair(currentV, nextV));
+
+                // Find the next boundary edge starting from nextV
+                int32_t prevV = currentV;
+                currentV = nextV;
+                nextV = FindNextBoundaryVertexFromEdges(edgeToTriangles, prevV, currentV);
+
+                if (nextV == -1)
+                {
+                    // Failed to close the loop
+                    return false;
+                }
+
+                if (++iterations > maxIterations)
+                {
+                    // Safety check to prevent infinite loops
+                    return false;
+                }
+
+            } while (currentV != startV0);
+
+            return true;
+        }
+
+        // Find the next vertex along the boundary from (prevV, currentV).
+        static int32_t FindNextBoundaryVertexFromEdges(
+            std::map<std::pair<int32_t, int32_t>, std::vector<size_t>> const& edgeToTriangles,
+            int32_t prevV,
+            int32_t currentV)
+        {
+            // Look for an outgoing boundary edge from currentV
+            for (auto const& entry : edgeToTriangles)
+            {
+                int32_t v0 = entry.first.first;
+                int32_t v1 = entry.first.second;
+
+                // Check if this edge starts at currentV and doesn't go back to prevV
+                if (v0 == currentV && v1 != prevV)
+                {
+                    // Check if the opposite edge exists
+                    auto oppositeEdge = std::make_pair(v1, v0);
+                    if (edgeToTriangles.find(oppositeEdge) == edgeToTriangles.end())
+                    {
+                        // This is a boundary edge
+                        return v1;
+                    }
+                }
+            }
+
+            return -1; // Not found
+        }
+
+        // Detect boundary loops (holes) in the mesh (old ETManifoldMesh-based version).
         static void DetectHoles(
             std::vector<Vector3<Real>> const& vertices,
             ETManifoldMesh const& mesh,
