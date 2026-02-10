@@ -1,21 +1,27 @@
-# Simple Makefile for building the mesh repair test program
+# Makefile for building GTE mesh processing test programs
 
 CXX = g++
 CXXFLAGS = -std=c++17 -O2 -Wall -I. -IGTE
 LDFLAGS = 
 
-SOURCES = test_mesh_repair.cpp
-TARGET = test_mesh_repair
+# Targets
+TARGETS = test_mesh_repair test_remesh test_co3ne
 
-all: $(TARGET)
+all: $(TARGETS)
 
-$(TARGET): $(SOURCES)
-	$(CXX) $(CXXFLAGS) -o $(TARGET) $(SOURCES) $(LDFLAGS)
+test_mesh_repair: test_mesh_repair.cpp
+	$(CXX) $(CXXFLAGS) -o test_mesh_repair test_mesh_repair.cpp $(LDFLAGS)
+
+test_remesh: test_remesh.cpp
+	$(CXX) $(CXXFLAGS) -o test_remesh test_remesh.cpp $(LDFLAGS)
+
+test_co3ne: test_co3ne.cpp
+	$(CXX) $(CXXFLAGS) -o test_co3ne test_co3ne.cpp $(LDFLAGS)
 
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGETS)
 
-test: $(TARGET)
-	./$(TARGET) gt.obj gt_repaired.obj
+test: test_mesh_repair
+	./test_mesh_repair gt.obj gt_repaired.obj
 
 .PHONY: all clean test
