@@ -100,8 +100,12 @@ void TestCo3NeFull()
     std::vector<std::array<int32_t, 3>> outTriangles;
 
     Co3NeFull<double>::Parameters params;
+    // kNeighbors=10: Reasonable for small point clouds (14 points)
+    // Fewer neighbors might not provide enough local structure
     params.kNeighbors = 10;
     params.orientNormals = true;
+    // maxNormalAngle=80: Permissive angle for synthetic cube data
+    // Stricter angles (e.g., 45-60) better for smooth surfaces
     params.maxNormalAngle = 80.0;
 
     bool success = Co3NeFull<double>::Reconstruct(points, outVertices, outTriangles, params);
@@ -136,10 +140,11 @@ void TestMeshRemeshFull()
 
     // Try to load a test mesh
     bool loaded = false;
+    // Test file priority: tiny (simple), concave (complex), ec3d (validated)
     std::vector<std::string> testFiles = {
-        "test_tiny.obj",
-        "stress_concave.obj",
-        "test_ec3d.obj"
+        "test_tiny.obj",         // Small mesh for quick testing
+        "stress_concave.obj",    // Concave features test
+        "test_ec3d.obj"          // Ear-clipping validated mesh
     };
 
     for (auto const& filename : testFiles)

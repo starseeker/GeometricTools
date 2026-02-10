@@ -15,6 +15,8 @@ int main()
     std::vector<std::array<int32_t, 3>> outTriangles;
 
     Co3NeFull<double>::Parameters params;
+    // kNeighbors=3: Minimum for PCA (need at least 3 points for covariance matrix)
+    // This is intentionally minimal for debugging - production code should use 10-30
     params.kNeighbors = 3;
 
     std::cout << "Testing Co3NeFull with " << points.size() << " points" << std::endl;

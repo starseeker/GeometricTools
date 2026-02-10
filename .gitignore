@@ -26,3 +26,5 @@ test_co3ne_output.obj
 *.swp
 *~
 .DS_Store
+test_full_algorithms
+test_co3ne_debug
