@@ -1,5 +1,7 @@
 # Build artifacts
 test_mesh_repair
+test_remesh
+test_co3ne
 *.o
 *.obj.bak
 
@@ -13,9 +15,12 @@ test_output_cdt.obj
 test_tiny_ec.obj
 test_tiny_cdt.obj
 test_validated.obj
+test_remesh_output.obj
+test_co3ne_output.obj
 *_repaired.obj
 *_ec.obj
 *_cdt.obj
+*_output.obj
 
 # Editor artifacts
 *.swp
