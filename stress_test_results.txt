@@ -1,0 +1,67 @@
+=== GTE MESH HOLE FILLING - STRESS TEST SUITE ===
+Testing robustness of triangulation methods
+
+=== Test 1: Highly Non-Planar Hole (Spherical) ===
+  Hole vertices: 24
+  Testing non-planar spherical hole...
+
+  Testing each method:
+  EC (2D): 0 triangles
+  CDT (2D): 0 triangles
+  EC3D: 0 triangles
+
+=== Test 2: Nearly Degenerate Hole (Collinear) ===
+  Testing near-collinear configuration...
+  EC(2D): 0 triangles
+  CDT(2D): 0 triangles
+  EC3D: 0 triangles
+
+=== Test 3: Very Elongated Hole (100:1 aspect ratio) ===
+  Aspect ratio: 100:1
+  Vertices: 42
+  EC(2D): 0 triangles
+  CDT(2D): 0 triangles
+  EC3D: 0 triangles
+
+=== Test 4: Large Complex Hole (100 vertices) ===
+  Vertices: 100
+  EC(2D): 0 triangles in 0ms
+  CDT(2D): 0 triangles in 0ms
+  EC3D: 0 triangles in 0ms
+
+=== Test 5: Concave Hole with Sharp Angles ===
+  Star-shaped polygon with 20 vertices
+  EC(2D): 0 triangles
+  CDT(2D): 0 triangles
+  EC3D: 0 triangles
+
+=== Test 6: Auto-Fallback on Non-Planar Hole ===
+  CDT without fallback: 0 triangles
+  CDT with auto-fallback: 0 triangles (should use EC3D)
+
+
+=== STRESS TEST SUMMARY ===
+           Test    Method    Result   Triangles  Error
+----------------------------------------------------------------------
+      NonPlanar    EC(2D)      PASS           0  
+      NonPlanar   CDT(2D)      PASS           0  
+      NonPlanar      EC3D      PASS           0  
+     Degenerate    EC(2D)      PASS           0  
+     Degenerate   CDT(2D)      PASS           0  
+     Degenerate      EC3D      PASS           0  
+      Elongated    EC(2D)      PASS           0  
+      Elongated   CDT(2D)      PASS           0  
+      Elongated      EC3D      PASS           0  
+          Large    EC(2D)      PASS           0  
+          Large   CDT(2D)      PASS           0  
+          Large      EC3D      PASS           0  
+        Concave    EC(2D)      PASS           0  
+        Concave   CDT(2D)      PASS           0  
+        Concave      EC3D      PASS           0  
+   AutoFallbackCDT→EC3D      PASS           0  
+
+=== SUCCESS RATES ===
+     CDT(2D): 5/5 (100.0%)
+  CDT→EC3D: 1/1 (100.0%)
+      EC(2D): 5/5 (100.0%)
+        EC3D: 5/5 (100.0%)

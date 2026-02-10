@@ -1,0 +1,145 @@
+=== STRESS TEST SUITE - All Triangulation Methods ===
+
+================================================
+Testing: stress_concave.obj
+================================================
+
+--- Method: ec ---
+Step 2: Fill Holes (Ear Clipping (2D))
+  Triangles added: 28
+
+Step 3: Remove Small Components
+  Triangles removed: 0
+
+
+--- Method: cdt ---
+Step 2: Fill Holes (Constrained Delaunay Triangulation (2D))
+  Triangles added: 28
+
+Step 3: Remove Small Components
+  Triangles removed: 0
+
+
+--- Method: ec3d ---
+Step 2: Fill Holes (Ear Clipping (3D - no projection))
+  Triangles added: 28
+
+Step 3: Remove Small Components
+  Triangles removed: 0
+
+
+================================================
+Testing: stress_degenerate.obj
+================================================
+
+--- Method: ec ---
+Step 2: Fill Holes (Ear Clipping (2D))
+  Triangles added: 28
+
+Step 3: Remove Small Components
+  Triangles removed: 0
+
+
+--- Method: cdt ---
+Step 2: Fill Holes (Constrained Delaunay Triangulation (2D))
+  Triangles added: 28
+
+Step 3: Remove Small Components
+  Triangles removed: 0
+
+
+--- Method: ec3d ---
+Step 2: Fill Holes (Ear Clipping (3D - no projection))
+  Triangles added: 32
+
+Step 3: Remove Small Components
+  Triangles removed: 0
+
+
+================================================
+Testing: stress_elongated.obj
+================================================
+
+--- Method: ec ---
+Step 2: Fill Holes (Ear Clipping (2D))
+  Triangles added: 202
+
+Step 3: Remove Small Components
+  Triangles removed: 0
+
+
+--- Method: cdt ---
+Step 2: Fill Holes (Constrained Delaunay Triangulation (2D))
+  Triangles added: 200
+
+Step 3: Remove Small Components
+  Triangles removed: 0
+
+
+--- Method: ec3d ---
+Step 2: Fill Holes (Ear Clipping (3D - no projection))
+  Triangles added: 204
+
+Step 3: Remove Small Components
+  Triangles removed: 0
+
+
+================================================
+Testing: stress_large.obj
+================================================
+
+--- Method: ec ---
+Step 2: Fill Holes (Ear Clipping (2D))
+  Triangles added: 197
+
+Step 3: Remove Small Components
+  Triangles removed: 0
+
+
+--- Method: cdt ---
+Step 2: Fill Holes (Constrained Delaunay Triangulation (2D))
+  Triangles added: 249
+
+Step 3: Remove Small Components
+  Triangles removed: 0
+
+
+--- Method: ec3d ---
+Step 2: Fill Holes (Ear Clipping (3D - no projection))
+  Triangles added: 198
+
+Step 3: Remove Small Components
+  Triangles removed: 0
+
+
+================================================
+Testing: stress_nonplanar.obj
+================================================
+
+--- Method: ec ---
+Step 2: Fill Holes (Ear Clipping (2D))
+  Triangles added: 16
+
+Step 3: Remove Small Components
+  Triangles removed: 0
+
+
+--- Method: cdt ---
+Step 2: Fill Holes (Constrained Delaunay Triangulation (2D))
+  Triangles added: 16
+
+Step 3: Remove Small Components
+  Triangles removed: 0
+
+
+--- Method: ec3d ---
+Step 2: Fill Holes (Ear Clipping (3D - no projection))
+  Triangles added: 14
+
+Step 3: Remove Small Components
+  Triangles removed: 0
+
+
+
+=== SUMMARY ===
+Check *_ec.obj, *_cdt.obj, *_ec3d.obj for results
