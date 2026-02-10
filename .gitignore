@@ -1,0 +1,14 @@
+# Build artifacts
+test_mesh_repair
+*.o
+*.obj.bak
+
+# Test outputs
+test_small.obj
+test_small_repaired.obj
+*_repaired.obj
+
+# Editor artifacts
+*.swp
+*~
+.DS_Store
