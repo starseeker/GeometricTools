@@ -13,7 +13,8 @@
 // Adaptations for Geometric Tools Engine:
 // - Changed from GEO::Mesh to std::vector<Vector3<Real>> and std::vector<std::array<int32_t, 3>>
 // - Uses GTE::ETManifoldMesh for topology operations
-// - Simplified to use ear cutting algorithm (most robust for GTE port)
+// - Uses GTE's TriangulateEC and TriangulateCDT for robust triangulation
+// - Supports both Ear Clipping and Constrained Delaunay Triangulation
 // - Removed Geogram-specific Logger and CmdLine calls
 //
 // Original Geogram License (BSD 3-Clause):
@@ -22,23 +23,30 @@
 #pragma once
 
 #include <GTE/Mathematics/Vector3.h>
+#include <GTE/Mathematics/Vector2.h>
 #include <GTE/Mathematics/ETManifoldMesh.h>
 #include <GTE/Mathematics/MeshRepair.h>
+#include <GTE/Mathematics/TriangulateEC.h>
+#include <GTE/Mathematics/TriangulateCDT.h>
+#include <GTE/Mathematics/PolygonTree.h>
+#include <GTE/Mathematics/ArbitraryPrecision.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <memory>
 #include <set>
 #include <vector>
 
 // The MeshHoleFilling class provides hole detection and filling operations
 // ported from Geogram. It detects boundary loops in a triangle mesh and
-// fills them with new triangles using ear cutting triangulation.
+// fills them with new triangles using GTE's robust triangulation algorithms.
 //
-// The implementation is simplified compared to Geogram's full version,
-// focusing on the most robust algorithm (ear cutting) for GTE usage.
+// Supports two triangulation methods:
+// - Ear Clipping (EC): Simple and fast, good for most holes
+// - Constrained Delaunay Triangulation (CDT): More robust, handles complex holes
 
 namespace gte
 {
@@ -46,17 +54,26 @@ namespace gte
     class MeshHoleFilling
     {
     public:
+        // Triangulation method for hole filling
+        enum class TriangulationMethod
+        {
+            EarClipping,    // Use ear clipping (fast, simple)
+            CDT             // Use Constrained Delaunay Triangulation (robust, handles complex cases)
+        };
+
         // Parameters for hole filling operations.
         struct Parameters
         {
-            Real maxArea;           // Maximum hole area to fill (0 = unlimited)
-            size_t maxEdges;        // Maximum hole perimeter edges (0 = unlimited)
-            bool repair;            // Run mesh repair after filling
+            Real maxArea;                       // Maximum hole area to fill (0 = unlimited)
+            size_t maxEdges;                    // Maximum hole perimeter edges (0 = unlimited)
+            bool repair;                        // Run mesh repair after filling
+            TriangulationMethod method;         // Triangulation algorithm to use
 
             Parameters()
                 : maxArea(static_cast<Real>(0))
                 , maxEdges(std::numeric_limits<size_t>::max())
                 , repair(true)
+                , method(TriangulationMethod::EarClipping)  // Default to EC for compatibility
             {
             }
         };
@@ -119,9 +136,9 @@ namespace gte
                     continue;
                 }
 
-                // Triangulate hole using ear cutting
+                // Triangulate hole using GTE's algorithms
                 std::vector<std::array<int32_t, 3>> newTriangles;
-                if (TriangulateHole(vertices, hole, newTriangles))
+                if (TriangulateHole(vertices, hole, newTriangles, params.method))
                 {
                     // Compute area of new triangles
                     Real holeArea = ComputeTriangulationArea(vertices, newTriangles);
@@ -354,134 +371,182 @@ namespace gte
             return -1; // Not found
         }
 
-        // Triangulate a hole using ear cutting algorithm.
+        // Triangulate a hole using GTE's triangulation algorithms.
+        // Projects the 3D hole to 2D, triangulates, and maps back to 3D indices.
         static bool TriangulateHole(
             std::vector<Vector3<Real>> const& vertices,
             HoleBoundary const& hole,
-            std::vector<std::array<int32_t, 3>>& triangles)
+            std::vector<std::array<int32_t, 3>>& triangles,
+            TriangulationMethod method = TriangulationMethod::EarClipping)
         {
             if (hole.vertices.size() < 3)
             {
                 return false;
             }
 
-            // Create a working copy of the boundary vertices
-            std::vector<int32_t> polygon = hole.vertices;
-
-            // Ear cutting algorithm
-            while (polygon.size() > 3)
+            // Step 1: Compute plane for the hole (using Newell's method for robustness)
+            Vector3<Real> normal = ComputeHoleNormal(vertices, hole);
+            
+            if (Length(normal) < static_cast<Real>(1e-10))
             {
-                bool earFound = false;
+                // Degenerate hole
+                return false;
+            }
 
-                // Try each vertex as potential ear
-                for (size_t i = 0; i < polygon.size(); ++i)
+            // Step 2: Create local 2D coordinate system for the hole
+            Vector3<Real> uAxis, vAxis;
+            ComputeTangentSpace(normal, uAxis, vAxis);
+
+            // Step 3: Project hole vertices to 2D
+            std::vector<Vector2<Real>> points2D;
+            points2D.reserve(hole.vertices.size());
+            
+            for (int32_t vIdx : hole.vertices)
+            {
+                Vector3<Real> const& p3D = vertices[vIdx];
+                Real u = Dot(p3D, uAxis);
+                Real v = Dot(p3D, vAxis);
+                points2D.push_back(Vector2<Real>{u, v});
+            }
+
+            // Step 4: Triangulate in 2D using chosen method
+            std::vector<std::array<int32_t, 3>> localTriangles;
+            
+            if (method == TriangulationMethod::EarClipping)
+            {
+                if (!TriangulateWithEC(points2D, localTriangles))
                 {
-                    size_t prev = (i + polygon.size() - 1) % polygon.size();
-                    size_t next = (i + 1) % polygon.size();
-
-                    int32_t vPrev = polygon[prev];
-                    int32_t vCurr = polygon[i];
-                    int32_t vNext = polygon[next];
-
-                    // Check if this forms a valid ear
-                    if (IsEar(vertices, polygon, prev, i, next))
-                    {
-                        // Add triangle
-                        triangles.push_back({ vPrev, vCurr, vNext });
-
-                        // Remove ear vertex from polygon
-                        polygon.erase(polygon.begin() + i);
-                        earFound = true;
-                        break;
-                    }
+                    return false;
                 }
-
-                if (!earFound)
+            }
+            else // CDT
+            {
+                if (!TriangulateWithCDT(points2D, localTriangles))
                 {
-                    // Failed to find an ear - degenerate polygon
                     return false;
                 }
             }
 
-            // Add final triangle
-            if (polygon.size() == 3)
+            // Step 5: Map local indices back to global mesh indices
+            for (auto const& tri : localTriangles)
             {
-                triangles.push_back({ polygon[0], polygon[1], polygon[2] });
+                triangles.push_back({
+                    hole.vertices[tri[0]],
+                    hole.vertices[tri[1]],
+                    hole.vertices[tri[2]]
+                });
             }
 
             return true;
         }
 
-        // Check if vertex at index i is an ear of the polygon.
-        static bool IsEar(
+        // Compute hole normal using Newell's method (robust for non-planar holes)
+        static Vector3<Real> ComputeHoleNormal(
             std::vector<Vector3<Real>> const& vertices,
-            std::vector<int32_t> const& polygon,
-            size_t prevIdx,
-            size_t currIdx,
-            size_t nextIdx)
+            HoleBoundary const& hole)
         {
-            int32_t vPrev = polygon[prevIdx];
-            int32_t vCurr = polygon[currIdx];
-            int32_t vNext = polygon[nextIdx];
-
-            Vector3<Real> const& p0 = vertices[vPrev];
-            Vector3<Real> const& p1 = vertices[vCurr];
-            Vector3<Real> const& p2 = vertices[vNext];
-
-            // Compute triangle normal to check orientation
-            Vector3<Real> edge1 = p1 - p0;
-            Vector3<Real> edge2 = p2 - p0;
-            Vector3<Real> normal = Cross(edge1, edge2);
-
-            // Check if triangle is degenerate
-            if (Length(normal) < static_cast<Real>(1e-10))
+            Vector3<Real> normal{ static_cast<Real>(0), static_cast<Real>(0), static_cast<Real>(0) };
+            
+            size_t n = hole.vertices.size();
+            for (size_t i = 0; i < n; ++i)
             {
-                return false;
+                Vector3<Real> const& curr = vertices[hole.vertices[i]];
+                Vector3<Real> const& next = vertices[hole.vertices[(i + 1) % n]];
+                
+                normal[0] += (curr[1] - next[1]) * (curr[2] + next[2]);
+                normal[1] += (curr[2] - next[2]) * (curr[0] + next[0]);
+                normal[2] += (curr[0] - next[0]) * (curr[1] + next[1]);
             }
-
-            // Check if any other polygon vertex is inside the ear triangle
-            for (size_t j = 0; j < polygon.size(); ++j)
-            {
-                if (j == prevIdx || j == currIdx || j == nextIdx)
-                {
-                    continue;
-                }
-
-                Vector3<Real> const& p = vertices[polygon[j]];
-                if (PointInTriangle(p, p0, p1, p2))
-                {
-                    return false; // Not an ear
-                }
-            }
-
-            return true;
+            
+            Normalize(normal);
+            return normal;
         }
 
-        // Check if point p is inside triangle (p0, p1, p2).
-        static bool PointInTriangle(
-            Vector3<Real> const& p,
-            Vector3<Real> const& p0,
-            Vector3<Real> const& p1,
-            Vector3<Real> const& p2)
+        // Compute tangent space (u, v axes) from normal
+        static void ComputeTangentSpace(
+            Vector3<Real> const& normal,
+            Vector3<Real>& uAxis,
+            Vector3<Real>& vAxis)
         {
-            // Use barycentric coordinates
-            Vector3<Real> v0 = p2 - p0;
-            Vector3<Real> v1 = p1 - p0;
-            Vector3<Real> v2 = p - p0;
+            // Find axis least aligned with normal
+            Vector3<Real> candidate{ static_cast<Real>(1), static_cast<Real>(0), static_cast<Real>(0) };
+            if (std::abs(Dot(normal, candidate)) > static_cast<Real>(0.9))
+            {
+                candidate = Vector3<Real>{ static_cast<Real>(0), static_cast<Real>(1), static_cast<Real>(0) };
+            }
+            
+            uAxis = Cross(candidate, normal);
+            Normalize(uAxis);
+            vAxis = Cross(normal, uAxis);
+            Normalize(vAxis);
+        }
 
-            Real dot00 = Dot(v0, v0);
-            Real dot01 = Dot(v0, v1);
-            Real dot02 = Dot(v0, v2);
-            Real dot11 = Dot(v1, v1);
-            Real dot12 = Dot(v1, v2);
+        // Triangulate using GTE's Ear Clipping
+        static bool TriangulateWithEC(
+            std::vector<Vector2<Real>> const& points2D,
+            std::vector<std::array<int32_t, 3>>& triangles)
+        {
+            try
+            {
+                // Use BSNumber for exact arithmetic (recommended for robustness)
+                using ComputeType = BSNumber<UIntegerFP32<70>>;
+                
+                TriangulateEC<Real, ComputeType> triangulator(points2D);
+                triangulator();  // Triangulate simple polygon
+                
+                triangles = triangulator.GetTriangles();
+                return !triangles.empty();
+            }
+            catch (...)
+            {
+                // Fall back to floating-point if exact arithmetic fails
+                try
+                {
+                    TriangulateEC<Real, Real> triangulator(points2D);
+                    triangulator();
+                    triangles = triangulator.GetTriangles();
+                    return !triangles.empty();
+                }
+                catch (...)
+                {
+                    return false;
+                }
+            }
+        }
 
-            Real invDenom = static_cast<Real>(1) / (dot00 * dot11 - dot01 * dot01);
-            Real u = (dot11 * dot02 - dot01 * dot12) * invDenom;
-            Real v = (dot00 * dot12 - dot01 * dot02) * invDenom;
-
-            return (u >= static_cast<Real>(0)) && 
-                   (v >= static_cast<Real>(0)) && 
-                   (u + v <= static_cast<Real>(1));
+        // Triangulate using GTE's Constrained Delaunay Triangulation
+        static bool TriangulateWithCDT(
+            std::vector<Vector2<Real>> const& points2D,
+            std::vector<std::array<int32_t, 3>>& triangles)
+        {
+            try
+            {
+                // Create polygon tree (single outer polygon, no holes)
+                auto tree = std::make_shared<PolygonTree>();
+                tree->polygon.resize(points2D.size());
+                std::iota(tree->polygon.begin(), tree->polygon.end(), 0);
+                
+                // Use BSNumber for exact arithmetic
+                using ComputeType = BSNumber<UIntegerFP32<70>>;
+                
+                TriangulateCDT<Real, ComputeType> triangulator;
+                PolygonTreeEx outputTree;
+                
+                triangulator(points2D, tree, outputTree);
+                
+                // Extract triangles from output tree
+                for (auto const& tri : outputTree.allTriangles)
+                {
+                    triangles.push_back(tri);
+                }
+                
+                return !triangles.empty();
+            }
+            catch (...)
+            {
+                // CDT failed, fall back to EC
+                return TriangulateWithEC(points2D, triangles);
+            }
         }
 
         // Compute total area of triangulation.

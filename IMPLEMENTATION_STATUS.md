@@ -41,14 +41,18 @@ gte::MeshRepair<double>::Repair(vertices, triangles, params);
 
 ### 2. GTE/Mathematics/MeshHoleFilling.h
 
-**Status:** ✅ Complete and tested
+**Status:** ✅ Complete and tested (Enhanced with GTE triangulation)
 
-**Description:** Detects and fills holes in triangle meshes using ear cutting triangulation.
+**Description:** Detects and fills holes in triangle meshes using GTE's robust triangulation algorithms.
 
 **Features:**
 - Boundary loop detection (works with non-manifold meshes)
 - Hole area computation
-- Ear cutting triangulation algorithm
+- **NEW:** Choice of triangulation method:
+  - **Ear Clipping (EC)**: Fast, simple, good for most holes
+  - **Constrained Delaunay Triangulation (CDT)**: More robust, better quality triangles
+- Uses GTE's TriangulateEC and TriangulateCDT with exact arithmetic (BSNumber)
+- Automatic 3D-to-2D projection for hole triangulation
 - Configurable hole size limits (area and edge count)
 - Optional automatic repair after filling
 
@@ -56,11 +60,17 @@ gte::MeshRepair<double>::Repair(vertices, triangles, params);
 ```cpp
 #include <GTE/Mathematics/MeshHoleFilling.h>
 
+// Using Ear Clipping (default)
 gte::MeshHoleFilling<double>::Parameters params;
 params.maxArea = 1e30;  // Fill all holes
 params.maxEdges = std::numeric_limits<size_t>::max();
 params.repair = true;
+params.method = gte::MeshHoleFilling<double>::TriangulationMethod::EarClipping;
 
+gte::MeshHoleFilling<double>::FillHoles(vertices, triangles, params);
+
+// Using Constrained Delaunay Triangulation for better quality
+params.method = gte::MeshHoleFilling<double>::TriangulationMethod::CDT;
 gte::MeshHoleFilling<double>::FillHoles(vertices, triangles, params);
 ```
 
@@ -70,8 +80,12 @@ gte::MeshHoleFilling<double>::FillHoles(vertices, triangles, params);
 
 **Implementation Notes:**
 - Uses edge-based boundary detection instead of ETManifoldMesh to handle non-manifold input
-- Implements ear cutting (most robust for GTE port) instead of loop splitting
-- Simplified compared to Geogram's full version which has multiple algorithms
+- Leverages GTE's TriangulateEC and TriangulateCDT for robust, exact arithmetic triangulation
+- Projects 3D holes to 2D using Newell's method for normal computation
+- EC is faster but may produce lower quality triangles
+- CDT is slower but produces better quality triangles and handles edge cases better
+- Both methods use BSNumber<UIntegerFP32<70>> for exact arithmetic by default
+- Falls back to floating-point arithmetic if exact computation fails
 
 ### 3. GTE/Mathematics/MeshPreprocessing.h
 
@@ -111,7 +125,7 @@ A standalone test program that demonstrates the mesh repair pipeline:
 1. Load OBJ file
 2. Compute initial statistics (vertices, triangles, area, bbox)
 3. Apply mesh repair
-4. Fill holes
+4. Fill holes (with choice of EC or CDT)
 5. Remove small components
 6. Save repaired mesh
 7. Report statistics
@@ -123,15 +137,22 @@ make clean && make
 
 **Run:**
 ```bash
-./test_mesh_repair input.obj output.obj
+./test_mesh_repair input.obj output.obj [ec|cdt]
+
+# Use Ear Clipping (default, faster)
+./test_mesh_repair input.obj output_ec.obj ec
+
+# Use Constrained Delaunay Triangulation (more robust)
+./test_mesh_repair input.obj output_cdt.obj cdt
 ```
 
 **Test Results:**
 
-| Test Case | Vertices In | Vertices Out | Triangles In | Triangles Out | Status |
-|-----------|-------------|--------------|--------------|---------------|--------|
-| Small (126v, 72t) | 126 | 56 | 72 | 102 | ✅ Pass |
-| Medium (1822v, 3170t) | 1822 | 1642 | 3170 | 3266 | ✅ Pass |
+| Test Case | Method | Vertices In | Vertices Out | Triangles In | Triangles Out | Status |
+|-----------|--------|-------------|--------------|--------------|---------------|--------|
+| Tiny (126v, 72t) | EC | 126 | 56 | 72 | 102 | ✅ Pass |
+| Tiny (126v, 72t) | CDT | 126 | 56 | 72 | 116 | ✅ Pass |
+| Medium (1822v, 3170t) | EC | 1822 | 1642 | 3170 | 3266 | ✅ Pass |
 
 ## API Design Principles
 

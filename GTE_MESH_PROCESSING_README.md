@@ -37,10 +37,21 @@ Repairs mesh topology issues:
 - Removes isolated vertices
 
 ### MeshHoleFilling.h
-Detects and fills holes in meshes:
+Detects and fills holes in meshes using GTE's robust triangulation:
 - Finds boundary loops
-- Triangulates holes using ear cutting
+- Choice of triangulation method:
+  - **Ear Clipping (EC)**: Fast and simple
+  - **Constrained Delaunay (CDT)**: Higher quality triangles
+- Uses exact arithmetic (BSNumber) for robustness
 - Supports area and edge count limits
+
+**Example:**
+```cpp
+gte::MeshHoleFilling<double>::Parameters fillParams;
+fillParams.maxArea = 1e30;
+fillParams.method = gte::MeshHoleFilling<double>::TriangulationMethod::CDT;
+gte::MeshHoleFilling<double>::FillHoles(vertices, triangles, fillParams);
+```
 
 ### MeshPreprocessing.h
 Mesh cleanup operations:
@@ -53,7 +64,11 @@ Mesh cleanup operations:
 
 ```bash
 make
-./test_mesh_repair input.obj output.obj
+# Test with Ear Clipping
+./test_mesh_repair input.obj output_ec.obj ec
+
+# Test with Constrained Delaunay Triangulation
+./test_mesh_repair input.obj output_cdt.obj cdt
 ```
 
 ## Documentation

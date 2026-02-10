@@ -135,16 +135,34 @@ int main(int argc, char* argv[])
 {
     if (argc < 2)
     {
-        std::cerr << "Usage: " << argv[0] << " <input.obj> [output.obj]" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <input.obj> [output.obj] [ec|cdt]" << std::endl;
+        std::cerr << "  ec  - Use Ear Clipping triangulation (default)" << std::endl;
+        std::cerr << "  cdt - Use Constrained Delaunay Triangulation" << std::endl;
         return 1;
     }
 
     std::string inputFile = argv[1];
     std::string outputFile = (argc >= 3) ? argv[2] : "repaired.obj";
+    
+    // Parse triangulation method
+    gte::MeshHoleFilling<double>::TriangulationMethod method = 
+        gte::MeshHoleFilling<double>::TriangulationMethod::EarClipping;
+    std::string methodName = "Ear Clipping";
+    
+    if (argc >= 4)
+    {
+        std::string methodArg = argv[3];
+        if (methodArg == "cdt")
+        {
+            method = gte::MeshHoleFilling<double>::TriangulationMethod::CDT;
+            methodName = "Constrained Delaunay Triangulation";
+        }
+    }
 
     std::cout << "=== GTE Mesh Repair Test ===" << std::endl;
     std::cout << "Input: " << inputFile << std::endl;
     std::cout << "Output: " << outputFile << std::endl;
+    std::cout << "Triangulation: " << methodName << std::endl;
     std::cout << std::endl;
 
     // Load mesh
@@ -187,12 +205,13 @@ int main(int argc, char* argv[])
     std::cout << std::endl;
 
     // Step 2: Fill Holes
-    std::cout << "Step 2: Fill Holes" << std::endl;
+    std::cout << "Step 2: Fill Holes (" << methodName << ")" << std::endl;
 
     MeshHoleFilling<double>::Parameters fillParams;
     fillParams.maxArea = 1e30;  // Fill all holes (match Geogram default)
     fillParams.maxEdges = std::numeric_limits<size_t>::max();
     fillParams.repair = true;
+    fillParams.method = method;  // Use selected triangulation method
 
     trianglesBefore = triangles.size();
 
