@@ -462,23 +462,54 @@ namespace gte
             return normal;
         }
 
-        // Compute tangent space (u, v axes) from normal
+        // Check how planar the hole is (returns max deviation from average plane)
+        static Real ComputeHolePlanarity(
+            std::vector<Vector3<Real>> const& vertices,
+            HoleBoundary const& hole,
+            Vector3<Real> const& normal)
+        {
+            if (hole.vertices.size() < 3)
+            {
+                return static_cast<Real>(0);
+            }
+            
+            // Compute centroid
+            Vector3<Real> centroid{ static_cast<Real>(0), static_cast<Real>(0), static_cast<Real>(0) };
+            for (int32_t vIdx : hole.vertices)
+            {
+                centroid += vertices[vIdx];
+            }
+            centroid /= static_cast<Real>(hole.vertices.size());
+            
+            // Measure maximum deviation from plane through centroid
+            Real maxDeviation = static_cast<Real>(0);
+            for (int32_t vIdx : hole.vertices)
+            {
+                Vector3<Real> const& v = vertices[vIdx];
+                Real deviation = std::abs(Dot(v - centroid, normal));
+                maxDeviation = std::max(maxDeviation, deviation);
+            }
+            
+            return maxDeviation;
+        }
+
+        // Compute tangent space (u, v axes) from normal using GTE's robust method
         static void ComputeTangentSpace(
             Vector3<Real> const& normal,
             Vector3<Real>& uAxis,
             Vector3<Real>& vAxis)
         {
-            // Find axis least aligned with normal
-            Vector3<Real> candidate{ static_cast<Real>(1), static_cast<Real>(0), static_cast<Real>(0) };
-            if (std::abs(Dot(normal, candidate)) > static_cast<Real>(0.9))
-            {
-                candidate = Vector3<Real>{ static_cast<Real>(0), static_cast<Real>(1), static_cast<Real>(0) };
-            }
+            // Use GTE's robust orthogonal complement computation
+            // This is more numerically stable than our custom version
+            Vector3<Real> v[3];
+            v[0] = normal;
             
-            uAxis = Cross(candidate, normal);
-            Normalize(uAxis);
-            vAxis = Cross(normal, uAxis);
-            Normalize(vAxis);
+            // ComputeOrthogonalComplement generates orthonormal basis
+            // with robust=true for better numerical stability
+            ComputeOrthogonalComplement(1, v, true);
+            
+            uAxis = v[1];
+            vAxis = v[2];
         }
 
         // Triangulate using GTE's Ear Clipping
