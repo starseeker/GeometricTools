@@ -26,6 +26,8 @@
 #include <GTE/Mathematics/Vector2.h>
 #include <GTE/Mathematics/ETManifoldMesh.h>
 #include <GTE/Mathematics/MeshRepair.h>
+#include <GTE/Mathematics/MeshValidation.h>
+#include <GTE/Mathematics/Polygon2Validation.h>
 #include <GTE/Mathematics/TriangulateEC.h>
 #include <GTE/Mathematics/TriangulateCDT.h>
 #include <GTE/Mathematics/PolygonTree.h>
@@ -71,6 +73,9 @@ namespace gte
             TriangulationMethod method;         // Triangulation algorithm to use
             Real planarityThreshold;            // Max planarity deviation before using 3D method (0 = always use selected method)
             bool autoFallback;                  // Automatically fall back to 3D if 2D fails
+            bool validateOutput;                // Validate that output is manifold and non-self-intersecting
+            bool requireManifold;               // Fail if output is not manifold
+            bool requireNoSelfIntersections;    // Fail if output has self-intersections
 
             Parameters()
                 : maxArea(static_cast<Real>(0))
@@ -79,6 +84,9 @@ namespace gte
                 , method(TriangulationMethod::EarClipping)  // Default to EC for compatibility
                 , planarityThreshold(static_cast<Real>(0))  // 0 = disabled
                 , autoFallback(true)                        // Enable automatic fallback
+                , validateOutput(true)                      // Validate by default
+                , requireManifold(true)                     // Must be manifold
+                , requireNoSelfIntersections(false)         // Don't require (can be expensive)
             {
             }
         };
@@ -620,6 +628,14 @@ namespace gte
                 Real u = Dot(p3D, uAxis);
                 Real v = Dot(p3D, vAxis);
                 points2D.push_back(Vector2<Real>{u, v});
+            }
+
+            // Step 3.5: CRITICAL - Check if projected polygon self-intersects
+            // This is expected for highly non-planar holes (e.g., wrapping around sphere)
+            if (Polygon2Validation<Real>::HasSelfIntersectingEdges(points2D))
+            {
+                // Projected polygon self-intersects - MUST use 3D method
+                return false;  // Signal failure so auto-fallback can trigger
             }
 
             // Step 4: Triangulate in 2D using chosen method
