@@ -5,16 +5,26 @@
 // https://www.geometrictools.com/License/Boost/LICENSE_1_0.txt
 // File Version: 8.0.2026.02.10
 //
-// Mesh remeshing utilities ported from Geogram
-// Original: Geogram mesh_remesh.cpp
+// Mesh remeshing utilities inspired by Geogram
+// 
+// Original Geogram Source:
+// - geogram/src/lib/geogram/mesh/mesh_remesh.h
+// - geogram/src/lib/geogram/mesh/mesh_remesh.cpp
+// - https://github.com/BrunoLevy/geogram (commit f5abd69)
 // License: BSD 3-Clause (Inria) - Compatible with Boost
 // Copyright (c) 2000-2022 Inria
+//
+// This is a simplified implementation that provides basic remeshing
+// functionality. Geogram's full implementation uses Centroidal Voronoi
+// Tessellation (CVT) with Lloyd relaxation and Newton optimization.
+// Our implementation uses iterative edge split/collapse/smooth approach.
 //
 // Adapted for Geometric Tools Engine:
 // - Uses std::vector<Vector3<Real>> instead of GEO::Mesh
 // - Uses GTE's mesh structures for topology
 // - Removed Geogram command-line configuration
 // - Added struct-based parameter system
+// - Simplified algorithm (no CVT, simpler iterative approach)
 
 #pragma once
 
@@ -309,7 +319,7 @@ namespace gte
                 
                 // Create new vertex at midpoint
                 Vector3<Real> midpoint = (vertices[edge.v0] + vertices[edge.v1]) * static_cast<Real>(0.5);
-                int32_t newVertex = static_cast<int32_t>(vertices.size());
+                // int32_t newVertex = static_cast<int32_t>(vertices.size());  // TODO: Use when implementing split
                 vertices.push_back(midpoint);
 
                 // Find and update triangles using this edge

@@ -6,23 +6,32 @@
 // File Version: 8.0.2026.02.10
 //
 // Co3Ne (Concurrent Co-Cones) surface reconstruction ported from Geogram
-// Original: Geogram points/co3ne.cpp
+//
+// Original Geogram Source:
+// - geogram/src/lib/geogram/points/co3ne.h
+// - geogram/src/lib/geogram/points/co3ne.cpp
+// - https://github.com/BrunoLevy/geogram (commit f5abd69)
 // License: BSD 3-Clause (Inria) - Compatible with Boost
 // Copyright (c) 2000-2022 Inria
+//
+// Co3Ne Algorithm:
+// Reconstructs a triangle mesh from a point cloud with normals using
+// local co-cone analysis. This is a simplified port of Geogram's
+// implementation. The full Geogram version includes sophisticated
+// manifold extraction logic (~800 lines).
+//
+// Geogram's algorithm:
+// 1. Finding k-nearest neighbors for each point
+// 2. Checking normal consistency (co-cone angle)
+// 3. Building triangles from locally consistent neighbor sets
+// 4. Manifold extraction to ensure valid topology
 //
 // Adapted for Geometric Tools Engine:
 // - Uses std::vector<Vector3<Real>> instead of GEO::Mesh
 // - Uses GTE's NearestNeighborQuery for spatial indexing
 // - Removed Geogram command-line configuration
 // - Added struct-based parameter system
-//
-// Co3Ne Algorithm:
-// Reconstructs a triangle mesh from a point cloud with normals using
-// local co-cone analysis. The algorithm works by:
-// 1. Finding k-nearest neighbors for each point
-// 2. Checking normal consistency (co-cone angle)
-// 3. Building triangles from locally consistent neighbor sets
-// 4. Ensuring manifold output
+// - Simplified manifold extraction (needs further work)
 
 #pragma once
 
