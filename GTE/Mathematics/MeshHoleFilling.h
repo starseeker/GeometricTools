@@ -21,9 +21,9 @@
 
 #pragma once
 
-#include <Mathematics/Vector3.h>
-#include <Mathematics/ETManifoldMesh.h>
-#include <Mathematics/MeshRepair.h>
+#include <GTE/Mathematics/Vector3.h>
+#include <GTE/Mathematics/ETManifoldMesh.h>
+#include <GTE/Mathematics/MeshRepair.h>
 #include <algorithm>
 #include <array>
 #include <cmath>

@@ -43,8 +43,8 @@
 
 #pragma once
 
-#include <Mathematics/Vector3.h>
-#include <Mathematics/ETManifoldMesh.h>
+#include <GTE/Mathematics/Vector3.h>
+#include <GTE/Mathematics/ETManifoldMesh.h>
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -149,7 +149,7 @@ namespace gte
             if (epsilon <= static_cast<Real>(0))
             {
                 // Exact comparison for zero epsilon
-                std::unordered_map<Vector3<Real>, int32_t> uniqueVertices;
+                std::map<Vector3<Real>, int32_t> uniqueVertices;
                 for (int32_t i = 0; i < numVertices; ++i)
                 {
                     auto iter = uniqueVertices.find(vertices[i]);
@@ -168,8 +168,19 @@ namespace gte
             else
             {
                 // Epsilon-based comparison using spatial hashing
+                // Custom hash function for int64_t arrays
+                struct ArrayHash {
+                    size_t operator()(std::array<int64_t, 3> const& arr) const {
+                        size_t h = 0;
+                        for (size_t i = 0; i < 3; ++i) {
+                            h ^= std::hash<int64_t>{}(arr[i]) + 0x9e3779b9 + (h << 6) + (h >> 2);
+                        }
+                        return h;
+                    }
+                };
+
                 Real invEpsilon = static_cast<Real>(1) / epsilon;
-                std::unordered_map<std::array<int64_t, 3>, std::vector<int32_t>> spatialHash;
+                std::unordered_map<std::array<int64_t, 3>, std::vector<int32_t>, ArrayHash> spatialHash;
 
                 for (int32_t i = 0; i < numVertices; ++i)
                 {
@@ -375,32 +386,21 @@ namespace gte
     }
 }
 
-// Hash function for Vector3 to support unordered_map
+// Hash functions for GTE types to support unordered containers.
+// These need to be in the std namespace and defined before use.
 namespace std
 {
+    // Hash function for gte::Vector3
     template <typename Real>
-    struct hash<gte::Vector3<Real>>
+    struct hash<gte::Vector<3, Real>>
     {
-        size_t operator()(gte::Vector3<Real> const& v) const
+        size_t operator()(gte::Vector<3, Real> const& v) const
         {
             size_t h1 = std::hash<Real>{}(v[0]);
             size_t h2 = std::hash<Real>{}(v[1]);
             size_t h3 = std::hash<Real>{}(v[2]);
+            // Combine hashes using a simple formula
             return h1 ^ (h2 << 1) ^ (h3 << 2);
-        }
-    };
-
-    template <typename T, size_t N>
-    struct hash<std::array<T, N>>
-    {
-        size_t operator()(std::array<T, N> const& arr) const
-        {
-            size_t h = 0;
-            for (size_t i = 0; i < N; ++i)
-            {
-                h ^= std::hash<T>{}(arr[i]) + 0x9e3779b9 + (h << 6) + (h >> 2);
-            }
-            return h;
         }
     };
 }
