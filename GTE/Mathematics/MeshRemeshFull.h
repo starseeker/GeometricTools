@@ -40,6 +40,7 @@
 #include <GTE/Mathematics/ETManifoldMesh.h>
 #include <GTE/Mathematics/NearestNeighborQuery.h>
 #include <GTE/Mathematics/RestrictedVoronoiDiagram.h>
+#include <GTE/Mathematics/CVTOptimizer.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -60,6 +61,7 @@ namespace gte
             Real targetEdgeLength;          // Target edge length (0 = auto from vertex count)
             size_t targetVertexCount;       // Target number of vertices (0 = use edge length)
             size_t lloydIterations;         // Number of Lloyd relaxation iterations
+            size_t newtonIterations;        // Number of Newton optimization iterations (0 = disabled)
             size_t smoothIterations;        // Number of smoothing iterations per Lloyd iteration
             Real smoothingFactor;           // Smoothing factor (0.0 = none, 1.0 = full)
             Real minEdgeLength;             // Minimum edge length (for collapse)
@@ -68,11 +70,13 @@ namespace gte
             bool projectToSurface;          // Project points back to original surface
             bool useDelaunayVoronoi;        // Use Delaunay/Voronoi for Lloyd (vs simple smoothing)
             bool useRVD;                    // Use exact RVD for Lloyd (true CVT, slower but 100% quality)
+            bool useNewtonOptimizer;        // Use Newton/BFGS optimizer after Lloyd (even faster convergence)
             
             Parameters()
                 : targetEdgeLength(static_cast<Real>(0))
                 , targetVertexCount(0)
                 , lloydIterations(5)
+                , newtonIterations(5)
                 , smoothIterations(3)
                 , smoothingFactor(static_cast<Real>(0.5))
                 , minEdgeLength(static_cast<Real>(0))
@@ -81,6 +85,7 @@ namespace gte
                 , projectToSurface(true)
                 , useDelaunayVoronoi(false) // Disabled by default as it's expensive
                 , useRVD(true)              // Use exact RVD for true CVT quality
+                , useNewtonOptimizer(false) // Newton optimizer (advanced, use after Lloyd)
             {
             }
         };
@@ -151,6 +156,12 @@ namespace gte
             if (params.lloydIterations > 0)
             {
                 LloydRelaxation(vertices, triangles, originalVertices, originalTriangles, params);
+            }
+
+            // Newton/BFGS optimization for even faster CVT convergence (optional, advanced)
+            if (params.useNewtonOptimizer && params.newtonIterations > 0 && params.useRVD)
+            {
+                NewtonOptimization(vertices, triangles, originalVertices, originalTriangles, params);
             }
 
             return true;
@@ -652,6 +663,40 @@ namespace gte
                                   params.smoothingFactor, boundaryVertices);
 
                 // Project back to original surface if requested
+                if (params.projectToSurface)
+                {
+                    ProjectToSurface(vertices, originalVertices, originalTriangles, boundaryVertices);
+                }
+            }
+        }
+
+        // Newton/BFGS optimization for CVT (faster convergence than Lloyd)
+        static void NewtonOptimization(
+            std::vector<Vector3<Real>>& vertices,
+            std::vector<std::array<int32_t, 3>> const& triangles,
+            std::vector<Vector3<Real>> const& originalVertices,
+            std::vector<std::array<int32_t, 3>> const& originalTriangles,
+            Parameters const& params)
+        {
+            // Prepare sites (use current vertices as starting point)
+            std::vector<Vector3<Real>> sites = vertices;
+
+            // Configure optimizer
+            typename CVTOptimizer<Real>::Parameters optParams;
+            optParams.maxNewtonIterations = params.newtonIterations;
+            optParams.verbose = false;  // Set to true for debugging
+
+            // Run Newton optimization
+            auto result = CVTOptimizer<Real>::Optimize(
+                vertices, triangles, sites, optParams);
+
+            // Update vertices with optimized sites
+            if (result.converged || result.iterations > 0)
+            {
+                vertices = sites;
+
+                // Project back to original surface if requested
+                std::set<int32_t> boundaryVertices;  // No boundary preservation in Newton
                 if (params.projectToSurface)
                 {
                     ProjectToSurface(vertices, originalVertices, originalTriangles, boundaryVertices);

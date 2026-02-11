@@ -37,3 +37,7 @@ remesh_rvd.obj
 test_co3ne_rvd
 co3ne_no_rvd.obj
 co3ne_with_rvd.obj
+test_newton_optimizer
+remesh_lloyd_only.obj
+remesh_lloyd_newton.obj
+remesh_newton_only.obj
