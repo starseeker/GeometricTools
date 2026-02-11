@@ -12,7 +12,7 @@ TEST_DIR = tests
 TARGETS = test_mesh_repair test_remesh test_co3ne test_full_algorithms test_rvd \
           demo_rvd_cvt test_remesh_comparison test_co3ne_rvd test_newton_optimizer \
           test_rvd_performance stress_test test_threadpool test_parallel_rvd \
-          test_enhanced_manifold test_anisotropic_remesh test_delaunay6
+          test_enhanced_manifold test_anisotropic_remesh test_delaunay6 test_cvt6d
 
 all: $(TARGETS)
 
@@ -67,6 +67,10 @@ test_anisotropic_remesh: $(TEST_DIR)/test_anisotropic_remesh.cpp GTE/Mathematics
 # 6D Delaunay test
 test_delaunay6: $(TEST_DIR)/test_delaunay6.cpp GTE/Mathematics/Delaunay6.h GTE/Mathematics/MeshAnisotropy.h
 	$(CXX) $(CXXFLAGS) -o test_delaunay6 $(TEST_DIR)/test_delaunay6.cpp $(LDFLAGS)
+
+# 6D CVT test
+test_cvt6d: $(TEST_DIR)/test_cvt6d.cpp GTE/Mathematics/CVT6D.h GTE/Mathematics/MeshAnisotropy.h
+	$(CXX) $(CXXFLAGS) -o test_cvt6d $(TEST_DIR)/test_cvt6d.cpp $(LDFLAGS)
 
 # Demonstration programs
 demo_rvd_cvt: $(TEST_DIR)/demo_rvd_cvt.cpp
