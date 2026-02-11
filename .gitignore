@@ -28,3 +28,4 @@ test_co3ne_output.obj
 .DS_Store
 test_full_algorithms
 test_co3ne_debug
+test_rvd
