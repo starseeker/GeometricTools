@@ -41,6 +41,7 @@
 #include <GTE/Mathematics/NearestNeighborQuery.h>
 #include <GTE/Mathematics/RestrictedVoronoiDiagram.h>
 #include <GTE/Mathematics/CVTOptimizer.h>
+#include <GTE/Mathematics/MeshAnisotropy.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -71,6 +72,9 @@ namespace gte
             bool useDelaunayVoronoi;        // Use Delaunay/Voronoi for Lloyd (vs simple smoothing)
             bool useRVD;                    // Use exact RVD for Lloyd (true CVT, slower but 100% quality)
             bool useNewtonOptimizer;        // Use Newton/BFGS optimizer after Lloyd (even faster convergence)
+            bool useAnisotropic;            // Use anisotropic remeshing (6D metric with normals)
+            Real anisotropyScale;           // Anisotropy scale factor (0.02-0.1 typical, 0 = isotropic)
+            bool curvatureAdaptive;         // Use curvature-adaptive anisotropy scaling
             
             Parameters()
                 : targetEdgeLength(static_cast<Real>(0))
@@ -86,6 +90,9 @@ namespace gte
                 , useDelaunayVoronoi(false) // Disabled by default as it's expensive
                 , useRVD(true)              // Use exact RVD for true CVT quality
                 , useNewtonOptimizer(false) // Newton optimizer (advanced, use after Lloyd)
+                , useAnisotropic(false)     // Anisotropic mode disabled by default
+                , anisotropyScale(static_cast<Real>(0.04)) // Typical value for anisotropy
+                , curvatureAdaptive(false)  // Simple uniform anisotropy by default
             {
             }
         };

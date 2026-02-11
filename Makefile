@@ -12,7 +12,7 @@ TEST_DIR = tests
 TARGETS = test_mesh_repair test_remesh test_co3ne test_full_algorithms test_rvd \
           demo_rvd_cvt test_remesh_comparison test_co3ne_rvd test_newton_optimizer \
           test_rvd_performance stress_test test_threadpool test_parallel_rvd \
-          test_enhanced_manifold
+          test_enhanced_manifold test_anisotropic_remesh
 
 all: $(TARGETS)
 
@@ -59,6 +59,10 @@ test_parallel_rvd: $(TEST_DIR)/test_parallel_rvd.cpp GTE/Mathematics/RestrictedV
 
 test_enhanced_manifold: $(TEST_DIR)/test_enhanced_manifold.cpp
 	$(CXX) $(CXXFLAGS) $(PTHREAD) -o test_enhanced_manifold $(TEST_DIR)/test_enhanced_manifold.cpp $(LDFLAGS)
+
+# Anisotropic remeshing test
+test_anisotropic_remesh: $(TEST_DIR)/test_anisotropic_remesh.cpp GTE/Mathematics/MeshAnisotropy.h GTE/Mathematics/MeshRemeshFull.h
+	$(CXX) $(CXXFLAGS) -o test_anisotropic_remesh $(TEST_DIR)/test_anisotropic_remesh.cpp $(LDFLAGS)
 
 # Demonstration programs
 demo_rvd_cvt: $(TEST_DIR)/demo_rvd_cvt.cpp
