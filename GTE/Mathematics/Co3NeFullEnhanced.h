@@ -38,14 +38,25 @@ namespace gte
             // Note: strictMode is inherited from Parameters
             size_t maxManifoldIterations; // Max iterations for incremental insertion
             
+            // NEW: Automatic manifold closure parameters
+            bool guaranteeManifold;             // Enable automatic hole filling (default: true)
+            size_t maxRefinementIterations;     // Max hole-filling iterations (default: 5)
+            Real refinementRadiusMultiplier;    // Radius increase per iteration (default: 1.5)
+            Real minTriangleQuality;            // Minimum quality for fill triangles (default: 0.1)
+            
             // To set explicit parameters (like Geogram), use:
             //   params.searchRadius = 2.5;  // 0 = automatic (default)
             //   params.kNeighbors = 15;     // 0 = automatic (default)
+            // When searchRadius > 0, guaranteeManifold is ignored (user controls behavior)
             
             EnhancedParameters() 
                 : Parameters()
                 , useEnhancedManifold(true)
                 , maxManifoldIterations(50)
+                , guaranteeManifold(true)
+                , maxRefinementIterations(5)
+                , refinementRadiusMultiplier(static_cast<Real>(1.5))
+                , minTriangleQuality(static_cast<Real>(0.1))
             {
                 // Can override inherited defaults here if needed
             }
@@ -105,6 +116,14 @@ namespace gte
                 return false;
             }
 
+            // Step 4b: Automatic manifold closure (NEW)
+            if (params.guaranteeManifold && params.searchRadius == static_cast<Real>(0))
+            {
+                // Only in automatic mode (not when user specifies explicit radius)
+                Real initialRadius = Co3NeFull<Real>::ComputeAutomaticSearchRadius(points);
+                RefineManifold(points, normals, outTriangles, initialRadius, params);
+            }
+
             // Step 5: Return vertices (same as input points)
             outVertices = points;
 
@@ -116,6 +135,274 @@ namespace gte
 
             return true;
         }
+        
+    private:
+        // ===== AUTOMATIC MANIFOLD CLOSURE FUNCTIONS =====
+        
+        struct BoundaryInfo
+        {
+            std::vector<std::pair<int32_t, int32_t>> boundaryEdges;
+            std::set<int32_t> boundaryVertices;
+        };
+        
+        // Find boundary edges in a triangle mesh
+        static BoundaryInfo FindBoundaryEdges(
+            std::vector<std::array<int32_t, 3>> const& triangles)
+        {
+            BoundaryInfo info;
+            std::map<std::pair<int32_t, int32_t>, int> edgeCount;
+            
+            // Count how many triangles use each edge
+            for (auto const& tri : triangles)
+            {
+                for (int i = 0; i < 3; ++i)
+                {
+                    int32_t v0 = tri[i];
+                    int32_t v1 = tri[(i + 1) % 3];
+                    auto edge = std::make_pair(std::min(v0, v1), std::max(v0, v1));
+                    edgeCount[edge]++;
+                }
+            }
+            
+            // Find edges with only 1 triangle (boundary edges)
+            for (auto const& [edge, count] : edgeCount)
+            {
+                if (count == 1)
+                {
+                    info.boundaryEdges.push_back(edge);
+                    info.boundaryVertices.insert(edge.first);
+                    info.boundaryVertices.insert(edge.second);
+                }
+            }
+            
+            return info;
+        }
+        
+        // Check if adding a triangle would create a non-manifold edge
+        static bool WouldCreateNonManifoldEdge(
+            std::array<int32_t, 3> const& newTri,
+            std::vector<std::array<int32_t, 3>> const& existingTriangles)
+        {
+            std::map<std::pair<int32_t, int32_t>, int> edgeCount;
+            
+            // Count edges in existing triangles
+            for (auto const& tri : existingTriangles)
+            {
+                for (int i = 0; i < 3; ++i)
+                {
+                    auto edge = std::make_pair(
+                        std::min(tri[i], tri[(i + 1) % 3]),
+                        std::max(tri[i], tri[(i + 1) % 3]));
+                    edgeCount[edge]++;
+                }
+            }
+            
+            // Check if new triangle's edges would exceed limit
+            for (int i = 0; i < 3; ++i)
+            {
+                auto edge = std::make_pair(
+                    std::min(newTri[i], newTri[(i + 1) % 3]),
+                    std::max(newTri[i], newTri[(i + 1) % 3]));
+                
+                if (edgeCount[edge] >= 2)
+                {
+                    return true;  // Would have > 2 triangles on this edge
+                }
+            }
+            
+            return false;
+        }
+        
+        // Check if triangle shares boundary edges (reduces hole size)
+        static bool ReducesBoundaryCount(
+            std::array<int32_t, 3> const& tri,
+            BoundaryInfo const& boundaries)
+        {
+            int sharedBoundaryEdges = 0;
+            
+            for (int i = 0; i < 3; ++i)
+            {
+                auto edge = std::make_pair(
+                    std::min(tri[i], tri[(i + 1) % 3]),
+                    std::max(tri[i], tri[(i + 1) % 3]));
+                
+                if (std::find(boundaries.boundaryEdges.begin(),
+                             boundaries.boundaryEdges.end(),
+                             edge) != boundaries.boundaryEdges.end())
+                {
+                    sharedBoundaryEdges++;
+                }
+            }
+            
+            // Triangle reduces boundary if it closes a gap (shares >= 2 boundary edges)
+            return sharedBoundaryEdges >= 2;
+        }
+        
+        // Validate triangle quality
+        static bool IsValidFillTriangle(
+            std::array<int32_t, 3> const& tri,
+            std::vector<Vector3Type> const& points,
+            std::vector<Vector3Type> const& normals,
+            EnhancedParameters const& params)
+        {
+            Vector3Type const& p0 = points[tri[0]];
+            Vector3Type const& p1 = points[tri[1]];
+            Vector3Type const& p2 = points[tri[2]];
+            
+            // Check for degenerate triangle
+            Vector3Type e0 = p1 - p0;
+            Vector3Type e1 = p2 - p1;
+            Vector3Type e2 = p0 - p2;
+            
+            Real a = Length(e0);
+            Real b = Length(e1);
+            Real c = Length(e2);
+            
+            if (a < static_cast<Real>(1e-10) || 
+                b < static_cast<Real>(1e-10) || 
+                c < static_cast<Real>(1e-10))
+            {
+                return false;  // Degenerate
+            }
+            
+            // Check triangle quality (inradius/circumradius ratio)
+            Real s = (a + b + c) * static_cast<Real>(0.5);
+            Real area = std::sqrt(s * (s - a) * (s - b) * (s - c));
+            if (area < static_cast<Real>(1e-10))
+            {
+                return false;  // Degenerate
+            }
+            
+            Real inradius = area / s;
+            Real circumradius = (a * b * c) / (static_cast<Real>(4) * area);
+            Real quality = inradius / circumradius;
+            
+            if (quality < params.minTriangleQuality)
+            {
+                return false;  // Too poor quality
+            }
+            
+            // Check normal consistency
+            Vector3Type triNormal = Cross(e0, -e2);
+            Normalize(triNormal);
+            Vector3Type avgNormal = normals[tri[0]] + normals[tri[1]] + normals[tri[2]];
+            Normalize(avgNormal);
+            
+            if (Dot(triNormal, avgNormal) < static_cast<Real>(0))
+            {
+                return false;  // Wrong orientation
+            }
+            
+            return true;
+        }
+        
+        // Generate fill triangle candidates
+        static std::vector<std::array<int32_t, 3>> GenerateFillTriangles(
+            std::vector<Vector3Type> const& points,
+            std::vector<Vector3Type> const& normals,
+            BoundaryInfo const& boundaries,
+            Real searchRadius,
+            EnhancedParameters const& params)
+        {
+            std::vector<std::array<int32_t, 3>> candidates;
+            
+            // For each boundary edge, try to find a third vertex to close it
+            for (auto const& [v0, v1] : boundaries.boundaryEdges)
+            {
+                Vector3Type const& p0 = points[v0];
+                Vector3Type const& p1 = points[v1];
+                Vector3Type edgeCenter = (p0 + p1) * static_cast<Real>(0.5);
+                
+                // Search for potential third vertices
+                for (int32_t v2 : boundaries.boundaryVertices)
+                {
+                    if (v2 == v0 || v2 == v1) continue;
+                    
+                    Vector3Type const& p2 = points[v2];
+                    
+                    // Check if within search radius
+                    Real dist = Length(p2 - edgeCenter);
+                    if (dist > searchRadius) continue;
+                    
+                    // Try both orientations
+                    std::array<int32_t, 3> tri1 = {v0, v1, v2};
+                    std::array<int32_t, 3> tri2 = {v0, v2, v1};
+                    
+                    if (IsValidFillTriangle(tri1, points, normals, params))
+                    {
+                        candidates.push_back(tri1);
+                    }
+                    else if (IsValidFillTriangle(tri2, points, normals, params))
+                    {
+                        candidates.push_back(tri2);
+                    }
+                }
+            }
+            
+            return candidates;
+        }
+        
+        // Main refinement algorithm for automatic manifold closure
+        static bool RefineManifold(
+            std::vector<Vector3Type> const& points,
+            std::vector<Vector3Type> const& normals,
+            std::vector<std::array<int32_t, 3>>& inoutTriangles,
+            Real initialRadius,
+            EnhancedParameters const& params)
+        {
+            Real currentRadius = initialRadius;
+            
+            for (size_t iter = 0; iter < params.maxRefinementIterations; ++iter)
+            {
+                // 1. Find boundary edges
+                BoundaryInfo boundaries = FindBoundaryEdges(inoutTriangles);
+                
+                if (boundaries.boundaryEdges.empty())
+                {
+                    return true;  // Success - manifold achieved!
+                }
+                
+                // 2. Increase search radius for this iteration
+                currentRadius *= params.refinementRadiusMultiplier;
+                
+                // 3. Generate fill triangle candidates
+                auto candidates = GenerateFillTriangles(
+                    points, normals, boundaries, currentRadius, params);
+                
+                if (candidates.empty())
+                {
+                    continue;  // Try next iteration with larger radius
+                }
+                
+                // 4. Add valid triangles that close holes
+                size_t addedCount = 0;
+                for (auto const& tri : candidates)
+                {
+                    // Check if would create non-manifold edge
+                    if (WouldCreateNonManifoldEdge(tri, inoutTriangles))
+                        continue;
+                    
+                    // Check if reduces boundary count
+                    if (ReducesBoundaryCount(tri, boundaries))
+                    {
+                        inoutTriangles.push_back(tri);
+                        addedCount++;
+                    }
+                }
+                
+                if (addedCount == 0)
+                {
+                    // No progress this iteration
+                    continue;
+                }
+            }
+            
+            // Return whether we achieved manifold
+            BoundaryInfo final = FindBoundaryEdges(inoutTriangles);
+            return final.boundaryEdges.empty();
+        }
+        
+        // ===== END AUTOMATIC MANIFOLD CLOSURE FUNCTIONS =====
         
     private:
         // Enhanced manifold extractor (based on Geogram's Co3NeManifoldExtraction)

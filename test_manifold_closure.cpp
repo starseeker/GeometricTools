@@ -34,7 +34,6 @@ std::vector<Vector3<Real>> CreateSpherePoints(size_t n, Real radius = static_cas
 }
 
 // Count boundary edges
-template <typename Real>
 std::pair<int, int> CountBoundaryEdges(std::vector<std::array<int32_t, 3>> const& triangles)
 {
     std::map<std::pair<int32_t, int32_t>, int> edgeCount;
