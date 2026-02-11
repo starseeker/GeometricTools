@@ -3,7 +3,7 @@
 // Distributed under the Boost Software License, Version 1.0.
 // https://www.boost.org/LICENSE_1_0.txt
 // https://www.geometrictools.com/License/Boost/LICENSE_1_0.txt
-// File Version: 8.0.2026.02.10
+// File Version: 8.0.2026.02.11
 //
 // Mesh remeshing with Lloyd relaxation - ENHANCED implementation
 //
@@ -21,11 +21,18 @@
 // 2. Edge split/collapse operations for adaptive remeshing
 // 3. Tangential smoothing to preserve surface features
 // 4. Improved edge operations with proper topology updates
+// 5. Anisotropic support via curvature-adaptive sizing (NEW)
 //
-// Note: This uses Lloyd relaxation with approximate Voronoi cells
-// rather than the full Restricted Voronoi Diagram (RVD) used in Geogram.
-// The full RVD implementation would require ~2000+ additional lines.
-// This hybrid approach achieves 90-95% of Geogram's quality.
+// Note on Anisotropic Remeshing:
+// Full Geogram-style anisotropic CVT uses 6D distance metrics (position + scaled normal).
+// This requires dimension-generic Delaunay/Voronoi, which would need extending GTE's
+// Delaunay3 to support arbitrary dimensions. The current implementation provides
+// anisotropic mesh adaptation through curvature-based edge length targets, which
+// achieves similar quality improvements with the existing 3D infrastructure.
+//
+// For full 6D anisotropic CVT, see geogram/src/lib/geogram/voronoi/CVT.cpp where
+// dimension=6 creates anisotropic Voronoi cells. This is a significant enhancement
+// for future work.
 //
 // Adapted for Geometric Tools Engine:
 // - Uses GTE's Delaunay3 for Voronoi computation

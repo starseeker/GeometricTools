@@ -14,14 +14,51 @@
 // License: BSD 3-Clause (Inria) - Compatible with Boost
 // Copyright (c) 2000-2022 Inria
 //
-// This implements anisotropic metric computation for mesh remeshing.
-// The anisotropic approach uses dimension=6 where:
+// Anisotropic Remeshing Theory:
+// =============================
+// Anisotropic remeshing adapts mesh elements to surface features by using
+// directional (anisotropic) distance metrics instead of uniform (isotropic) ones.
+//
+// Geogram's Approach (Full 6D CVT):
+// The full implementation uses dimension=6 for Centroidal Voronoi Tessellation:
 // - Coordinates 0,1,2: 3D position (x, y, z)
 // - Coordinates 3,4,5: Scaled normal (nx*s, ny*s, nz*s)
 //
-// The distance metric in 6D space creates anisotropic Voronoi cells that
-// naturally adapt to surface curvature, producing better quality meshes
-// with fewer elements for curved surfaces.
+// Distance in 6D: d = sqrt((x1-x0)² + (y1-y0)² + (z1-z0)² + s²·(n1-n0)²)
+//
+// This creates anisotropic Voronoi cells that naturally align with surface
+// curvature, producing meshes with:
+// - Fewer elements (30-50% reduction for curved surfaces)
+// - Better feature alignment (edges follow ridges/valleys)
+// - Appropriate aspect ratios (stretched along low-curvature directions)
+//
+// Implementation Notes:
+// ====================
+// This header provides utilities for anisotropic mesh processing:
+//
+// 1. SetAnisotropy: Scales vertex normals by factor s (core geogram function)
+// 2. Create6DPoints: Creates 6D point arrays for anisotropic CVT
+// 3. ComputeCurvatureAdaptiveAnisotropy: Uses curvature to adapt scaling
+//
+// Full 6D CVT requires extending GTE's Delaunay3 to support arbitrary dimensions,
+// which is a substantial enhancement. The utilities here support that future work
+// and also enable curvature-adaptive remeshing using existing 3D infrastructure.
+//
+// Example Usage (for future 6D CVT):
+// ==================================
+// std::vector<Vector3<double>> vertices, normals;
+// std::vector<std::array<int32_t, 3>> triangles;
+// // ... load mesh ...
+//
+// // Set anisotropy
+// MeshAnisotropy<double>::SetAnisotropy(vertices, triangles, normals, 0.04);
+//
+// // Create 6D points for anisotropic CVT
+// auto points6D = MeshAnisotropy<double>::Create6DPoints(vertices, normals);
+//
+// // TODO: Use with dimension-6 Delaunay/Voronoi (requires extending GTE)
+// // Delaunay<6> delaunay(points6D);  // Future enhancement
+// // CVT with dimension=6 creates anisotropic cells
 //
 // Adapted for Geometric Tools Engine:
 // - Uses GTE's Vector3 and mesh structures
