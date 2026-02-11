@@ -1,43 +1,49 @@
-# Build artifacts
+# Build artifacts (test executables in root)
 test_mesh_repair
 test_remesh
 test_co3ne
+test_full_algorithms
+test_rvd
+demo_rvd_cvt
+test_remesh_comparison
+test_co3ne_rvd
+test_newton_optimizer
+test_rvd_performance
+stress_test
+test_threadpool
+test_parallel_rvd
+test_enhanced_manifold
+test_co3ne_debug
+test_co3ne_simple
+test_debug
+test_debug_50points
+test_with_validation
+test_no_repair
+test_manifold_closure
+test_manifold_test
+test_timeout_closure
+test_closure_diagnostic
+test_euler_investigation
+compare_with_geogram
+check_projection
 *.o
-*.obj.bak
 
-# Test outputs
-test_small.obj
-test_medium.obj
-test_tiny.obj
-test_output.obj
-test_output_ec.obj
-test_output_cdt.obj
-test_tiny_ec.obj
-test_tiny_cdt.obj
-test_validated.obj
-test_remesh_output.obj
-test_co3ne_output.obj
-*_repaired.obj
-*_ec.obj
-*_cdt.obj
-*_output.obj
+# Test output files in tests/data/
+tests/data/*_repaired.obj
+tests/data/*_ec.obj
+tests/data/*_cdt.obj
+tests/data/*_output.obj
+tests/data/test_output*.obj
+tests/data/test_small.obj
+tests/data/test_medium.obj
+tests/data/cvt_rvd_sites.obj
+tests/data/remesh_*.obj
+tests/data/co3ne_*.obj
+
+# Backup files
+*.obj.bak
 
 # Editor artifacts
 *.swp
 *~
 .DS_Store
-test_full_algorithms
-test_co3ne_debug
-test_rvd
-demo_rvd_cvt
-cvt_rvd_sites.obj
-test_remesh_comparison
-remesh_approximate.obj
-remesh_rvd.obj
-test_co3ne_rvd
-co3ne_no_rvd.obj
-co3ne_with_rvd.obj
-test_newton_optimizer
-remesh_lloyd_only.obj
-remesh_lloyd_newton.obj
-remesh_newton_only.obj
