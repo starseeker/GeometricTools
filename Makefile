@@ -13,7 +13,7 @@ TARGETS = test_mesh_repair test_remesh test_co3ne test_full_algorithms test_rvd 
           demo_rvd_cvt test_remesh_comparison test_co3ne_rvd test_newton_optimizer \
           test_rvd_performance stress_test test_threadpool test_parallel_rvd \
           test_enhanced_manifold test_anisotropic_remesh test_delaunay6 test_cvt6d \
-          test_delaunay_n test_delaunay_nn test_rvd_n
+          test_delaunay_n test_delaunay_nn test_rvd_n test_cvt_n
 
 all: $(TARGETS)
 
@@ -84,6 +84,10 @@ test_delaunay_nn: $(TEST_DIR)/test_delaunay_nn.cpp GTE/Mathematics/DelaunayNN.h 
 # RestrictedVoronoiDiagramN test
 test_rvd_n: $(TEST_DIR)/test_rvd_n.cpp GTE/Mathematics/RestrictedVoronoiDiagramN.h GTE/Mathematics/DelaunayNN.h GTE/Mathematics/MeshAnisotropy.h
 	$(CXX) $(CXXFLAGS) -o test_rvd_n $(TEST_DIR)/test_rvd_n.cpp $(LDFLAGS)
+
+# CVTN (N-dimensional CVT) test
+test_cvt_n: $(TEST_DIR)/test_cvt_n.cpp GTE/Mathematics/CVTN.h GTE/Mathematics/RestrictedVoronoiDiagramN.h GTE/Mathematics/DelaunayNN.h GTE/Mathematics/MeshAnisotropy.h
+	$(CXX) $(CXXFLAGS) -o test_cvt_n $(TEST_DIR)/test_cvt_n.cpp $(LDFLAGS)
 
 # Demonstration programs
 demo_rvd_cvt: $(TEST_DIR)/demo_rvd_cvt.cpp

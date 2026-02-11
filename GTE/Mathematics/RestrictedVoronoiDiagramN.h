@@ -146,9 +146,18 @@ namespace gte
                     // Compute triangle area
                     Real area = ComputeTriangleArea(v0, v1, v2);
                     
-                    // Accumulate weighted sum
-                    // For centroid, we integrate the site coordinates weighted by area
-                    for (size_t d = 0; d < N; ++d)
+                    // Accumulate weighted position
+                    // The centroid is the area-weighted average of triangle centroids
+                    // in the N-dimensional space
+                    
+                    // For first 3 dimensions, use 3D triangle centroid
+                    weightedSum[nearestSite][0] += triCentroid[0] * area;
+                    weightedSum[nearestSite][1] += triCentroid[1] * area;
+                    weightedSum[nearestSite][2] += triCentroid[2] * area;
+                    
+                    // For dimensions > 3, use site's own values
+                    // (these represent anisotropic metric, not spatial coordinates)
+                    for (size_t d = 3; d < N; ++d)
                     {
                         weightedSum[nearestSite][d] += mSites[nearestSite][d] * area;
                     }
