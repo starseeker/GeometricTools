@@ -56,3 +56,9 @@ g++ -std=c++17 -I. -pthread -O2 -o test_threadpool test_threadpool.cpp
 test_parallel_rvd: test_parallel_rvd.cpp GTE/Mathematics/RestrictedVoronoiDiagramOptimized.h GTE/Mathematics/ThreadPool.h
 g++ -std=c++17 -I. -pthread -O2 -o test_parallel_rvd test_parallel_rvd.cpp
 
+g++ -std=c++17 -O2 -IGTE -pthread test_enhanced_manifold.cpp -o test_enhanced_manifold
+
+
+
+test_enhanced_manifold: test_enhanced_manifold.cpp
+$(CXX) $(CXXFLAGS) -pthread -o test_enhanced_manifold test_enhanced_manifold.cpp $(LDFLAGS)

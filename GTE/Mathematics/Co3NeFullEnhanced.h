@@ -28,7 +28,7 @@ namespace gte
     class Co3NeFullEnhanced : public Co3NeFull<Real>
     {
     public:
-        using Vector3 = typename Co3NeFull<Real>::Vector3<Real>;
+        using Vector3Type = Vector3<Real>;
         using Parameters = typename Co3NeFull<Real>::Parameters;
         
         // Enhanced parameters
@@ -49,8 +49,8 @@ namespace gte
         
         // Main reconstruction with enhanced manifold
         static bool Reconstruct(
-            std::vector<Vector3<Real>> const& points,
-            std::vector<Vector3<Real>>& outVertices,
+            std::vector<Vector3Type> const& points,
+            std::vector<Vector3Type>& outVertices,
             std::vector<std::array<int32_t, 3>>& outTriangles,
             EnhancedParameters const& params = EnhancedParameters())
         {
@@ -76,8 +76,8 @@ namespace gte
             static constexpr int32_t NO_CNX = -1;
             
             ManifoldExtractor(
-                std::vector<Vector3<Real>> const& points,
-                std::vector<Vector3<Real>> const& normals,
+                std::vector<Vector3Type> const& points,
+                std::vector<Vector3Type> const& normals,
                 EnhancedParameters const& params)
                 : points_(points)
                 , normals_(normals)
@@ -108,8 +108,8 @@ namespace gte
             
         private:
             // Core data structures
-            std::vector<Vector3<Real>> const& points_;
-            std::vector<Vector3<Real>> const& normals_;
+            std::vector<Vector3Type> const& points_;
+            std::vector<Vector3Type> const& normals_;
             EnhancedParameters const& params_;
             
             // Current mesh under construction
@@ -213,7 +213,7 @@ namespace gte
             }
             
             // Rollback last triangle
-            void Rollback Triangle()
+            void RollbackTriangle()
             {
                 if (mesh_.empty())
                 {
