@@ -131,7 +131,7 @@ namespace gte
             return !outTriangles.empty();
         }
 
-    private:
+    protected:
         static constexpr int32_t NO_VERTEX = -1;
         static constexpr int32_t NO_CORNER = -1;
         static constexpr int32_t NO_TRIANGLE = -1;

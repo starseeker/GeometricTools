@@ -60,10 +60,57 @@ namespace gte
                 return Co3NeFull<Real>::Reconstruct(points, outVertices, outTriangles, params);
             }
             
-            // Use enhanced manifold extraction
-            // TODO: Implement full enhanced algorithm
-            // For now, delegate to base class
-            return Co3NeFull<Real>::Reconstruct(points, outVertices, outTriangles, params);
+            // Enhanced reconstruction pipeline
+            if (points.empty())
+            {
+                return false;
+            }
+
+            // Step 1: Compute normals using PCA (from base class)
+            std::vector<Vector3Type> normals;
+            if (!Co3NeFull<Real>::ComputeNormals(points, normals, params))
+            {
+                return false;
+            }
+
+            // Step 2: Orient normals consistently if requested (from base class)
+            if (params.orientNormals)
+            {
+                Co3NeFull<Real>::OrientNormalsConsistently(points, normals, params);
+            }
+
+            // Step 3: Generate candidate triangles using co-cone (from base class)
+            std::vector<std::array<int32_t, 3>> candidateTriangles;
+            Co3NeFull<Real>::GenerateTriangles(points, normals, candidateTriangles, params);
+
+            if (candidateTriangles.empty())
+            {
+                return false;
+            }
+
+            // Step 4: Extract manifold using ENHANCED algorithm
+            ManifoldExtractor extractor(points, normals, params);
+            if (!extractor.Extract(candidateTriangles, outTriangles))
+            {
+                // Fall back to base class if enhanced fails
+                Co3NeFull<Real>::ExtractManifold(points, normals, candidateTriangles, outTriangles, params);
+            }
+
+            if (outTriangles.empty())
+            {
+                return false;
+            }
+
+            // Step 5: Return vertices (same as input points)
+            outVertices = points;
+
+            // Step 6: Optional RVD smoothing (from base class)
+            if (params.smoothWithRVD && !outTriangles.empty())
+            {
+                Co3NeFull<Real>::SmoothWithRVD(outVertices, outTriangles, params);
+            }
+
+            return true;
         }
         
     private:
@@ -292,10 +339,10 @@ namespace gte
                     return false;  // Isolated triangle
                 }
                 
-                // If only one neighbor and not in strict mode, reject
-                if (nb_neighbors == 1 && !params_.strictMode)
+                // In strict mode, require at least 2 neighbors
+                if (params_.strictMode && nb_neighbors == 1)
                 {
-                    return false;
+                    return false;  // Strict mode rejects boundary edges
                 }
                 
                 // Connect adjacent corners
