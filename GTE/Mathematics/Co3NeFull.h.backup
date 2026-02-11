@@ -39,7 +39,6 @@
 #include <GTE/Mathematics/SymmetricEigensolver3x3.h>
 #include <GTE/Mathematics/NearestNeighborQuery.h>
 #include <GTE/Mathematics/ETManifoldMesh.h>
-#include <GTE/Mathematics/RestrictedVoronoiDiagram.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -65,8 +64,6 @@ namespace gte
             bool orientNormals;             // Orient normals consistently via propagation
             bool strictMode;                // Strict manifold extraction (more conservative)
             bool removeIsolatedTriangles;   // Remove isolated triangles
-            bool smoothWithRVD;             // Post-process with RVD-based smoothing (improves quality)
-            size_t rvdSmoothIterations;     // Number of RVD smoothing iterations
             
             Parameters()
                 : kNeighbors(20)
@@ -76,8 +73,6 @@ namespace gte
                 , orientNormals(true)
                 , strictMode(false)
                 , removeIsolatedTriangles(true)
-                , smoothWithRVD(true)       // Enable RVD smoothing for better quality
-                , rvdSmoothIterations(3)    // 3 iterations usually sufficient
             {
             }
         };
@@ -121,12 +116,6 @@ namespace gte
 
             // Copy vertices
             outVertices = points;
-
-            // Step 5: Optional RVD-based smoothing for improved quality
-            if (params.smoothWithRVD && params.rvdSmoothIterations > 0 && !outTriangles.empty())
-            {
-                SmoothWithRVD(outVertices, outTriangles, params);
-            }
 
             return !outTriangles.empty();
         }
@@ -577,47 +566,6 @@ namespace gte
             Vector3<Real> normal = Cross(e1, e2);
             Normalize(normal);
             return normal;
-        }
-
-        // RVD-based smoothing for improved vertex distribution and triangle quality
-        static void SmoothWithRVD(
-            std::vector<Vector3<Real>>& vertices,
-            std::vector<std::array<int32_t, 3>> const& triangles,
-            Parameters const& params)
-        {
-            if (vertices.empty() || triangles.empty())
-            {
-                return;
-            }
-
-            // Use RVD to optimize vertex positions
-            RestrictedVoronoiDiagram<Real> rvd;
-
-            for (size_t iter = 0; iter < params.rvdSmoothIterations; ++iter)
-            {
-                // Initialize RVD with current mesh
-                if (!rvd.Initialize(vertices, triangles, vertices))
-                {
-                    // RVD failed, skip smoothing
-                    return;
-                }
-
-                // Compute optimal positions (Voronoi centroids)
-                std::vector<Vector3<Real>> centroids;
-                if (!rvd.ComputeCentroids(centroids))
-                {
-                    // Centroid computation failed, skip smoothing
-                    return;
-                }
-
-                // Move vertices toward centroids (use damping for stability)
-                Real dampingFactor = static_cast<Real>(0.5);  // Move halfway to centroid
-                for (size_t i = 0; i < vertices.size(); ++i)
-                {
-                    Vector3<Real> displacement = centroids[i] - vertices[i];
-                    vertices[i] += dampingFactor * displacement;
-                }
-            }
         }
 
         static Real ComputeAutomaticSearchRadius(
