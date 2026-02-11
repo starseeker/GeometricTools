@@ -5,7 +5,7 @@ CXXFLAGS = -std=c++17 -O2 -Wall -I. -IGTE
 LDFLAGS = 
 
 # Targets
-TARGETS = test_mesh_repair test_remesh test_co3ne test_full_algorithms test_rvd
+TARGETS = test_mesh_repair test_remesh test_co3ne test_full_algorithms test_rvd demo_rvd_cvt
 
 all: $(TARGETS)
 
@@ -23,6 +23,9 @@ test_full_algorithms: test_full_algorithms.cpp
 
 test_rvd: test_rvd.cpp
 	$(CXX) $(CXXFLAGS) -o test_rvd test_rvd.cpp $(LDFLAGS)
+
+demo_rvd_cvt: demo_rvd_cvt.cpp
+	$(CXX) $(CXXFLAGS) -o demo_rvd_cvt demo_rvd_cvt.cpp $(LDFLAGS)
 
 clean:
 	rm -f $(TARGETS)

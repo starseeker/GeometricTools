@@ -29,3 +29,5 @@ test_co3ne_output.obj
 test_full_algorithms
 test_co3ne_debug
 test_rvd
+demo_rvd_cvt
+cvt_rvd_sites.obj
