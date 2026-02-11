@@ -49,6 +49,7 @@
 #include <GTE/Mathematics/RestrictedVoronoiDiagram.h>
 #include <GTE/Mathematics/CVTOptimizer.h>
 #include <GTE/Mathematics/MeshAnisotropy.h>
+#include <GTE/Mathematics/CVT6D.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -169,7 +170,16 @@ namespace gte
             // Lloyd relaxation for uniform distribution
             if (params.lloydIterations > 0)
             {
-                LloydRelaxation(vertices, triangles, originalVertices, originalTriangles, params);
+                // Use anisotropic CVT if requested
+                if (params.useAnisotropic)
+                {
+                    LloydRelaxationAnisotropic(vertices, triangles, originalVertices, 
+                                              originalTriangles, params);
+                }
+                else
+                {
+                    LloydRelaxation(vertices, triangles, originalVertices, originalTriangles, params);
+                }
             }
 
             // Newton/BFGS optimization for even faster CVT convergence (optional, advanced)
