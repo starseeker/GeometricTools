@@ -21,6 +21,7 @@
 #pragma once
 
 #include <GTE/Mathematics/Co3NeFull.h>
+#include <chrono>
 
 namespace gte
 {
@@ -40,7 +41,7 @@ namespace gte
             
             // NEW: Automatic manifold closure parameters
             bool guaranteeManifold;             // Enable automatic hole filling (default: true)
-            size_t maxRefinementIterations;     // Max hole-filling iterations (default: 5)
+            double maxRefinementTimeSeconds;    // Max time for hole filling (default: 10.0 seconds)
             Real refinementRadiusMultiplier;    // Radius increase per iteration (default: 1.5)
             Real minTriangleQuality;            // Minimum quality for fill triangles (default: 0.1)
             
@@ -54,7 +55,7 @@ namespace gte
                 , useEnhancedManifold(true)
                 , maxManifoldIterations(50)
                 , guaranteeManifold(true)
-                , maxRefinementIterations(5)
+                , maxRefinementTimeSeconds(10.0)
                 , refinementRadiusMultiplier(static_cast<Real>(1.5))
                 , minTriangleQuality(static_cast<Real>(0.1))
             {
@@ -350,10 +351,25 @@ namespace gte
             Real initialRadius,
             EnhancedParameters const& params)
         {
-            Real currentRadius = initialRadius;
+            // Start timer
+            auto startTime = std::chrono::steady_clock::now();
             
-            for (size_t iter = 0; iter < params.maxRefinementIterations; ++iter)
+            Real currentRadius = initialRadius;
+            size_t iteration = 0;
+            
+            // Keep trying until manifold achieved or timeout
+            while (true)
             {
+                // Check timeout
+                auto currentTime = std::chrono::steady_clock::now();
+                auto elapsed = std::chrono::duration<double>(currentTime - startTime).count();
+                
+                if (elapsed > params.maxRefinementTimeSeconds)
+                {
+                    // Timeout reached
+                    return false;
+                }
+                
                 // 1. Find boundary edges
                 BoundaryInfo boundaries = FindBoundaryEdges(inoutTriangles);
                 
@@ -365,16 +381,30 @@ namespace gte
                 // 2. Increase search radius for this iteration
                 currentRadius *= params.refinementRadiusMultiplier;
                 
-                // 3. Generate fill triangle candidates
+                // 3. Progressively relax quality threshold for later iterations
+                // This helps close final difficult gaps
+                Real currentQualityThreshold = params.minTriangleQuality;
+                if (iteration > 5)
+                {
+                    // After 5 iterations, start relaxing quality
+                    currentQualityThreshold /= (1.0 + (iteration - 5) * 0.2);
+                }
+                
+                // Create modified params with relaxed quality
+                EnhancedParameters relaxedParams = params;
+                relaxedParams.minTriangleQuality = currentQualityThreshold;
+                
+                // 4. Generate fill triangle candidates
                 auto candidates = GenerateFillTriangles(
-                    points, normals, boundaries, currentRadius, params);
+                    points, normals, boundaries, currentRadius, relaxedParams);
                 
                 if (candidates.empty())
                 {
+                    iteration++;
                     continue;  // Try next iteration with larger radius
                 }
                 
-                // 4. Add valid triangles that close holes
+                // 5. Add valid triangles that close holes
                 size_t addedCount = 0;
                 for (auto const& tri : candidates)
                 {
@@ -393,13 +423,15 @@ namespace gte
                 if (addedCount == 0)
                 {
                     // No progress this iteration
+                    iteration++;
                     continue;
                 }
+                
+                iteration++;
             }
             
-            // Return whether we achieved manifold
-            BoundaryInfo final = FindBoundaryEdges(inoutTriangles);
-            return final.boundaryEdges.empty();
+            // Should never reach here due to timeout or success
+            return false;
         }
         
         // ===== END AUTOMATIC MANIFOLD CLOSURE FUNCTIONS =====
