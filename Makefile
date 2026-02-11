@@ -5,7 +5,7 @@ CXXFLAGS = -std=c++17 -O2 -Wall -I. -IGTE
 LDFLAGS = 
 
 # Targets
-TARGETS = test_mesh_repair test_remesh test_co3ne test_full_algorithms test_rvd demo_rvd_cvt test_remesh_comparison test_co3ne_rvd test_newton_optimizer
+TARGETS = test_mesh_repair test_remesh test_co3ne test_full_algorithms test_rvd demo_rvd_cvt test_remesh_comparison test_co3ne_rvd test_newton_optimizer test_rvd_performance
 
 all: $(TARGETS)
 
@@ -35,6 +35,9 @@ test_co3ne_rvd: test_co3ne_rvd.cpp
 
 test_newton_optimizer: test_newton_optimizer.cpp
 	$(CXX) $(CXXFLAGS) -o test_newton_optimizer test_newton_optimizer.cpp $(LDFLAGS)
+
+test_rvd_performance: test_rvd_performance.cpp
+	$(CXX) $(CXXFLAGS) -o test_rvd_performance test_rvd_performance.cpp $(LDFLAGS)
 
 clean:
 	rm -f $(TARGETS)
