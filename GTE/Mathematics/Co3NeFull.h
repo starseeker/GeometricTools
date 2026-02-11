@@ -643,8 +643,17 @@ namespace gte
 
             Real diagonal = Length(maxPt - minPt);
             
-            // Use 10% of bounding box diagonal as default
-            return diagonal * static_cast<Real>(0.1);
+            // Compute average nearest neighbor distance for better scaling
+            // For sparse point sets, we need a larger radius
+            // Use a heuristic based on point density: diagonal / (n^(1/3))
+            size_t n = points.size();
+            Real densityFactor = std::pow(static_cast<Real>(n), static_cast<Real>(1.0 / 3.0));
+            Real avgSpacing = diagonal / densityFactor;
+            
+            // Use 3-5x the average spacing to ensure sufficient neighbors
+            // This scales better than a fixed percentage of diagonal
+            Real multiplier = static_cast<Real>(4.0);  // Works well in practice
+            return avgSpacing * multiplier;
         }
     };
 }
