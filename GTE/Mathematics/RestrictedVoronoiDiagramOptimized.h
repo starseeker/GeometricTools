@@ -24,6 +24,7 @@
 #include <GTE/Mathematics/Delaunay3.h>
 #include <GTE/Mathematics/IntrConvexPolygonHyperplane.h>
 #include <GTE/Mathematics/AlignedBox.h>
+#include <GTE/Mathematics/ThreadPool.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -78,12 +79,16 @@ namespace gte
             bool computeIntegration;
             bool useDelaunayOptimization;  // Use Delaunay for neighbor queries
             bool useAABBOptimization;      // Use AABB for triangle filtering
+            bool useParallel;              // Use C++17 threading for parallel processing
+            size_t numThreads;             // Number of threads (0 = auto-detect)
             Real epsilon;
             
             Parameters()
                 : computeIntegration(true)
                 , useDelaunayOptimization(true)  // Default: enabled
                 , useAABBOptimization(true)      // Default: enabled
+                , useParallel(true)              // Default: enabled
+                , numThreads(0)                  // Default: auto-detect
                 , epsilon(static_cast<Real>(1e-8))
             {
             }
@@ -121,6 +126,25 @@ namespace gte
                 BuildAABBTree();
             }
 
+            // Initialize thread pool if parallel processing enabled
+            if (mParameters.useParallel)
+            {
+                size_t numThreads = mParameters.numThreads;
+                if (numThreads == 0)
+                {
+                    numThreads = std::thread::hardware_concurrency();
+                    if (numThreads == 0)
+                    {
+                        numThreads = 4;  // Fallback
+                    }
+                }
+                mThreadPool = std::make_shared<ThreadPool>(numThreads);
+            }
+            else
+            {
+                mThreadPool = nullptr;
+            }
+
             return true;
         }
 
@@ -130,12 +154,27 @@ namespace gte
             cells.clear();
             cells.resize(mVoronoiSites.size());
 
-            for (size_t i = 0; i < mVoronoiSites.size(); ++i)
+            // Use parallel processing if enabled and beneficial
+            if (mThreadPool && mVoronoiSites.size() >= 4)
             {
-                cells[i].siteIndex = static_cast<int32_t>(i);
-                if (!ComputeCell(static_cast<int32_t>(i), cells[i]))
+                // Parallel computation: each thread computes independent cells
+                mThreadPool->ParallelFor(0, mVoronoiSites.size(), 
+                    [this, &cells](size_t i) {
+                        cells[i].siteIndex = static_cast<int32_t>(i);
+                        ComputeCell(static_cast<int32_t>(i), cells[i]);
+                        // Note: failures are silently ignored as in sequential version
+                    });
+            }
+            else
+            {
+                // Sequential fallback
+                for (size_t i = 0; i < mVoronoiSites.size(); ++i)
                 {
-                    // Cell computation failed, but continue with others
+                    cells[i].siteIndex = static_cast<int32_t>(i);
+                    if (!ComputeCell(static_cast<int32_t>(i), cells[i]))
+                    {
+                        // Cell computation failed, but continue with others
+                    }
                 }
             }
 
@@ -541,5 +580,8 @@ namespace gte
         // AABB optimization
         bool mAABBBuilt = false;
         std::vector<AlignedBox3<Real>> mTriangleBounds;
+
+        // Thread pool for parallel processing
+        std::shared_ptr<ThreadPool> mThreadPool;
     };
 }

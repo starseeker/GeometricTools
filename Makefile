@@ -46,3 +46,13 @@ test: test_mesh_repair
 	./test_mesh_repair gt.obj gt_repaired.obj
 
 .PHONY: all clean test
+
+# Test ThreadPool
+test_threadpool: test_threadpool.cpp GTE/Mathematics/ThreadPool.h
+g++ -std=c++17 -I. -pthread -O2 -o test_threadpool test_threadpool.cpp
+
+
+# Test parallel RVD
+test_parallel_rvd: test_parallel_rvd.cpp GTE/Mathematics/RestrictedVoronoiDiagramOptimized.h GTE/Mathematics/ThreadPool.h
+g++ -std=c++17 -I. -pthread -O2 -o test_parallel_rvd test_parallel_rvd.cpp
+
