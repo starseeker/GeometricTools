@@ -35,15 +35,19 @@ namespace gte
         struct EnhancedParameters : public Parameters
         {
             bool useEnhancedManifold;   // Use full manifold extraction (default: true)
-            bool strictMode;            // Strict mode (more conservative, default: false)
+            // Note: strictMode is inherited from Parameters
             size_t maxManifoldIterations; // Max iterations for incremental insertion
+            
+            // To set explicit parameters (like Geogram), use:
+            //   params.searchRadius = 2.5;  // 0 = automatic (default)
+            //   params.kNeighbors = 15;     // 0 = automatic (default)
             
             EnhancedParameters() 
                 : Parameters()
                 , useEnhancedManifold(true)
-                , strictMode(false)
                 , maxManifoldIterations(50)
             {
+                // Can override inherited defaults here if needed
             }
         };
         

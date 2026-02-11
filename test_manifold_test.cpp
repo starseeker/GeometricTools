@@ -8,7 +8,7 @@
 // - Integration with Co3Ne
 // - Comparison with simplified version
 
-#include <GTE/Mathematics/Co3NeFullEnhanced.h>
+#include <Mathematics/Co3NeFullEnhanced.h>
 #include <iostream>
 #include <iomanip>
 #include <chrono>
