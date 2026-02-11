@@ -148,22 +148,7 @@ namespace gte
         PointN const* mVertices;
     };
     
-    // Factory function to create DelaunayN instances
-    // This follows geogram's factory pattern
+    // Factory function declaration (implementation in DelaunayNN.h)
     template <typename Real, size_t N>
-    std::unique_ptr<DelaunayN<Real, N>> CreateDelaunayN(std::string const& method = "NN")
-    {
-        // For now, only "NN" (Nearest Neighbor) method is implemented
-        // Future: Add other methods like "BRIO", "Incremental", etc.
-        
-        if (method == "NN" || method == "default")
-        {
-            // Will be implemented in DelaunayNN.h
-            // return std::make_unique<DelaunayNN<Real, N>>();
-            return nullptr;  // Placeholder until DelaunayNN is implemented
-        }
-        
-        LogError("Unknown Delaunay method: " + method);
-        return nullptr;
-    }
+    std::unique_ptr<DelaunayN<Real, N>> CreateDelaunayN(std::string const& method = "NN");
 }

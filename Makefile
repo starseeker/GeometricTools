@@ -13,7 +13,7 @@ TARGETS = test_mesh_repair test_remesh test_co3ne test_full_algorithms test_rvd 
           demo_rvd_cvt test_remesh_comparison test_co3ne_rvd test_newton_optimizer \
           test_rvd_performance stress_test test_threadpool test_parallel_rvd \
           test_enhanced_manifold test_anisotropic_remesh test_delaunay6 test_cvt6d \
-          test_delaunay_n
+          test_delaunay_n test_delaunay_nn
 
 all: $(TARGETS)
 
@@ -76,6 +76,10 @@ test_cvt6d: $(TEST_DIR)/test_cvt6d.cpp GTE/Mathematics/CVT6D.h GTE/Mathematics/M
 # DelaunayN base class test
 test_delaunay_n: $(TEST_DIR)/test_delaunay_n.cpp GTE/Mathematics/DelaunayN.h
 	$(CXX) $(CXXFLAGS) -o test_delaunay_n $(TEST_DIR)/test_delaunay_n.cpp $(LDFLAGS)
+
+# DelaunayNN implementation test
+test_delaunay_nn: $(TEST_DIR)/test_delaunay_nn.cpp GTE/Mathematics/DelaunayNN.h GTE/Mathematics/NearestNeighborSearchN.h GTE/Mathematics/DelaunayN.h
+	$(CXX) $(CXXFLAGS) -o test_delaunay_nn $(TEST_DIR)/test_delaunay_nn.cpp $(LDFLAGS)
 
 # Demonstration programs
 demo_rvd_cvt: $(TEST_DIR)/demo_rvd_cvt.cpp
