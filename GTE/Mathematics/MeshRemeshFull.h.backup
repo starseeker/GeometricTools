@@ -39,7 +39,6 @@
 #include <GTE/Mathematics/Delaunay3.h>
 #include <GTE/Mathematics/ETManifoldMesh.h>
 #include <GTE/Mathematics/NearestNeighborQuery.h>
-#include <GTE/Mathematics/RestrictedVoronoiDiagram.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -67,7 +66,6 @@ namespace gte
             bool preserveBoundary;          // Preserve boundary edges
             bool projectToSurface;          // Project points back to original surface
             bool useDelaunayVoronoi;        // Use Delaunay/Voronoi for Lloyd (vs simple smoothing)
-            bool useRVD;                    // Use exact RVD for Lloyd (true CVT, slower but 100% quality)
             
             Parameters()
                 : targetEdgeLength(static_cast<Real>(0))
@@ -80,7 +78,6 @@ namespace gte
                 , preserveBoundary(true)
                 , projectToSurface(true)
                 , useDelaunayVoronoi(false) // Disabled by default as it's expensive
-                , useRVD(true)              // Use exact RVD for true CVT quality
             {
             }
         };
@@ -491,120 +488,6 @@ namespace gte
             std::vector<std::array<int32_t, 3>> const& originalTriangles,
             Parameters const& params)
         {
-            // Identify boundary vertices (needed for both methods)
-            std::set<int32_t> boundaryVertices;
-            if (params.preserveBoundary)
-            {
-                std::map<EdgeKey, size_t> edgeCount;
-                for (auto const& tri : triangles)
-                {
-                    for (int i = 0; i < 3; ++i)
-                    {
-                        int j = (i + 1) % 3;
-                        EdgeKey edge(tri[i], tri[j]);
-                        edgeCount[edge]++;
-                    }
-                }
-                
-                for (auto const& entry : edgeCount)
-                {
-                    if (entry.second == 1)
-                    {
-                        boundaryVertices.insert(entry.first.v0);
-                        boundaryVertices.insert(entry.first.v1);
-                    }
-                }
-            }
-
-            // Choose Lloyd method based on parameters
-            if (params.useRVD)
-            {
-                // Use exact RVD for true CVT (100% quality, slower)
-                LloydRelaxationWithRVD(vertices, triangles, originalVertices, 
-                                      originalTriangles, boundaryVertices, params);
-            }
-            else
-            {
-                // Use approximate method (90% quality, faster)
-                LloydRelaxationApproximate(vertices, triangles, originalVertices,
-                                          originalTriangles, boundaryVertices, params);
-            }
-        }
-
-        // Lloyd relaxation with exact RVD (true CVT)
-        static void LloydRelaxationWithRVD(
-            std::vector<Vector3<Real>>& vertices,
-            std::vector<std::array<int32_t, 3>> const& triangles,
-            std::vector<Vector3<Real>> const& originalVertices,
-            std::vector<std::array<int32_t, 3>> const& originalTriangles,
-            std::set<int32_t> const& boundaryVertices,
-            Parameters const& params)
-        {
-            // Create RVD instance
-            RestrictedVoronoiDiagram<Real> rvd;
-            
-            for (size_t iter = 0; iter < params.lloydIterations; ++iter)
-            {
-                // Use vertices as Voronoi sites
-                std::vector<Vector3<Real>> sites;
-                sites.reserve(vertices.size());
-                for (auto const& v : vertices)
-                {
-                    sites.push_back(v);
-                }
-                
-                // Initialize RVD with current mesh and sites
-                if (!rvd.Initialize(vertices, triangles, sites))
-                {
-                    // Fall back to approximate method if RVD fails
-                    LloydRelaxationApproximate(vertices, triangles, originalVertices,
-                                              originalTriangles, boundaryVertices, params);
-                    return;
-                }
-                
-                // Compute exact centroids using RVD
-                std::vector<Vector3<Real>> centroids;
-                if (!rvd.ComputeCentroids(centroids))
-                {
-                    // Fall back to approximate method if centroid computation fails
-                    LloydRelaxationApproximate(vertices, triangles, originalVertices,
-                                              originalTriangles, boundaryVertices, params);
-                    return;
-                }
-                
-                // Move vertices to their exact Voronoi centroids
-                for (size_t i = 0; i < vertices.size(); ++i)
-                {
-                    // Skip boundary vertices
-                    if (params.preserveBoundary && boundaryVertices.count(static_cast<int32_t>(i)) > 0)
-                    {
-                        continue;
-                    }
-                    
-                    vertices[i] = centroids[i];
-                }
-                
-                // Tangential smoothing
-                TangentialSmoothing(vertices, triangles, params.smoothIterations,
-                                  params.smoothingFactor, boundaryVertices);
-                
-                // Project back to original surface if requested
-                if (params.projectToSurface)
-                {
-                    ProjectToSurface(vertices, originalVertices, originalTriangles, boundaryVertices);
-                }
-            }
-        }
-
-        // Lloyd relaxation with approximate Voronoi (adjacency-based)
-        static void LloydRelaxationApproximate(
-            std::vector<Vector3<Real>>& vertices,
-            std::vector<std::array<int32_t, 3>> const& triangles,
-            std::vector<Vector3<Real>> const& originalVertices,
-            std::vector<std::array<int32_t, 3>> const& originalTriangles,
-            std::set<int32_t> const& boundaryVertices,
-            Parameters const& params)
-        {
             for (size_t iter = 0; iter < params.lloydIterations; ++iter)
             {
                 // Build vertex adjacency
@@ -616,6 +499,31 @@ namespace gte
                         int j = (i + 1) % 3;
                         adjacency[tri[i]].push_back(tri[j]);
                         adjacency[tri[j]].push_back(tri[i]);
+                    }
+                }
+
+                // Identify boundary vertices
+                std::set<int32_t> boundaryVertices;
+                if (params.preserveBoundary)
+                {
+                    std::map<EdgeKey, size_t> edgeCount;
+                    for (auto const& tri : triangles)
+                    {
+                        for (int i = 0; i < 3; ++i)
+                        {
+                            int j = (i + 1) % 3;
+                            EdgeKey edge(tri[i], tri[j]);
+                            edgeCount[edge]++;
+                        }
+                    }
+                    
+                    for (auto const& entry : edgeCount)
+                    {
+                        if (entry.second == 1)
+                        {
+                            boundaryVertices.insert(entry.first.v0);
+                            boundaryVertices.insert(entry.first.v1);
+                        }
                     }
                 }
 

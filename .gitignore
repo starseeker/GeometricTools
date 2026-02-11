@@ -31,3 +31,6 @@ test_co3ne_debug
 test_rvd
 demo_rvd_cvt
 cvt_rvd_sites.obj
+test_remesh_comparison
+remesh_approximate.obj
+remesh_rvd.obj
