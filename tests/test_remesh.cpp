@@ -1,7 +1,7 @@
 // Test program for GTE MeshRemesh functionality
 // Demonstrates mesh remeshing using GTE style headers
 
-#include <GTE/Mathematics/MeshRemesh.h>
+#include <GTE/Mathematics/MeshRemeshFull.h>
 #include <GTE/Mathematics/MeshRepair.h>
 #include <GTE/Mathematics/MeshValidation.h>
 #include <fstream>
@@ -153,24 +153,27 @@ int main(int argc, char* argv[])
     // Remeshing
     std::cout << "\nStep 2: Remeshing" << std::endl;
 
-    gte::MeshRemesh<double>::Parameters remeshParams;
-    remeshParams.method = gte::MeshRemesh<double>::RemeshMethod::IsotropicSmooth;
-    remeshParams.targetVertexCount = (targetVertices > 0) ? targetVertices : vertices.size();
-    remeshParams.maxIterations = 10;
-    remeshParams.smoothingIterations = 5;
-    remeshParams.smoothingFactor = 0.5;
+    gte::MeshRemeshFull<double>::Parameters remeshParams;
+    remeshParams.lloydIterations = 10;
+    remeshParams.splitIterations = 5;
+    remeshParams.collapseIterations = 5;
+    remeshParams.smoothIterations = 5;
+    remeshParams.useRVD = true;  // Use exact RVD for Lloyd
+    remeshParams.projectToSurface = true;
     remeshParams.preserveBoundary = true;
-    remeshParams.computeNormals = true;
 
-    std::cout << "  Method: IsotropicSmooth" << std::endl;
-    std::cout << "  Target vertices: " << remeshParams.targetVertexCount << std::endl;
-    std::cout << "  Max iterations: " << remeshParams.maxIterations << std::endl;
-    std::cout << "  Smoothing iterations: " << remeshParams.smoothingIterations << std::endl;
+    std::cout << "  Method: Isotropic CVT" << std::endl;
+    std::cout << "  Lloyd iterations: " << remeshParams.lloydIterations << std::endl;
+    std::cout << "  Smoothing iterations: " << remeshParams.smoothIterations << std::endl;
 
     size_t vBefore = vertices.size();
     size_t tBefore = triangles.size();
+    
+    // Keep original mesh for projection
+    auto originalVertices = vertices;
+    auto originalTriangles = triangles;
 
-    gte::MeshRemesh<double>::Remesh(vertices, triangles, remeshParams);
+    gte::MeshRemeshFull<double>::Remesh(vertices, triangles, originalVertices, originalTriangles, remeshParams);
 
     std::cout << "  Vertices: " << vBefore << " -> " << vertices.size() << std::endl;
     std::cout << "  Triangles: " << tBefore << " -> " << triangles.size() << std::endl;
