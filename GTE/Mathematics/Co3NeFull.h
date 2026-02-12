@@ -40,6 +40,7 @@
 #include <GTE/Mathematics/NearestNeighborQuery.h>
 #include <GTE/Mathematics/ETManifoldMesh.h>
 #include <GTE/Mathematics/RestrictedVoronoiDiagram.h>
+#include <GTE/Mathematics/Co3NeManifoldExtractor.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -480,6 +481,7 @@ namespace gte
         // ===== MANIFOLD EXTRACTION =====
 
         // Extract manifold surface from candidate triangles
+        // NOW USES FULL GEOGRAM-EQUIVALENT MANIFOLD EXTRACTION
         static void ExtractManifold(
             std::vector<Vector3<Real>> const& points,
             std::vector<Vector3<Real>> const& normals,
@@ -487,79 +489,56 @@ namespace gte
             std::vector<std::array<int32_t, 3>>& outTriangles,
             Parameters const& params)
         {
-            // For now, use simplified manifold extraction
-            // Full implementation would include:
-            // - Edge topology tracking (next_corner_around_vertex)
-            // - Connected component analysis
-            // - Moebius strip detection
-            // - Incremental triangle insertion with rollback
-
-            // Build edge usage map
-            std::map<std::pair<int32_t, int32_t>, std::vector<size_t>> edgeToTriangles;
-
-            for (size_t ti = 0; ti < candidateTriangles.size(); ++ti)
+            // Separate triangles into "good" and "not-so-good" categories
+            // Good triangles: appear exactly 3 times (seen from 3 Voronoi cells)
+            // These form a reliable manifold seed
+            std::vector<std::array<int32_t, 3>> goodTriangles;
+            std::vector<std::array<int32_t, 3>> notSoGoodTriangles;
+            
+            // Build triangle count map
+            std::map<std::array<int32_t, 3>, int> triangleCounts;
+            for (auto const& tri : candidateTriangles)
             {
-                auto const& tri = candidateTriangles[ti];
-                for (int i = 0; i < 3; ++i)
-                {
-                    int j = (i + 1) % 3;
-                    int32_t v0 = tri[i];
-                    int32_t v1 = tri[j];
-                    
-                    auto edge = std::make_pair(std::min(v0, v1), std::max(v0, v1));
-                    edgeToTriangles[edge].push_back(ti);
-                }
+                // Normalize triangle (sort vertices for comparison)
+                std::array<int32_t, 3> normalized = tri;
+                std::sort(normalized.begin(), normalized.end());
+                triangleCounts[normalized]++;
             }
-
-            // Accept triangles that form manifold edges (each edge used <= 2 times)
-            std::vector<bool> triangleValid(candidateTriangles.size(), true);
-
-            for (auto const& entry : edgeToTriangles)
+            
+            // Categorize triangles
+            for (auto const& tri : candidateTriangles)
             {
-                if (entry.second.size() > 2)
+                std::array<int32_t, 3> normalized = tri;
+                std::sort(normalized.begin(), normalized.end());
+                int count = triangleCounts[normalized];
+                
+                if (count == 3)
                 {
-                    // Non-manifold edge, reject all incident triangles
-                    for (size_t ti : entry.second)
+                    // Only add once (avoid duplicates)
+                    if (goodTriangles.empty() || goodTriangles.back() != tri)
                     {
-                        triangleValid[ti] = false;
+                        goodTriangles.push_back(tri);
+                    }
+                }
+                else if (count <= 2)
+                {
+                    if (notSoGoodTriangles.empty() || notSoGoodTriangles.back() != tri)
+                    {
+                        notSoGoodTriangles.push_back(tri);
                     }
                 }
             }
-
-            // Check normal consistency for adjacent triangles
-            for (size_t ti = 0; ti < candidateTriangles.size(); ++ti)
-            {
-                if (!triangleValid[ti])
-                {
-                    continue;
-                }
-
-                auto const& tri = candidateTriangles[ti];
-                
-                // Compute triangle normal
-                Vector3<Real> triNormal = ComputeTriangleNormal(points, tri);
-
-                // Check against vertex normals
-                Vector3<Real> avgNormal = normals[tri[0]] + normals[tri[1]] + normals[tri[2]];
-                Normalize(avgNormal);
-
-                if (Dot(triNormal, avgNormal) < static_cast<Real>(-0.8))
-                {
-                    triangleValid[ti] = false;
-                }
-            }
-
-            // Extract valid triangles
-            outTriangles.clear();
-            outTriangles.reserve(candidateTriangles.size());
-
-            for (size_t ti = 0; ti < candidateTriangles.size(); ++ti)
-            {
-                if (triangleValid[ti])
-                {
-                    outTriangles.push_back(candidateTriangles[ti]);
-                }
-            }
+            
+            // Use full manifold extraction
+            typename Co3NeManifoldExtractor<Real>::Parameters extractorParams;
+            extractorParams.strictMode = params.strictMode;
+            extractorParams.maxIterations = 50;  // Default from geogram
+            extractorParams.verbose = false;
+            
+            Co3NeManifoldExtractor<Real> extractor(points, extractorParams);
+            
+            // Extract manifold with incremental insertion
+            extractor.Extract(goodTriangles, notSoGoodTriangles, outTriangles);
         }
 
         // ===== UTILITY FUNCTIONS =====
