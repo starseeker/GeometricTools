@@ -114,3 +114,5 @@ clean:
 	rm -f $(TEST_DIR)/data/*_repaired.obj $(TEST_DIR)/data/*_output.obj
 
 .PHONY: all clean test stress generate_test_data
+test_phase4_integration: tests/test_phase4_integration.cpp
+$(CXX) $(CXXFLAGS) $(INCLUDES) -o test_phase4_integration tests/test_phase4_integration.cpp
