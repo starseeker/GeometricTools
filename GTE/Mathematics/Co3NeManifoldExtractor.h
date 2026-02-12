@@ -893,12 +893,16 @@ namespace gte
             }
         }
         
+    private:
         // ===== PRIVATE HELPER METHODS FOR MESH REORIENTATION =====
         
         // Compute graph distance from each facet to mesh border
         void ComputeBorderDistance(std::vector<uint8_t>& distance, int maxIter)
         {
-            // Note: Using uint8_t assumes maxIter <= 255 (currently 5)
+            // Validate maxIter constraint for uint8_t storage
+            LogAssert(maxIter >= 0 && maxIter <= 255, 
+                      "maxIter must be in range [0, 255] for uint8_t storage");
+            
             distance.assign(mTriangles.size(), static_cast<uint8_t>(maxIter));
             
             // Mark border facets with distance 0
