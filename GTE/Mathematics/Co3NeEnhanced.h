@@ -72,8 +72,8 @@ namespace gte
         {
             if (!params.useEnhancedManifold)
             {
-                // Fall back to simplified version
-                return Co3NeFull<Real>::Reconstruct(points, outVertices, outTriangles, params);
+                // Fall back to base version
+                return Co3Ne<Real>::Reconstruct(points, outVertices, outTriangles, params);
             }
             
             // Enhanced reconstruction pipeline
@@ -84,7 +84,7 @@ namespace gte
 
             // Step 1: Compute normals using PCA (from base class)
             std::vector<Vector3Type> normals;
-            if (!Co3NeFull<Real>::ComputeNormals(points, normals, params))
+            if (!Co3Ne<Real>::ComputeNormals(points, normals, params))
             {
                 return false;
             }
@@ -92,12 +92,12 @@ namespace gte
             // Step 2: Orient normals consistently if requested (from base class)
             if (params.orientNormals)
             {
-                Co3NeFull<Real>::OrientNormalsConsistently(points, normals, params);
+                Co3Ne<Real>::OrientNormalsConsistently(points, normals, params);
             }
 
             // Step 3: Generate candidate triangles using co-cone (from base class)
             std::vector<std::array<int32_t, 3>> candidateTriangles;
-            Co3NeFull<Real>::GenerateTriangles(points, normals, candidateTriangles, params);
+            Co3Ne<Real>::GenerateTriangles(points, normals, candidateTriangles, params);
 
             if (candidateTriangles.empty())
             {
@@ -109,7 +109,7 @@ namespace gte
             if (!extractor.Extract(candidateTriangles, outTriangles))
             {
                 // Fall back to base class if enhanced fails
-                Co3NeFull<Real>::ExtractManifold(points, normals, candidateTriangles, outTriangles, params);
+                Co3Ne<Real>::ExtractManifold(points, normals, candidateTriangles, outTriangles, params);
             }
 
             if (outTriangles.empty())
@@ -121,7 +121,7 @@ namespace gte
             if (params.guaranteeManifold && params.searchRadius == static_cast<Real>(0))
             {
                 // Only in automatic mode (not when user specifies explicit radius)
-                Real initialRadius = Co3NeFull<Real>::ComputeAutomaticSearchRadius(points);
+                Real initialRadius = Co3Ne<Real>::ComputeAutomaticSearchRadius(points);
                 RefineManifold(points, normals, outTriangles, initialRadius, params);
             }
 
@@ -131,7 +131,7 @@ namespace gte
             // Step 6: Optional RVD smoothing (from base class)
             if (params.smoothWithRVD && !outTriangles.empty())
             {
-                Co3NeFull<Real>::SmoothWithRVD(outVertices, outTriangles, params);
+                Co3Ne<Real>::SmoothWithRVD(outVertices, outTriangles, params);
             }
 
             return true;

@@ -830,49 +830,262 @@ namespace gte
         
         void ReorientMesh(std::vector<bool>& removeTriangle)
         {
-            // Simple Moebius detection and orientation enforcement
-            // This is a simplified version of geogram's mesh_reorient
+            // Full geogram mesh_reorient implementation with priority-based propagation
+            // Based on geogram's repair_reorient_facets_anti_moebius
             
+            // Maximum distance from border for propagation heuristic
+            // Value of 5 matches geogram's max_iter to balance between:
+            // - Sufficient depth to reach interior facets
+            // - Avoiding excessive computation on large meshes
+            static constexpr int MAX_BORDER_DISTANCE = 5;
+            
+            // Compute distance from each facet to mesh border
+            std::vector<uint8_t> borderDistance;
+            ComputeBorderDistance(borderDistance, MAX_BORDER_DISTANCE);
+            
+            // Process facets in order of decreasing distance from border
+            // This heuristic minimizes Moebius strip artifacts
             std::vector<bool> visited(mTriangles.size(), false);
+            int32_t moebius_count = 0;
+            size_t nb_visited = 0;
             
-            for (int32_t seed = 0; seed < static_cast<int32_t>(mTriangles.size()); ++seed)
+            for (int dist = MAX_BORDER_DISTANCE; dist >= 0; --dist)
             {
-                if (visited[seed] || removeTriangle[seed]) continue;
-                
-                std::stack<int32_t> S;
-                S.push(seed);
-                visited[seed] = true;
-                
-                while (!S.empty())
+                for (size_t f = 0; f < mTriangles.size(); ++f)
                 {
-                    int32_t t = S.top();
-                    S.pop();
-                    
-                    // Check adjacent triangles
-                    for (int i = 0; i < 3; ++i)
+                    if (!visited[f] && !removeTriangle[f] && borderDistance[f] == dist)
                     {
-                        int32_t c = t * 3 + i;
-                        int32_t t2 = mCornerToAdjacentFacet[c];
+                        std::stack<int32_t> Q;
+                        Q.push(static_cast<int32_t>(f));
+                        visited[f] = true;
+                        nb_visited++;
                         
-                        if (t2 != NO_FACET && !visited[t2] && !removeTriangle[t2])
+                        while (!Q.empty())
                         {
-                            visited[t2] = true;
+                            int32_t f1 = Q.top();
+                            Q.pop();
                             
-                            // Check if orientation is consistent
-                            if (TrianglesHaveSameOrientation(t, t2))
+                            // Process all adjacent facets
+                            for (int i = 0; i < 3; ++i)
                             {
-                                // Same orientation on adjacent triangles = Moebius
-                                removeTriangle[t2] = true;
+                                int32_t c = f1 * 3 + i;
+                                int32_t f2 = mCornerToAdjacentFacet[c];
+                                
+                                if (f2 != NO_FACET && !visited[f2] && !removeTriangle[f2])
+                                {
+                                    visited[f2] = true;
+                                    nb_visited++;
+                                    
+                                    // Propagate orientation from already-visited neighbors
+                                    PropagateOrientation(f2, visited, removeTriangle, moebius_count);
+                                    
+                                    Q.push(f2);
+                                }
                             }
-                            else
+                        }
+                    }
+                    
+                    if (nb_visited == mTriangles.size())
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+        
+    private:
+        // ===== PRIVATE HELPER METHODS FOR MESH REORIENTATION =====
+        
+        // Compute graph distance from each facet to mesh border
+        void ComputeBorderDistance(std::vector<uint8_t>& distance, int maxIter)
+        {
+            // Validate maxIter constraint for uint8_t storage
+            LogAssert(maxIter >= 0 && maxIter <= 255, 
+                      "maxIter must be in range [0, 255] for uint8_t storage");
+            
+            distance.assign(mTriangles.size(), static_cast<uint8_t>(maxIter));
+            
+            // Mark border facets with distance 0
+            for (size_t f = 0; f < mTriangles.size(); ++f)
+            {
+                if (FacetIsOnBorder(static_cast<int32_t>(f)))
+                {
+                    distance[f] = 0;
+                }
+            }
+            
+            // Propagate distances via breadth-first traversal
+            // Complexity: O(maxIter * triangles)
+            // Could be optimized with queue-based BFS, but maxIter is small (5)
+            for (int iter = 1; iter < maxIter; ++iter)
+            {
+                for (size_t f = 0; f < mTriangles.size(); ++f)
+                {
+                    if (distance[f] == maxIter)
+                    {
+                        // Check if any neighbor has distance iter-1
+                        for (int i = 0; i < 3; ++i)
+                        {
+                            int32_t c = static_cast<int32_t>(f) * 3 + i;
+                            int32_t g = mCornerToAdjacentFacet[c];
+                            
+                            if (g != NO_FACET && distance[g] == (iter - 1))
                             {
-                                S.push(t2);
+                                distance[f] = static_cast<uint8_t>(iter);
+                                break;
                             }
                         }
                     }
                 }
             }
         }
+        
+        // Check if facet is on mesh border (has at least one unconnected edge)
+        bool FacetIsOnBorder(int32_t f) const
+        {
+            for (int i = 0; i < 3; ++i)
+            {
+                int32_t c = f * 3 + i;
+                if (mCornerToAdjacentFacet[c] == NO_FACET)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+        
+        // Propagate orientation from already-visited neighbors
+        // Detects and resolves Moebius configurations
+        void PropagateOrientation(
+            int32_t f,
+            std::vector<bool> const& visited,
+            std::vector<bool>& removeTriangle,
+            int32_t& moebius_count)
+        {
+            // Count neighbors with compatible (+1) vs incompatible (-1) orientations
+            int nb_plus = 0;
+            int nb_minus = 0;
+            
+            for (int i = 0; i < 3; ++i)
+            {
+                int32_t c = f * 3 + i;
+                int32_t f2 = mCornerToAdjacentFacet[c];
+                
+                if (f2 != NO_FACET && visited[f2])
+                {
+                    int ori = RelativeOrientation(f, c, f2);
+                    if (ori == 1)
+                    {
+                        nb_plus++;
+                    }
+                    else if (ori == -1)
+                    {
+                        nb_minus++;
+                    }
+                }
+            }
+            
+            // Moebius configuration: both orientations present
+            if (nb_plus > 0 && nb_minus > 0)
+            {
+                moebius_count++;
+                
+                // Remove connections to minority orientation neighbors
+                if (nb_plus > nb_minus)
+                {
+                    // Disconnect from negatively-oriented neighbors
+                    for (int i = 0; i < 3; ++i)
+                    {
+                        int32_t c = f * 3 + i;
+                        int32_t f2 = mCornerToAdjacentFacet[c];
+                        
+                        if (f2 != NO_FACET && visited[f2] && RelativeOrientation(f, c, f2) < 0)
+                        {
+                            Dissociate(f, f2);
+                        }
+                    }
+                    nb_minus = 0;
+                }
+                else
+                {
+                    // Disconnect from positively-oriented neighbors
+                    for (int i = 0; i < 3; ++i)
+                    {
+                        int32_t c = f * 3 + i;
+                        int32_t f2 = mCornerToAdjacentFacet[c];
+                        
+                        if (f2 != NO_FACET && visited[f2] && RelativeOrientation(f, c, f2) > 0)
+                        {
+                            Dissociate(f, f2);
+                        }
+                    }
+                    nb_plus = 0;
+                }
+            }
+            
+            // If majority orientation is negative, flip this facet
+            if (nb_minus > 0)
+            {
+                FlipTriangle(f);
+            }
+        }
+        
+        // Compute relative orientation between two adjacent facets
+        // Returns: +1 if compatible, -1 if incompatible, 0 if not adjacent
+        int RelativeOrientation(int32_t f1, int32_t c11, int32_t f2) const
+        {
+            // Get edge vertices from f1
+            int32_t c12 = NextCornerAroundFacet(f1, c11);
+            int32_t v11 = CornerToVertex(c11);
+            int32_t v12 = CornerToVertex(c12);
+            
+            // Check all edges of f2
+            for (int i = 0; i < 3; ++i)
+            {
+                int32_t c21 = f2 * 3 + i;
+                int32_t c22 = NextCornerAroundFacet(f2, c21);
+                int32_t v21 = CornerToVertex(c21);
+                int32_t v22 = CornerToVertex(c22);
+                
+                // Same edge direction = incompatible (both CCW or both CW)
+                if (v11 == v21 && v12 == v22)
+                {
+                    return -1;
+                }
+                // Opposite edge direction = compatible (one CCW, one CW)
+                if (v11 == v22 && v12 == v21)
+                {
+                    return 1;
+                }
+            }
+            return 0;
+        }
+        
+        // Remove adjacency between two facets
+        void Dissociate(int32_t f1, int32_t f2)
+        {
+            // Remove f1 -> f2 adjacency
+            for (int i = 0; i < 3; ++i)
+            {
+                int32_t c = f1 * 3 + i;
+                if (mCornerToAdjacentFacet[c] == f2)
+                {
+                    mCornerToAdjacentFacet[c] = NO_FACET;
+                }
+            }
+            
+            // Remove f2 -> f1 adjacency
+            for (int i = 0; i < 3; ++i)
+            {
+                int32_t c = f2 * 3 + i;
+                if (mCornerToAdjacentFacet[c] == f1)
+                {
+                    mCornerToAdjacentFacet[c] = NO_FACET;
+                }
+            }
+        }
+        
+    public:
         
         bool HasMarkedTriangles(std::vector<bool> const& removeTriangle) const
         {
