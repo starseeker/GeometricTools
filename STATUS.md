@@ -52,7 +52,7 @@ This repository contains GTE-style implementations of Geogram mesh processing al
 **Lines of Code:** ~1,590 lines (Co3Ne.h + Co3NeManifoldExtractor.h)  
 **Status:** ✅ Complete and production-ready
 
-**Note:** Previous documentation incorrectly stated this used "simplified" manifold extraction. The full 952-line Co3NeManifoldExtractor exists and is integrated into Co3Ne.h (lines 533-541).
+**Note:** Full manifold extraction implementation complete. Previously had a simplified mesh_reorient helper, now upgraded to match geogram's full priority-based propagation algorithm (2026-02-12).
 
 #### 3. Anisotropic Remeshing (CVT-Based)
 **Files:** `GTE/Mathematics/MeshRemesh.h`, `GTE/Mathematics/MeshAnisotropy.h`, `GTE/Mathematics/CVT6D.h`, `GTE/Mathematics/Delaunay6.h`, `GTE/Mathematics/CVTN.h`

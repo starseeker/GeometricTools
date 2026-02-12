@@ -37,7 +37,7 @@ The previous documentation (IMPLEMENTATION_GAPS.md, FINAL_REPORT.md) incorrectly
 - ✅ Incremental triangle insertion with rollback
 - ✅ Connected component tracking
 
-**Only "simplified" part:** mesh_reorient helper (line 834) - minor function, not core algorithm
+**Only "simplified" part:** None - Full geogram implementation ported (mesh_reorient upgraded 2026-02-12)
 
 ---
 
@@ -100,7 +100,7 @@ The previous documentation (IMPLEMENTATION_GAPS.md, FINAL_REPORT.md) incorrectly
 - Co3NeManifoldExtractor.h EXISTS (952 lines)
 - Contains ALL features: corner topology, Moebius detection, validation tests
 - Co3Ne.h uses it (lines 533-541)
-- Only "simplified" part is a minor mesh_reorient helper function
+- Full geogram implementation (mesh_reorient upgraded 2026-02-12)
 
 ### Error 2: "Missing 6D Anisotropic Support"
 
@@ -182,7 +182,6 @@ The previous documentation (IMPLEMENTATION_GAPS.md, FINAL_REPORT.md) incorrectly
 2. **Comments to Update**
    - MeshAnisotropy.h line 59: TODO comment is outdated (Delaunay6 now exists)
    - Co3Ne.h line 435: "for now" comment about triangle filtering
-   - Co3NeManifoldExtractor.h line 834: "simplified" comment on mesh_reorient
 
 3. **Documentation to Update**
    - STATUS.md - overly pessimistic
