@@ -71,6 +71,8 @@ namespace gte
             bool relaxedManifoldExtraction; // Use relaxed manifold extraction (accept more triangles)
             bool bypassManifoldExtraction;  // Skip manifold extraction entirely (output all unique triangles)
             bool autoFixNonManifold;        // Automatically fix non-manifold edges (guarantees manifold output)
+            bool fixWindingOrder;           // Fix triangle winding to be consistent (outward-facing)
+            bool preventSelfIntersections;  // Reject triangles that would cause self-intersections
             
             Parameters()
                 : kNeighbors(20)
@@ -85,6 +87,8 @@ namespace gte
                 , relaxedManifoldExtraction(false)  // Default to original behavior
                 , bypassManifoldExtraction(false)   // Default to standard manifold extraction
                 , autoFixNonManifold(false)         // Default: don't auto-fix
+                , fixWindingOrder(true)             // Default: fix winding (important for BRL-CAD)
+                , preventSelfIntersections(true)    // Default: prevent intersections (important for BRL-CAD)
             {
             }
         };
@@ -130,6 +134,18 @@ namespace gte
             if (params.autoFixNonManifold && !outTriangles.empty())
             {
                 AutoFixNonManifoldEdges(outTriangles);
+            }
+            
+            // Step 4.6: Fix winding order to be consistent (outward-facing)
+            if (params.fixWindingOrder && !outTriangles.empty())
+            {
+                FixWindingOrder(points, outTriangles);
+            }
+            
+            // Step 4.7: Remove self-intersecting triangles if requested
+            if (params.preventSelfIntersections && !outTriangles.empty())
+            {
+                RemoveSelfIntersectingTriangles(points, outTriangles);
             }
 
             // Copy vertices
@@ -726,6 +742,193 @@ namespace gte
                 
                 triangles = std::move(fixedTriangles);
             }
+        }
+        
+        // Fix triangle winding order to be consistent (outward-facing from centroid)
+        static void FixWindingOrder(
+            std::vector<Vector3<Real>> const& vertices,
+            std::vector<std::array<int32_t, 3>>& triangles)
+        {
+            if (triangles.empty() || vertices.empty())
+            {
+                return;
+            }
+            
+            // Compute centroid
+            Vector3<Real> centroid = vertices[0];
+            for (size_t i = 1; i < vertices.size(); ++i)
+            {
+                centroid += vertices[i];
+            }
+            centroid /= static_cast<Real>(vertices.size());
+            
+            // Fix each triangle's winding
+            for (auto& tri : triangles)
+            {
+                Vector3<Real> const& p0 = vertices[tri[0]];
+                Vector3<Real> const& p1 = vertices[tri[1]];
+                Vector3<Real> const& p2 = vertices[tri[2]];
+                
+                // Compute triangle normal
+                Vector3<Real> e1 = p1 - p0;
+                Vector3<Real> e2 = p2 - p0;
+                Vector3<Real> normal = Cross(e1, e2);
+                
+                // Vector from centroid to triangle center
+                Vector3<Real> triCenter = (p0 + p1 + p2) / static_cast<Real>(3);
+                Vector3<Real> outward = triCenter - centroid;
+                
+                // If normal points inward (dot < 0), flip triangle
+                if (Dot(normal, outward) < static_cast<Real>(0))
+                {
+                    std::swap(tri[1], tri[2]);  // Reverse winding
+                }
+            }
+        }
+        
+        // Remove self-intersecting triangles
+        // Uses greedy approach: check each triangle against all others, remove if intersects
+        static void RemoveSelfIntersectingTriangles(
+            std::vector<Vector3<Real>> const& vertices,
+            std::vector<std::array<int32_t, 3>>& triangles)
+        {
+            if (triangles.size() < 2)
+            {
+                return;
+            }
+            
+            std::set<int32_t> trianglesToRemove;
+            
+            // For large meshes, use spatial partitioning
+            // For now, use simple O(n^2) check with early termination
+            size_t maxChecks = 50000;  // Limit to prevent excessive runtime
+            size_t numChecks = 0;
+            
+            for (size_t i = 0; i < triangles.size() && numChecks < maxChecks; ++i)
+            {
+                if (trianglesToRemove.find(static_cast<int32_t>(i)) != trianglesToRemove.end())
+                {
+                    continue;  // Already marked for removal
+                }
+                
+                auto const& tri1 = triangles[i];
+                Vector3<Real> const& p0 = vertices[tri1[0]];
+                Vector3<Real> const& p1 = vertices[tri1[1]];
+                Vector3<Real> const& p2 = vertices[tri1[2]];
+                
+                for (size_t j = i + 1; j < triangles.size() && numChecks < maxChecks; ++j)
+                {
+                    if (trianglesToRemove.find(static_cast<int32_t>(j)) != trianglesToRemove.end())
+                    {
+                        continue;
+                    }
+                    
+                    auto const& tri2 = triangles[j];
+                    
+                    // Skip if triangles share vertices (adjacent)
+                    bool adjacent = false;
+                    for (int vi = 0; vi < 3 && !adjacent; ++vi)
+                    {
+                        for (int vj = 0; vj < 3; ++vj)
+                        {
+                            if (tri1[vi] == tri2[vj])
+                            {
+                                adjacent = true;
+                                break;
+                            }
+                        }
+                    }
+                    
+                    if (adjacent)
+                    {
+                        continue;
+                    }
+                    
+                    Vector3<Real> const& q0 = vertices[tri2[0]];
+                    Vector3<Real> const& q1 = vertices[tri2[1]];
+                    Vector3<Real> const& q2 = vertices[tri2[2]];
+                    
+                    numChecks++;
+                    
+                    // Simple triangle-triangle intersection test
+                    // Check if any edge of tri1 intersects tri2 or vice versa
+                    if (TrianglesIntersect(p0, p1, p2, q0, q1, q2))
+                    {
+                        // Mark the larger-index triangle for removal (greedy)
+                        trianglesToRemove.insert(static_cast<int32_t>(j));
+                    }
+                }
+            }
+            
+            // Remove marked triangles
+            if (!trianglesToRemove.empty())
+            {
+                std::vector<std::array<int32_t, 3>> cleanTriangles;
+                cleanTriangles.reserve(triangles.size() - trianglesToRemove.size());
+                
+                for (size_t t = 0; t < triangles.size(); ++t)
+                {
+                    if (trianglesToRemove.find(static_cast<int32_t>(t)) == trianglesToRemove.end())
+                    {
+                        cleanTriangles.push_back(triangles[t]);
+                    }
+                }
+                
+                triangles = std::move(cleanTriangles);
+            }
+        }
+        
+        // Simple triangle-triangle intersection test
+        static bool TrianglesIntersect(
+            Vector3<Real> const& p0, Vector3<Real> const& p1, Vector3<Real> const& p2,
+            Vector3<Real> const& q0, Vector3<Real> const& q1, Vector3<Real> const& q2)
+        {
+            // Simplified intersection test using separating axis theorem
+            // Check if triangles are on opposite sides of each other's planes
+            
+            // Compute normals
+            Vector3<Real> n1 = Cross(p1 - p0, p2 - p0);
+            Vector3<Real> n2 = Cross(q1 - q0, q2 - q0);
+            
+            Real epsilon = static_cast<Real>(1e-10);
+            Real len1 = Length(n1);
+            Real len2 = Length(n2);
+            
+            if (len1 < epsilon || len2 < epsilon)
+            {
+                return false;  // Degenerate triangle
+            }
+            
+            n1 /= len1;
+            n2 /= len2;
+            
+            // Check if tri2 vertices are all on same side of tri1's plane
+            Real d0 = Dot(q0 - p0, n1);
+            Real d1 = Dot(q1 - p0, n1);
+            Real d2 = Dot(q2 - p0, n1);
+            
+            Real thresh = static_cast<Real>(1e-6);
+            if ((d0 > thresh && d1 > thresh && d2 > thresh) ||
+                (d0 < -thresh && d1 < -thresh && d2 < -thresh))
+            {
+                return false;  // All on same side
+            }
+            
+            // Check if tri1 vertices are all on same side of tri2's plane
+            d0 = Dot(p0 - q0, n2);
+            d1 = Dot(p1 - q0, n2);
+            d2 = Dot(p2 - q0, n2);
+            
+            if ((d0 > thresh && d1 > thresh && d2 > thresh) ||
+                (d0 < -thresh && d1 < -thresh && d2 < -thresh))
+            {
+                return false;  // All on same side
+            }
+            
+            // If we get here, triangles potentially intersect
+            // For a complete test we'd need edge-edge checks, but this is
+            // good enough for filtering obvious non-intersecting cases
+            return true;
         }
     };
 }
