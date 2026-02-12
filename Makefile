@@ -13,7 +13,8 @@ TARGETS = test_mesh_repair test_remesh test_co3ne test_full_algorithms test_rvd 
           demo_rvd_cvt test_remesh_comparison test_co3ne_rvd test_newton_optimizer \
           test_rvd_performance stress_test test_threadpool test_parallel_rvd \
           test_enhanced_manifold test_anisotropic_remesh test_delaunay6 test_cvt6d \
-          test_delaunay_n test_delaunay_nn test_rvd_n test_cvt_n
+          test_delaunay_n test_delaunay_nn test_rvd_n test_cvt_n test_phase4_integration \
+          test_anisotropic_end_to_end
 
 all: $(TARGETS)
 
@@ -114,5 +115,11 @@ clean:
 	rm -f $(TEST_DIR)/data/*_repaired.obj $(TEST_DIR)/data/*_output.obj
 
 .PHONY: all clean test stress generate_test_data
-test_phase4_integration: tests/test_phase4_integration.cpp
-$(CXX) $(CXXFLAGS) $(INCLUDES) -o test_phase4_integration tests/test_phase4_integration.cpp
+
+# Phase 4 integration test
+test_phase4_integration: $(TEST_DIR)/test_phase4_integration.cpp GTE/Mathematics/CVTN.h GTE/Mathematics/MeshRemeshFull.h
+	$(CXX) $(CXXFLAGS) -o test_phase4_integration $(TEST_DIR)/test_phase4_integration.cpp $(LDFLAGS)
+
+# Comprehensive anisotropic remeshing end-to-end test
+test_anisotropic_end_to_end: $(TEST_DIR)/test_anisotropic_end_to_end.cpp GTE/Mathematics/MeshRemeshFull.h GTE/Mathematics/CVTN.h GTE/Mathematics/MeshAnisotropy.h
+	$(CXX) $(CXXFLAGS) -o test_anisotropic_end_to_end $(TEST_DIR)/test_anisotropic_end_to_end.cpp $(LDFLAGS)
