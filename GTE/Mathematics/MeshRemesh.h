@@ -65,7 +65,7 @@
 namespace gte
 {
     template <typename Real>
-    class MeshRemeshFull
+    class MeshRemesh
     {
     public:
         struct Parameters

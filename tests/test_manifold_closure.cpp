@@ -1,5 +1,5 @@
 // Test automatic manifold closure
-#include <GTE/Mathematics/Co3NeFullEnhanced.h>
+#include <GTE/Mathematics/Co3NeEnhanced.h>
 #include <iostream>
 #include <cmath>
 #include <set>
@@ -74,10 +74,10 @@ int main()
     // Test 1: Without automatic closure (current behavior)
     std::cout << "Test 1: Standard reconstruction (no automatic closure)\n";
     {
-        Co3NeFullEnhanced<double>::EnhancedParameters params;
+        Co3NeEnhanced<double>::EnhancedParameters params;
         params.guaranteeManifold = false;  // Disable automatic closure
         
-        if (Co3NeFullEnhanced<double>::Reconstruct(points, vertices, triangles, params))
+        if (Co3NeEnhanced<double>::Reconstruct(points, vertices, triangles, params))
         {
             auto [boundary, interior] = CountBoundaryEdges(triangles);
             std::cout << "  Triangles: " << triangles.size() << "\n";
@@ -93,14 +93,14 @@ int main()
     
     std::cout << "\nTest 2: With automatic closure (new feature)\n";
     {
-        Co3NeFullEnhanced<double>::EnhancedParameters params;
+        Co3NeEnhanced<double>::EnhancedParameters params;
         params.guaranteeManifold = true;  // Enable automatic closure
         params.maxRefinementIterations = 5;
         
         vertices.clear();
         triangles.clear();
         
-        if (Co3NeFullEnhanced<double>::Reconstruct(points, vertices, triangles, params))
+        if (Co3NeEnhanced<double>::Reconstruct(points, vertices, triangles, params))
         {
             auto [boundary, interior] = CountBoundaryEdges(triangles);
             std::cout << "  Triangles: " << triangles.size() << "\n";

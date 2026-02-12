@@ -1,6 +1,6 @@
 // Test to diagnose why we can't reach 100% closure
 
-#include <GTE/Mathematics/Co3NeFullEnhanced.h>
+#include <GTE/Mathematics/Co3NeEnhanced.h>
 #include <iostream>
 #include <iomanip>
 #include <set>
@@ -71,7 +71,7 @@ int main()
     {
         std::cout << "Test 1: Default parameters (5 iter, 1.5 mult, 0.1 quality)" << std::endl;
         
-        Co3NeFullEnhanced<double>::EnhancedParameters params;
+        Co3NeEnhanced<double>::EnhancedParameters params;
         params.guaranteeManifold = true;
         params.maxRefinementIterations = 5;
         params.refinementRadiusMultiplier = 1.5;
@@ -80,7 +80,7 @@ int main()
         std::vector<Vector3<double>> vertices;
         std::vector<std::array<int32_t, 3>> triangles;
         
-        Co3NeFullEnhanced<double>::Reconstruct(points, vertices, triangles, params);
+        Co3NeEnhanced<double>::Reconstruct(points, vertices, triangles, params);
         
         int boundaryEdges = CountBoundaryEdges(triangles);
         std::cout << "  Triangles: " << triangles.size() << std::endl;
@@ -92,7 +92,7 @@ int main()
     {
         std::cout << "Test 2: More iterations (20 iter)" << std::endl;
         
-        Co3NeFullEnhanced<double>::EnhancedParameters params;
+        Co3NeEnhanced<double>::EnhancedParameters params;
         params.guaranteeManifold = true;
         params.maxRefinementIterations = 20;
         params.refinementRadiusMultiplier = 1.5;
@@ -101,7 +101,7 @@ int main()
         std::vector<Vector3<double>> vertices;
         std::vector<std::array<int32_t, 3>> triangles;
         
-        Co3NeFullEnhanced<double>::Reconstruct(points, vertices, triangles, params);
+        Co3NeEnhanced<double>::Reconstruct(points, vertices, triangles, params);
         
         int boundaryEdges = CountBoundaryEdges(triangles);
         std::cout << "  Triangles: " << triangles.size() << std::endl;
@@ -113,7 +113,7 @@ int main()
     {
         std::cout << "Test 3: Lower quality threshold (0.01)" << std::endl;
         
-        Co3NeFullEnhanced<double>::EnhancedParameters params;
+        Co3NeEnhanced<double>::EnhancedParameters params;
         params.guaranteeManifold = true;
         params.maxRefinementIterations = 5;
         params.refinementRadiusMultiplier = 1.5;
@@ -122,7 +122,7 @@ int main()
         std::vector<Vector3<double>> vertices;
         std::vector<std::array<int32_t, 3>> triangles;
         
-        Co3NeFullEnhanced<double>::Reconstruct(points, vertices, triangles, params);
+        Co3NeEnhanced<double>::Reconstruct(points, vertices, triangles, params);
         
         int boundaryEdges = CountBoundaryEdges(triangles);
         std::cout << "  Triangles: " << triangles.size() << std::endl;
@@ -134,7 +134,7 @@ int main()
     {
         std::cout << "Test 4: Larger radius multiplier (2.5)" << std::endl;
         
-        Co3NeFullEnhanced<double>::EnhancedParameters params;
+        Co3NeEnhanced<double>::EnhancedParameters params;
         params.guaranteeManifold = true;
         params.maxRefinementIterations = 5;
         params.refinementRadiusMultiplier = 2.5;
@@ -143,7 +143,7 @@ int main()
         std::vector<Vector3<double>> vertices;
         std::vector<std::array<int32_t, 3>> triangles;
         
-        Co3NeFullEnhanced<double>::Reconstruct(points, vertices, triangles, params);
+        Co3NeEnhanced<double>::Reconstruct(points, vertices, triangles, params);
         
         int boundaryEdges = CountBoundaryEdges(triangles);
         std::cout << "  Triangles: " << triangles.size() << std::endl;
@@ -155,7 +155,7 @@ int main()
     {
         std::cout << "Test 5: Combined (20 iter, 2.0 mult, 0.01 quality)" << std::endl;
         
-        Co3NeFullEnhanced<double>::EnhancedParameters params;
+        Co3NeEnhanced<double>::EnhancedParameters params;
         params.guaranteeManifold = true;
         params.maxRefinementIterations = 20;
         params.refinementRadiusMultiplier = 2.0;
@@ -164,7 +164,7 @@ int main()
         std::vector<Vector3<double>> vertices;
         std::vector<std::array<int32_t, 3>> triangles;
         
-        Co3NeFullEnhanced<double>::Reconstruct(points, vertices, triangles, params);
+        Co3NeEnhanced<double>::Reconstruct(points, vertices, triangles, params);
         
         int boundaryEdges = CountBoundaryEdges(triangles);
         std::cout << "  Triangles: " << triangles.size() << std::endl;

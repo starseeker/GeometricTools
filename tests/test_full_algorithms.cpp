@@ -1,8 +1,8 @@
 // Test program for full Geogram algorithm implementations
-// Tests Co3NeFull and MeshRemeshFull
+// Tests Co3Ne and MeshRemesh
 
-#include <GTE/Mathematics/Co3NeFull.h>
-#include <GTE/Mathematics/MeshRemeshFull.h>
+#include <GTE/Mathematics/Co3Ne.h>
+#include <GTE/Mathematics/MeshRemesh.h>
 #include <GTE/Mathematics/MeshValidation.h>
 #include <fstream>
 #include <iostream>
@@ -83,10 +83,10 @@ bool SaveOBJ(std::string const& filename,
     return true;
 }
 
-// Test Co3NeFull
-void TestCo3NeFull()
+// Test Co3Ne
+void TestCo3Ne()
 {
-    std::cout << "\n===== Testing Co3NeFull =====" << std::endl;
+    std::cout << "\n===== Testing Co3Ne =====" << std::endl;
 
     // Create a simple point cloud (cube corners with normals)
     std::vector<Vector3<double>> points = {
@@ -99,7 +99,7 @@ void TestCo3NeFull()
     std::vector<Vector3<double>> outVertices;
     std::vector<std::array<int32_t, 3>> outTriangles;
 
-    Co3NeFull<double>::Parameters params;
+    Co3Ne<double>::Parameters params;
     // kNeighbors=10: Reasonable for small point clouds (14 points)
     // Fewer neighbors might not provide enough local structure
     params.kNeighbors = 10;
@@ -108,11 +108,11 @@ void TestCo3NeFull()
     // Stricter angles (e.g., 45-60) better for smooth surfaces
     params.maxNormalAngle = 80.0;
 
-    bool success = Co3NeFull<double>::Reconstruct(points, outVertices, outTriangles, params);
+    bool success = Co3Ne<double>::Reconstruct(points, outVertices, outTriangles, params);
 
     if (success)
     {
-        std::cout << "Co3NeFull SUCCESS: Generated " << outTriangles.size() << " triangles" << std::endl;
+        std::cout << "Co3Ne SUCCESS: Generated " << outTriangles.size() << " triangles" << std::endl;
         SaveOBJ("test_co3ne_full_output.obj", outVertices, outTriangles);
 
         // Validate mesh
@@ -126,14 +126,14 @@ void TestCo3NeFull()
     }
     else
     {
-        std::cout << "Co3NeFull FAILED" << std::endl;
+        std::cout << "Co3Ne FAILED" << std::endl;
     }
 }
 
-// Test MeshRemeshFull
-void TestMeshRemeshFull()
+// Test MeshRemesh
+void TestMeshRemesh()
 {
-    std::cout << "\n===== Testing MeshRemeshFull =====" << std::endl;
+    std::cout << "\n===== Testing MeshRemesh =====" << std::endl;
 
     std::vector<Vector3<double>> vertices;
     std::vector<std::array<int32_t, 3>> triangles;
@@ -175,7 +175,7 @@ void TestMeshRemeshFull()
     std::cout << "Input: " << vertices.size() << " vertices, "
               << triangles.size() << " triangles" << std::endl;
 
-    MeshRemeshFull<double>::Parameters params;
+    MeshRemesh<double>::Parameters params;
     params.lloydIterations = 5;
     params.smoothIterations = 3;
     params.smoothingFactor = 0.5;
@@ -183,11 +183,11 @@ void TestMeshRemeshFull()
     params.projectToSurface = true;
     params.targetVertexCount = vertices.size(); // Keep similar size
 
-    bool success = MeshRemeshFull<double>::Remesh(vertices, triangles, params);
+    bool success = MeshRemesh<double>::Remesh(vertices, triangles, params);
 
     if (success)
     {
-        std::cout << "MeshRemeshFull SUCCESS: " << vertices.size() << " vertices, "
+        std::cout << "MeshRemesh SUCCESS: " << vertices.size() << " vertices, "
                   << triangles.size() << " triangles" << std::endl;
         SaveOBJ("test_remesh_full_output.obj", vertices, triangles);
 
@@ -202,17 +202,17 @@ void TestMeshRemeshFull()
     }
     else
     {
-        std::cout << "MeshRemeshFull FAILED" << std::endl;
+        std::cout << "MeshRemesh FAILED" << std::endl;
     }
 }
 
 int main(int argc, char* argv[])
 {
     std::cout << "===== Full Geogram Algorithms Test =====" << std::endl;
-    std::cout << "Testing Co3NeFull and MeshRemeshFull implementations" << std::endl;
+    std::cout << "Testing Co3Ne and MeshRemesh implementations" << std::endl;
 
-    TestCo3NeFull();
-    TestMeshRemeshFull();
+    TestCo3Ne();
+    TestMeshRemesh();
 
     std::cout << "\n===== Tests Complete =====" << std::endl;
     return 0;

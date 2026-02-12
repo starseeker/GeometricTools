@@ -3,9 +3,9 @@
 // Distributed under the Boost Software License, Version 1.0.
 // https://www.boost.org/LICENSE_1_0.txt
 // https://www.geometrictools.com/License/Boost/LICENSE_1_0.txt
-// File Version: 8.0.2026.02.10
+// File Version: 8.0.2026.02.12
 //
-// Co3Ne (Concurrent Co-Cones) FULL surface reconstruction ported from Geogram
+// Co3Ne (Concurrent Co-Cones) surface reconstruction ported from Geogram
 //
 // Original Geogram Source:
 // - geogram/src/lib/geogram/points/co3ne.h
@@ -54,7 +54,7 @@
 namespace gte
 {
     template <typename Real>
-    class Co3NeFull
+    class Co3Ne
     {
     public:
         struct Parameters

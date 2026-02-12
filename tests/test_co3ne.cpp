@@ -1,7 +1,7 @@
 // Test program for GTE Co3Ne surface reconstruction
 // Demonstrates point cloud to mesh reconstruction using GTE style headers
 
-#include <GTE/Mathematics/Co3NeFull.h>
+#include <GTE/Mathematics/Co3Ne.h>
 #include <GTE/Mathematics/MeshValidation.h>
 #include <fstream>
 #include <iostream>
@@ -228,7 +228,7 @@ int main(int argc, char* argv[])
     std::cout << "  Search radius: " << (searchRadius > 0 ? std::to_string(searchRadius) : "auto") << std::endl;
     std::cout << "  Max normal angle: " << maxAngle << " degrees" << std::endl;
 
-    gte::Co3NeFull<double>::Parameters params;
+    gte::Co3Ne<double>::Parameters params;
     params.searchRadius = searchRadius;
     params.maxNormalAngle = maxAngle;
     params.kNeighbors = 20;
@@ -239,7 +239,7 @@ int main(int argc, char* argv[])
     std::vector<std::array<int32_t, 3>> outTriangles;
 
     std::cout << "\nRunning Co3Ne reconstruction..." << std::endl;
-    bool success = gte::Co3NeFull<double>::Reconstruct(
+    bool success = gte::Co3Ne<double>::Reconstruct(
         points, outVertices, outTriangles, params);
 
     if (!success)

@@ -1,5 +1,5 @@
 // Test Phase 4 integration: CVTN with anisotropic remeshing
-#include <GTE/Mathematics/MeshRemeshFull.h>
+#include <GTE/Mathematics/MeshRemesh.h>
 #include <GTE/Mathematics/Vector3.h>
 #include <iostream>
 #include <vector>
@@ -75,7 +75,7 @@ bool Test1_IsotropicCVTN()
               << triangles.size() << " triangles" << std::endl;
     
     // Configure parameters for isotropic CVT with new CVTN
-    MeshRemeshFull<double>::Parameters params;
+    MeshRemesh<double>::Parameters params;
     params.targetVertexCount = 6;  // Target 6 vertices
     params.lloydIterations = 5;
     params.useRVD = true;
@@ -85,7 +85,7 @@ bool Test1_IsotropicCVTN()
     params.projectToSurface = true;
     
     // Run remeshing
-    bool success = MeshRemeshFull<double>::Remesh(vertices, triangles, params);
+    bool success = MeshRemesh<double>::Remesh(vertices, triangles, params);
     
     if (!success)
     {
@@ -113,7 +113,7 @@ bool Test2_AnisotropicCVTN()
               << triangles.size() << " triangles" << std::endl;
     
     // Configure parameters for anisotropic CVT
-    MeshRemeshFull<double>::Parameters params;
+    MeshRemesh<double>::Parameters params;
     params.targetVertexCount = 6;
     params.lloydIterations = 5;
     params.useRVD = true;
@@ -125,7 +125,7 @@ bool Test2_AnisotropicCVTN()
     params.projectToSurface = true;
     
     // Run remeshing
-    bool success = MeshRemeshFull<double>::Remesh(vertices, triangles, params);
+    bool success = MeshRemesh<double>::Remesh(vertices, triangles, params);
     
     if (!success)
     {
@@ -153,7 +153,7 @@ bool Test3_CurvatureAdaptive()
               << triangles.size() << " triangles" << std::endl;
     
     // Configure parameters for curvature-adaptive anisotropic CVT
-    MeshRemeshFull<double>::Parameters params;
+    MeshRemesh<double>::Parameters params;
     params.targetVertexCount = 12;
     params.lloydIterations = 5;
     params.useRVD = true;
@@ -165,7 +165,7 @@ bool Test3_CurvatureAdaptive()
     params.projectToSurface = true;
     
     // Run remeshing
-    bool success = MeshRemeshFull<double>::Remesh(vertices, triangles, params);
+    bool success = MeshRemesh<double>::Remesh(vertices, triangles, params);
     
     if (!success)
     {
@@ -193,7 +193,7 @@ bool Test4_BackwardCompatibility()
               << triangles.size() << " triangles" << std::endl;
     
     // Configure parameters to use old RVD (not CVTN)
-    MeshRemeshFull<double>::Parameters params;
+    MeshRemesh<double>::Parameters params;
     params.targetVertexCount = 6;
     params.lloydIterations = 3;
     params.useRVD = true;
@@ -203,7 +203,7 @@ bool Test4_BackwardCompatibility()
     params.projectToSurface = true;
     
     // Run remeshing
-    bool success = MeshRemeshFull<double>::Remesh(vertices, triangles, params);
+    bool success = MeshRemesh<double>::Remesh(vertices, triangles, params);
     
     if (!success)
     {
@@ -231,7 +231,7 @@ bool Test5_CVTNSimpleRemesh()
               << triangles.size() << " triangles" << std::endl;
     
     // Configure parameters for CVTN without aggressive edge operations
-    MeshRemeshFull<double>::Parameters params;
+    MeshRemesh<double>::Parameters params;
     params.targetVertexCount = 10;  // Use vertex count instead of edge length
     params.lloydIterations = 3;     // CVTN Lloyd iterations
     params.useRVD = true;
@@ -241,7 +241,7 @@ bool Test5_CVTNSimpleRemesh()
     params.projectToSurface = true;
     
     // Run remeshing
-    bool success = MeshRemeshFull<double>::Remesh(vertices, triangles, params);
+    bool success = MeshRemesh<double>::Remesh(vertices, triangles, params);
     
     if (!success)
     {
@@ -260,7 +260,7 @@ int main()
 {
     std::cout << "====================================" << std::endl;
     std::cout << "Phase 4 Integration Tests" << std::endl;
-    std::cout << "Testing CVTN integration with MeshRemeshFull" << std::endl;
+    std::cout << "Testing CVTN integration with MeshRemesh" << std::endl;
     std::cout << "====================================" << std::endl;
     
     int passed = 0;

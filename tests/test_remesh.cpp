@@ -1,7 +1,7 @@
 // Test program for GTE MeshRemesh functionality
 // Demonstrates mesh remeshing using GTE style headers
 
-#include <GTE/Mathematics/MeshRemeshFull.h>
+#include <GTE/Mathematics/MeshRemesh.h>
 #include <GTE/Mathematics/MeshRepair.h>
 #include <GTE/Mathematics/MeshValidation.h>
 #include <fstream>
@@ -153,7 +153,7 @@ int main(int argc, char* argv[])
     // Remeshing
     std::cout << "\nStep 2: Remeshing" << std::endl;
 
-    gte::MeshRemeshFull<double>::Parameters remeshParams;
+    gte::MeshRemesh<double>::Parameters remeshParams;
     remeshParams.lloydIterations = 10;
     remeshParams.splitIterations = 5;
     remeshParams.collapseIterations = 5;
@@ -173,7 +173,7 @@ int main(int argc, char* argv[])
     auto originalVertices = vertices;
     auto originalTriangles = triangles;
 
-    gte::MeshRemeshFull<double>::Remesh(vertices, triangles, originalVertices, originalTriangles, remeshParams);
+    gte::MeshRemesh<double>::Remesh(vertices, triangles, originalVertices, originalTriangles, remeshParams);
 
     std::cout << "  Vertices: " << vBefore << " -> " << vertices.size() << std::endl;
     std::cout << "  Triangles: " << tBefore << " -> " << triangles.size() << std::endl;

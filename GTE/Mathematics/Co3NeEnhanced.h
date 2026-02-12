@@ -20,17 +20,17 @@
 
 #pragma once
 
-#include <GTE/Mathematics/Co3NeFull.h>
+#include <GTE/Mathematics/Co3Ne.h>
 #include <chrono>
 
 namespace gte
 {
     template <typename Real>
-    class Co3NeFullEnhanced : public Co3NeFull<Real>
+    class Co3NeEnhanced : public Co3Ne<Real>
     {
     public:
         using Vector3Type = Vector3<Real>;
-        using Parameters = typename Co3NeFull<Real>::Parameters;
+        using Parameters = typename Co3Ne<Real>::Parameters;
         
         // Enhanced parameters
         struct EnhancedParameters : public Parameters

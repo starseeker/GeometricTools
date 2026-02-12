@@ -1,6 +1,6 @@
 // Test program comparing RVD-based vs approximate Lloyd relaxation
 
-#include <GTE/Mathematics/MeshRemeshFull.h>
+#include <GTE/Mathematics/MeshRemesh.h>
 #include <GTE/Mathematics/Vector3.h>
 #include <iostream>
 #include <vector>
@@ -238,13 +238,13 @@ int main(int argc, char* argv[])
         auto testVertices = vertices;
         auto testTriangles = triangles;
 
-        MeshRemeshFull<double>::Parameters params;
+        MeshRemesh<double>::Parameters params;
         params.lloydIterations = 5;
         params.useRVD = false;  // Use approximate method
         params.preserveBoundary = true;
         params.projectToSurface = false;  // Don't project for fair comparison
 
-        if (MeshRemeshFull<double>::Remesh(testVertices, testTriangles, params))
+        if (MeshRemesh<double>::Remesh(testVertices, testTriangles, params))
         {
             std::cout << "SUCCESS: Approximate remeshing complete" << std::endl;
             std::cout << "  Output: " << testVertices.size() << " vertices, "
@@ -268,13 +268,13 @@ int main(int argc, char* argv[])
         auto testVertices = vertices;
         auto testTriangles = triangles;
 
-        MeshRemeshFull<double>::Parameters params;
+        MeshRemesh<double>::Parameters params;
         params.lloydIterations = 5;
         params.useRVD = true;  // Use exact RVD
         params.preserveBoundary = true;
         params.projectToSurface = false;  // Don't project for fair comparison
 
-        if (MeshRemeshFull<double>::Remesh(testVertices, testTriangles, params))
+        if (MeshRemesh<double>::Remesh(testVertices, testTriangles, params))
         {
             std::cout << "SUCCESS: RVD-based remeshing complete" << std::endl;
             std::cout << "  Output: " << testVertices.size() << " vertices, "
