@@ -12,7 +12,9 @@ TEST_DIR = tests
 TARGETS = test_mesh_repair test_remesh test_co3ne test_full_algorithms test_rvd \
           demo_rvd_cvt test_remesh_comparison test_co3ne_rvd test_newton_optimizer \
           test_rvd_performance stress_test test_threadpool test_parallel_rvd \
-          test_enhanced_manifold
+          test_enhanced_manifold test_anisotropic_remesh test_delaunay6 test_cvt6d \
+          test_delaunay_n test_delaunay_nn test_rvd_n test_cvt_n test_phase4_integration \
+          test_anisotropic_end_to_end
 
 all: $(TARGETS)
 
@@ -60,6 +62,34 @@ test_parallel_rvd: $(TEST_DIR)/test_parallel_rvd.cpp GTE/Mathematics/RestrictedV
 test_enhanced_manifold: $(TEST_DIR)/test_enhanced_manifold.cpp
 	$(CXX) $(CXXFLAGS) $(PTHREAD) -o test_enhanced_manifold $(TEST_DIR)/test_enhanced_manifold.cpp $(LDFLAGS)
 
+# Anisotropic remeshing test
+test_anisotropic_remesh: $(TEST_DIR)/test_anisotropic_remesh.cpp GTE/Mathematics/MeshAnisotropy.h GTE/Mathematics/MeshRemeshFull.h
+	$(CXX) $(CXXFLAGS) -o test_anisotropic_remesh $(TEST_DIR)/test_anisotropic_remesh.cpp $(LDFLAGS)
+
+# 6D Delaunay test
+test_delaunay6: $(TEST_DIR)/test_delaunay6.cpp GTE/Mathematics/Delaunay6.h GTE/Mathematics/MeshAnisotropy.h
+	$(CXX) $(CXXFLAGS) -o test_delaunay6 $(TEST_DIR)/test_delaunay6.cpp $(LDFLAGS)
+
+# 6D CVT test
+test_cvt6d: $(TEST_DIR)/test_cvt6d.cpp GTE/Mathematics/CVT6D.h GTE/Mathematics/MeshAnisotropy.h
+	$(CXX) $(CXXFLAGS) -o test_cvt6d $(TEST_DIR)/test_cvt6d.cpp $(LDFLAGS)
+
+# DelaunayN base class test
+test_delaunay_n: $(TEST_DIR)/test_delaunay_n.cpp GTE/Mathematics/DelaunayN.h
+	$(CXX) $(CXXFLAGS) -o test_delaunay_n $(TEST_DIR)/test_delaunay_n.cpp $(LDFLAGS)
+
+# DelaunayNN implementation test
+test_delaunay_nn: $(TEST_DIR)/test_delaunay_nn.cpp GTE/Mathematics/DelaunayNN.h GTE/Mathematics/NearestNeighborSearchN.h GTE/Mathematics/DelaunayN.h
+	$(CXX) $(CXXFLAGS) -o test_delaunay_nn $(TEST_DIR)/test_delaunay_nn.cpp $(LDFLAGS)
+
+# RestrictedVoronoiDiagramN test
+test_rvd_n: $(TEST_DIR)/test_rvd_n.cpp GTE/Mathematics/RestrictedVoronoiDiagramN.h GTE/Mathematics/DelaunayNN.h GTE/Mathematics/MeshAnisotropy.h
+	$(CXX) $(CXXFLAGS) -o test_rvd_n $(TEST_DIR)/test_rvd_n.cpp $(LDFLAGS)
+
+# CVTN (N-dimensional CVT) test
+test_cvt_n: $(TEST_DIR)/test_cvt_n.cpp GTE/Mathematics/CVTN.h GTE/Mathematics/RestrictedVoronoiDiagramN.h GTE/Mathematics/DelaunayNN.h GTE/Mathematics/MeshAnisotropy.h
+	$(CXX) $(CXXFLAGS) -o test_cvt_n $(TEST_DIR)/test_cvt_n.cpp $(LDFLAGS)
+
 # Demonstration programs
 demo_rvd_cvt: $(TEST_DIR)/demo_rvd_cvt.cpp
 	$(CXX) $(CXXFLAGS) -o demo_rvd_cvt $(TEST_DIR)/demo_rvd_cvt.cpp $(LDFLAGS)
@@ -85,3 +115,11 @@ clean:
 	rm -f $(TEST_DIR)/data/*_repaired.obj $(TEST_DIR)/data/*_output.obj
 
 .PHONY: all clean test stress generate_test_data
+
+# Phase 4 integration test
+test_phase4_integration: $(TEST_DIR)/test_phase4_integration.cpp GTE/Mathematics/CVTN.h GTE/Mathematics/MeshRemeshFull.h
+	$(CXX) $(CXXFLAGS) -o test_phase4_integration $(TEST_DIR)/test_phase4_integration.cpp $(LDFLAGS)
+
+# Comprehensive anisotropic remeshing end-to-end test
+test_anisotropic_end_to_end: $(TEST_DIR)/test_anisotropic_end_to_end.cpp GTE/Mathematics/MeshRemeshFull.h GTE/Mathematics/CVTN.h GTE/Mathematics/MeshAnisotropy.h
+	$(CXX) $(CXXFLAGS) -o test_anisotropic_end_to_end $(TEST_DIR)/test_anisotropic_end_to_end.cpp $(LDFLAGS)

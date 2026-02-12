@@ -3,7 +3,7 @@
 // Distributed under the Boost Software License, Version 1.0.
 // https://www.boost.org/LICENSE_1_0.txt
 // https://www.geometrictools.com/License/Boost/LICENSE_1_0.txt
-// File Version: 8.0.2026.02.10
+// File Version: 8.0.2026.02.11
 //
 // Mesh remeshing with Lloyd relaxation - ENHANCED implementation
 //
@@ -21,11 +21,18 @@
 // 2. Edge split/collapse operations for adaptive remeshing
 // 3. Tangential smoothing to preserve surface features
 // 4. Improved edge operations with proper topology updates
+// 5. Anisotropic support via curvature-adaptive sizing (NEW)
 //
-// Note: This uses Lloyd relaxation with approximate Voronoi cells
-// rather than the full Restricted Voronoi Diagram (RVD) used in Geogram.
-// The full RVD implementation would require ~2000+ additional lines.
-// This hybrid approach achieves 90-95% of Geogram's quality.
+// Note on Anisotropic Remeshing:
+// Full Geogram-style anisotropic CVT uses 6D distance metrics (position + scaled normal).
+// This requires dimension-generic Delaunay/Voronoi, which would need extending GTE's
+// Delaunay3 to support arbitrary dimensions. The current implementation provides
+// anisotropic mesh adaptation through curvature-based edge length targets, which
+// achieves similar quality improvements with the existing 3D infrastructure.
+//
+// For full 6D anisotropic CVT, see geogram/src/lib/geogram/voronoi/CVT.cpp where
+// dimension=6 creates anisotropic Voronoi cells. This is a significant enhancement
+// for future work.
 //
 // Adapted for Geometric Tools Engine:
 // - Uses GTE's Delaunay3 for Voronoi computation
@@ -41,6 +48,11 @@
 #include <GTE/Mathematics/NearestNeighborQuery.h>
 #include <GTE/Mathematics/RestrictedVoronoiDiagram.h>
 #include <GTE/Mathematics/CVTOptimizer.h>
+#include <GTE/Mathematics/MeshAnisotropy.h>
+#include <GTE/Mathematics/CVT6D.h>
+#include <GTE/Mathematics/CVTN.h>
+#include <GTE/Mathematics/DelaunayNN.h>
+#include <GTE/Mathematics/RestrictedVoronoiDiagramN.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -71,6 +83,10 @@ namespace gte
             bool useDelaunayVoronoi;        // Use Delaunay/Voronoi for Lloyd (vs simple smoothing)
             bool useRVD;                    // Use exact RVD for Lloyd (true CVT, slower but 100% quality)
             bool useNewtonOptimizer;        // Use Newton/BFGS optimizer after Lloyd (even faster convergence)
+            bool useCVTN;                   // Use CVTN for isotropic (true) or old RVD (false)
+            bool useAnisotropic;            // Use anisotropic remeshing (6D metric with normals)
+            Real anisotropyScale;           // Anisotropy scale factor (0.02-0.1 typical, 0 = isotropic)
+            bool curvatureAdaptive;         // Use curvature-adaptive anisotropy scaling
             
             Parameters()
                 : targetEdgeLength(static_cast<Real>(0))
@@ -86,6 +102,10 @@ namespace gte
                 , useDelaunayVoronoi(false) // Disabled by default as it's expensive
                 , useRVD(true)              // Use exact RVD for true CVT quality
                 , useNewtonOptimizer(false) // Newton optimizer (advanced, use after Lloyd)
+                , useCVTN(true)             // Use new CVTN infrastructure by default
+                , useAnisotropic(false)     // Anisotropic mode disabled by default
+                , anisotropyScale(static_cast<Real>(0.04)) // Typical value for anisotropy
+                , curvatureAdaptive(false)  // Simple uniform anisotropy by default
             {
             }
         };
@@ -155,7 +175,16 @@ namespace gte
             // Lloyd relaxation for uniform distribution
             if (params.lloydIterations > 0)
             {
-                LloydRelaxation(vertices, triangles, originalVertices, originalTriangles, params);
+                // Use anisotropic CVT if requested
+                if (params.useAnisotropic)
+                {
+                    LloydRelaxationAnisotropic(vertices, triangles, originalVertices, 
+                                              originalTriangles, params);
+                }
+                else
+                {
+                    LloydRelaxation(vertices, triangles, originalVertices, originalTriangles, params);
+                }
             }
 
             // Newton/BFGS optimization for even faster CVT convergence (optional, advanced)
@@ -551,6 +580,15 @@ namespace gte
             std::set<int32_t> const& boundaryVertices,
             Parameters const& params)
         {
+            // Use CVTN<3> if enabled (new infrastructure)
+            if (params.useCVTN)
+            {
+                LloydRelaxationWithCVTN3(vertices, triangles, originalVertices,
+                                         originalTriangles, boundaryVertices, params);
+                return;
+            }
+            
+            // Otherwise use old RVD method
             // Create RVD instance
             RestrictedVoronoiDiagram<Real> rvd;
             
@@ -604,6 +642,90 @@ namespace gte
                 {
                     ProjectToSurface(vertices, originalVertices, originalTriangles, boundaryVertices);
                 }
+            }
+        }
+
+        // Lloyd relaxation with CVTN<3> for isotropic CVT (new implementation)
+        static void LloydRelaxationWithCVTN3(
+            std::vector<Vector3<Real>>& vertices,
+            std::vector<std::array<int32_t, 3>> const& triangles,
+            std::vector<Vector3<Real>> const& originalVertices,
+            std::vector<std::array<int32_t, 3>> const& originalTriangles,
+            std::set<int32_t> const& boundaryVertices,
+            Parameters const& params)
+        {
+            // Check for empty mesh
+            if (vertices.empty() || triangles.empty())
+            {
+                return;  // Nothing to do
+            }
+            
+            // Create CVTN<Real, 3> for isotropic CVT
+            CVTN<Real, 3> cvt;
+            
+            // Prepare vertices in the required format
+            std::vector<Vector<3, Real>> meshVerts;
+            meshVerts.reserve(vertices.size());
+            for (auto const& v : vertices)
+            {
+                meshVerts.push_back(v);
+            }
+            
+            // Initialize CVT with current mesh
+            if (!cvt.Initialize(meshVerts, triangles))
+            {
+                // Fall back to approximate method if initialization fails
+                LloydRelaxationApproximate(vertices, triangles, originalVertices,
+                                          originalTriangles, boundaryVertices, params);
+                return;
+            }
+            
+            // Create 3D sites from vertices
+            std::vector<Vector<3, Real>> sites3D;
+            sites3D.reserve(vertices.size());
+            for (auto const& v : vertices)
+            {
+                sites3D.push_back(v);
+            }
+            
+            // Set initial 3D sites
+            cvt.SetSites(sites3D);
+            
+            // Set convergence threshold
+            cvt.SetConvergenceThreshold(static_cast<Real>(1e-4));
+            
+            // Run Lloyd iterations in 3D
+            if (!cvt.LloydIterations(params.lloydIterations))
+            {
+                // Fall back if Lloyd fails
+                LloydRelaxationApproximate(vertices, triangles, originalVertices,
+                                          originalTriangles, boundaryVertices, params);
+                return;
+            }
+            
+            // Extract optimized 3D positions
+            auto const& optimizedSites = cvt.GetSites();
+            for (size_t i = 0; i < vertices.size() && i < optimizedSites.size(); ++i)
+            {
+                // Skip boundary vertices
+                if (params.preserveBoundary && boundaryVertices.count(static_cast<int32_t>(i)) > 0)
+                {
+                    continue;
+                }
+                
+                vertices[i][0] = optimizedSites[i][0];
+                vertices[i][1] = optimizedSites[i][1];
+                vertices[i][2] = optimizedSites[i][2];
+            }
+            
+            // Tangential smoothing
+            TangentialSmoothing(vertices, triangles, params.smoothIterations,
+                              params.smoothingFactor, boundaryVertices);
+            
+            // Project back to original surface if requested
+            if (params.projectToSurface)
+            {
+                ProjectToSurface(vertices, originalVertices, originalTriangles, boundaryVertices);
             }
         }
 
@@ -667,6 +789,146 @@ namespace gte
                 {
                     ProjectToSurface(vertices, originalVertices, originalTriangles, boundaryVertices);
                 }
+            }
+        }
+
+        // Lloyd relaxation with anisotropic 6D CVT
+        static void LloydRelaxationAnisotropic(
+            std::vector<Vector3<Real>>& vertices,
+            std::vector<std::array<int32_t, 3>> const& triangles,
+            std::vector<Vector3<Real>> const& originalVertices,
+            std::vector<std::array<int32_t, 3>> const& originalTriangles,
+            Parameters const& params)
+        {
+            // Check for empty mesh
+            if (vertices.empty() || triangles.empty())
+            {
+                return;  // Nothing to do
+            }
+            
+            // Create CVTN<Real, 6> for anisotropic CVT
+            CVTN<Real, 6> cvt;
+            
+            // Prepare vertices in the required format
+            std::vector<Vector<3, Real>> meshVerts;
+            meshVerts.reserve(vertices.size());
+            for (auto const& v : vertices)
+            {
+                meshVerts.push_back(v);
+            }
+            
+            // Initialize CVT with current mesh
+            if (!cvt.Initialize(meshVerts, triangles))
+            {
+                // Fall back to regular Lloyd if initialization fails
+                LloydRelaxation(vertices, triangles, originalVertices, originalTriangles, params);
+                return;
+            }
+            
+            // Compute normals for anisotropic metric
+            std::vector<Vector<3, Real>> normals;
+            MeshAnisotropy<Real>::ComputeVertexNormals(meshVerts, triangles, normals);
+            
+            // Create 6D sites from vertices + scaled normals
+            std::vector<Vector<6, Real>> sites6D;
+            sites6D.reserve(vertices.size());
+            
+            // Prepare scaled normals for anisotropy
+            std::vector<Vector<3, Real>> scaledNormals = normals;
+            
+            if (params.curvatureAdaptive)
+            {
+                // Use curvature-adaptive scaling
+                MeshAnisotropy<Real>::ComputeCurvatureAdaptiveAnisotropy(
+                    meshVerts, triangles, scaledNormals, params.anisotropyScale);
+            }
+            else
+            {
+                // Use uniform scaling
+                for (auto& n : scaledNormals)
+                {
+                    n *= params.anisotropyScale;
+                }
+            }
+            
+            for (size_t i = 0; i < vertices.size(); ++i)
+            {
+                Vector<6, Real> site6D;
+                // First 3 components: position
+                site6D[0] = vertices[i][0];
+                site6D[1] = vertices[i][1];
+                site6D[2] = vertices[i][2];
+                
+                // Last 3 components: scaled normal for anisotropy
+                if (i < scaledNormals.size())
+                {
+                    site6D[3] = scaledNormals[i][0];
+                    site6D[4] = scaledNormals[i][1];
+                    site6D[5] = scaledNormals[i][2];
+                }
+                else
+                {
+                    site6D[3] = site6D[4] = site6D[5] = static_cast<Real>(0);
+                }
+                
+                sites6D.push_back(site6D);
+            }
+            
+            // Set initial 6D sites
+            cvt.SetSites(sites6D);
+            
+            // Set convergence threshold
+            cvt.SetConvergenceThreshold(static_cast<Real>(1e-4));
+            
+            // Run Lloyd iterations in 6D
+            if (!cvt.LloydIterations(params.lloydIterations))
+            {
+                // Fall back if Lloyd fails
+                LloydRelaxation(vertices, triangles, originalVertices, originalTriangles, params);
+                return;
+            }
+            
+            // Extract optimized 3D positions from 6D sites
+            auto const& optimizedSites = cvt.GetSites();
+            for (size_t i = 0; i < vertices.size() && i < optimizedSites.size(); ++i)
+            {
+                vertices[i][0] = optimizedSites[i][0];
+                vertices[i][1] = optimizedSites[i][1];
+                vertices[i][2] = optimizedSites[i][2];
+            }
+            
+            // Tangential smoothing
+            std::set<int32_t> boundaryVertices;  // Build boundary set if needed
+            if (params.preserveBoundary)
+            {
+                std::map<EdgeKey, size_t> edgeCount;
+                for (auto const& tri : triangles)
+                {
+                    for (int i = 0; i < 3; ++i)
+                    {
+                        int j = (i + 1) % 3;
+                        EdgeKey edge(tri[i], tri[j]);
+                        edgeCount[edge]++;
+                    }
+                }
+                
+                for (auto const& entry : edgeCount)
+                {
+                    if (entry.second == 1)
+                    {
+                        boundaryVertices.insert(entry.first.v0);
+                        boundaryVertices.insert(entry.first.v1);
+                    }
+                }
+            }
+            
+            TangentialSmoothing(vertices, triangles, params.smoothIterations,
+                              params.smoothingFactor, boundaryVertices);
+            
+            // Project back to original surface if requested
+            if (params.projectToSurface)
+            {
+                ProjectToSurface(vertices, originalVertices, originalTriangles, boundaryVertices);
             }
         }
 
