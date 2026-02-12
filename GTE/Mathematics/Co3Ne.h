@@ -68,6 +68,7 @@ namespace gte
             bool removeIsolatedTriangles;   // Remove isolated triangles
             bool smoothWithRVD;             // Post-process with RVD-based smoothing (improves quality)
             size_t rvdSmoothIterations;     // Number of RVD smoothing iterations
+            bool relaxedManifoldExtraction; // Use relaxed manifold extraction (accept more triangles)
             
             Parameters()
                 : kNeighbors(20)
@@ -79,6 +80,7 @@ namespace gte
                 , removeIsolatedTriangles(true)
                 , smoothWithRVD(true)       // Enable RVD smoothing for better quality
                 , rvdSmoothIterations(3)    // 3 iterations usually sufficient
+                , relaxedManifoldExtraction(false)  // Default to original behavior
             {
             }
         };
@@ -506,13 +508,16 @@ namespace gte
             }
             
             // Categorize triangles
+            // In relaxed mode, also accept triangles that appear 2 times as "good"
+            int minGoodCount = params.relaxedManifoldExtraction ? 2 : 3;
+            
             for (auto const& tri : candidateTriangles)
             {
                 std::array<int32_t, 3> normalized = tri;
                 std::sort(normalized.begin(), normalized.end());
                 int count = triangleCounts[normalized];
                 
-                if (count == 3)
+                if (count >= minGoodCount && count <= 3)
                 {
                     // Only add once (avoid duplicates)
                     if (goodTriangles.empty() || goodTriangles.back() != tri)
@@ -520,7 +525,7 @@ namespace gte
                         goodTriangles.push_back(tri);
                     }
                 }
-                else if (count <= 2)
+                else if (count == 1 || (count > 3 && count <= 5))
                 {
                     if (notSoGoodTriangles.empty() || notSoGoodTriangles.back() != tri)
                     {
