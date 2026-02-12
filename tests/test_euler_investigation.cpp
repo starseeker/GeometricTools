@@ -1,4 +1,4 @@
-#include <GTE/Mathematics/Co3NeFullEnhanced.h>
+#include <GTE/Mathematics/Co3NeEnhanced.h>
 #include <iostream>
 #include <vector>
 #include <set>
@@ -42,10 +42,10 @@ int main()
     std::vector<Vector3<double>> vertices;
     std::vector<std::array<int32_t, 3>> triangles;
     
-    Co3NeFullEnhanced<double>::EnhancedParameters params;
+    Co3NeEnhanced<double>::EnhancedParameters params;
     params.useEnhancedManifold = true;
     
-    bool success = Co3NeFullEnhanced<double>::Reconstruct(
+    bool success = Co3NeEnhanced<double>::Reconstruct(
         points, vertices, triangles, params);
     
     if (!success || triangles.empty())

@@ -1,6 +1,6 @@
 // Test program for Newton/BFGS CVT optimizer
 
-#include <GTE/Mathematics/MeshRemeshFull.h>
+#include <GTE/Mathematics/MeshRemesh.h>
 #include <GTE/Mathematics/CVTOptimizer.h>
 #include <GTE/Mathematics/Vector3.h>
 #include <iostream>
@@ -225,7 +225,7 @@ int main()
         auto testVertices = vertices;
         auto testTriangles = triangles;
 
-        MeshRemeshFull<double>::Parameters params;
+        MeshRemesh<double>::Parameters params;
         params.lloydIterations = 5;
         params.useRVD = true;
         params.useNewtonOptimizer = false;  // Lloyd only
@@ -233,7 +233,7 @@ int main()
 
         auto start = std::chrono::high_resolution_clock::now();
         
-        if (MeshRemeshFull<double>::Remesh(testVertices, testTriangles, params))
+        if (MeshRemesh<double>::Remesh(testVertices, testTriangles, params))
         {
             auto end = std::chrono::high_resolution_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
@@ -259,7 +259,7 @@ int main()
         auto testVertices = vertices;
         auto testTriangles = triangles;
 
-        MeshRemeshFull<double>::Parameters params;
+        MeshRemesh<double>::Parameters params;
         params.lloydIterations = 3;         // Fewer Lloyd iterations
         params.useRVD = true;
         params.useNewtonOptimizer = true;    // Add Newton
@@ -268,7 +268,7 @@ int main()
 
         auto start = std::chrono::high_resolution_clock::now();
         
-        if (MeshRemeshFull<double>::Remesh(testVertices, testTriangles, params))
+        if (MeshRemesh<double>::Remesh(testVertices, testTriangles, params))
         {
             auto end = std::chrono::high_resolution_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
@@ -294,7 +294,7 @@ int main()
         auto testVertices = vertices;
         auto testTriangles = triangles;
 
-        MeshRemeshFull<double>::Parameters params;
+        MeshRemesh<double>::Parameters params;
         params.lloydIterations = 0;          // No Lloyd
         params.useRVD = true;
         params.useNewtonOptimizer = true;    // Newton only
@@ -303,7 +303,7 @@ int main()
 
         auto start = std::chrono::high_resolution_clock::now();
         
-        if (MeshRemeshFull<double>::Remesh(testVertices, testTriangles, params))
+        if (MeshRemesh<double>::Remesh(testVertices, testTriangles, params))
         {
             auto end = std::chrono::high_resolution_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);

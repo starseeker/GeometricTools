@@ -1,7 +1,7 @@
 // Test program for GTE Anisotropic Mesh Remeshing
 // Demonstrates anisotropic remeshing using 6D metric tensors
 
-#include <GTE/Mathematics/MeshRemeshFull.h>
+#include <GTE/Mathematics/MeshRemesh.h>
 #include <GTE/Mathematics/MeshAnisotropy.h>
 #include <GTE/Mathematics/MeshRepair.h>
 #include <fstream>
@@ -159,7 +159,7 @@ int main(int argc, char* argv[])
     // Test anisotropic remeshing
     std::cout << "\nTesting anisotropic remeshing...\n";
     
-    gte::MeshRemeshFull<double>::Parameters params;
+    gte::MeshRemesh<double>::Parameters params;
     params.targetVertexCount = vertices.size();  // Keep similar vertex count
     params.lloydIterations = 5;
     params.useRVD = true;
@@ -180,7 +180,7 @@ int main(int argc, char* argv[])
     auto remeshedVertices = vertices;
     auto remeshedTriangles = triangles;
     
-    bool success = gte::MeshRemeshFull<double>::Remesh(
+    bool success = gte::MeshRemesh<double>::Remesh(
         remeshedVertices, remeshedTriangles, params);
     
     if (!success)

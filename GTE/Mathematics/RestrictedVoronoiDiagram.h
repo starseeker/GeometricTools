@@ -45,6 +45,8 @@
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <memory>
+#include <set>
 #include <vector>
 
 namespace gte
@@ -232,16 +234,81 @@ namespace gte
         // ===== INTERNAL METHODS =====
 
         // Build Delaunay triangulation of Voronoi sites
+        // Uses GTE's Delaunay3 to get exact neighbor relationships
         void BuildDelaunay()
         {
-            // Convert sites to GTE format for Delaunay
             int32_t numSites = static_cast<int32_t>(mVoronoiSites.size());
             
-            // We'll use a simplified connectivity for now
-            // A full implementation would use Delaunay3 to get exact neighbors
-            // For now, we'll use distance-based neighbors as approximation
+            if (numSites < 4)
+            {
+                // Not enough sites for 3D Delaunay - use all-pairs fallback
+                mDelaunayBuilt = false;
+                return;
+            }
             
-            // This will be enhanced in a future iteration
+            // Build Delaunay triangulation
+            mDelaunay = std::make_unique<Delaunay3<Real>>();
+            
+            // Insert all sites - call Delaunay operator() on the dereferenced unique_ptr
+            Delaunay3<Real>& delRef = *mDelaunay;
+            bool success = delRef(mVoronoiSites);
+            if (!success)
+            {
+                // Delaunay failed (e.g., coplanar points) - fallback to all-pairs
+                mDelaunay.reset();
+                mDelaunayBuilt = false;
+                return;
+            }
+            
+            // Extract neighbor relationships from Delaunay tetrahedra
+            mSiteNeighbors.clear();
+            
+            auto const& tetrahedra = mDelaunay->GetIndices();
+            int32_t numTets = static_cast<int32_t>(tetrahedra.size()) / 4;
+            
+            // Each tetrahedron connects 4 sites - all pairs in the tetrahedron are neighbors
+            for (int32_t t = 0; t < numTets; ++t)
+            {
+                std::array<int32_t, 4> tet;
+                for (int i = 0; i < 4; ++i)
+                {
+                    tet[i] = tetrahedra[t * 4 + i];
+                }
+                
+                // Add all 6 edges (pairs) from this tetrahedron as neighbor relationships
+                for (int i = 0; i < 4; ++i)
+                {
+                    for (int j = i + 1; j < 4; ++j)
+                    {
+                        int32_t site1 = tet[i];
+                        int32_t site2 = tet[j];
+                        
+                        // Add bidirectional neighbor relationship
+                        if (mSiteNeighbors.find(site1) == mSiteNeighbors.end())
+                        {
+                            mSiteNeighbors[site1] = std::vector<int32_t>();
+                        }
+                        if (mSiteNeighbors.find(site2) == mSiteNeighbors.end())
+                        {
+                            mSiteNeighbors[site2] = std::vector<int32_t>();
+                        }
+                        
+                        // Avoid duplicates using a set temporarily
+                        auto& neighbors1 = mSiteNeighbors[site1];
+                        if (std::find(neighbors1.begin(), neighbors1.end(), site2) == neighbors1.end())
+                        {
+                            neighbors1.push_back(site2);
+                        }
+                        
+                        auto& neighbors2 = mSiteNeighbors[site2];
+                        if (std::find(neighbors2.begin(), neighbors2.end(), site1) == neighbors2.end())
+                        {
+                            neighbors2.push_back(site1);
+                        }
+                    }
+                }
+            }
+            
             mDelaunayBuilt = true;
         }
 
@@ -250,14 +317,21 @@ namespace gte
         {
             neighbors.clear();
 
-            // For now, use all other sites as potential neighbors
-            // A full implementation would use Delaunay connectivity
-            // This is conservative but correct (just slower)
-            for (size_t i = 0; i < mVoronoiSites.size(); ++i)
+            if (mDelaunayBuilt && mSiteNeighbors.find(siteIndex) != mSiteNeighbors.end())
             {
-                if (static_cast<int32_t>(i) != siteIndex)
+                // Use exact Delaunay neighbors
+                neighbors = mSiteNeighbors[siteIndex];
+            }
+            else
+            {
+                // Fallback: use all other sites as potential neighbors
+                // This is conservative but correct (just slower)
+                for (size_t i = 0; i < mVoronoiSites.size(); ++i)
                 {
-                    neighbors.push_back(static_cast<int32_t>(i));
+                    if (static_cast<int32_t>(i) != siteIndex)
+                    {
+                        neighbors.push_back(static_cast<int32_t>(i));
+                    }
                 }
             }
         }
@@ -449,5 +523,11 @@ namespace gte
         std::vector<Vector3<Real>> mVoronoiSites;
         Parameters mParameters;
         bool mDelaunayBuilt = false;
+        
+        // Delaunay triangulation for exact neighbor detection
+        std::unique_ptr<Delaunay3<Real>> mDelaunay;
+        
+        // Site neighbor map (site index -> list of neighbor site indices)
+        std::map<int32_t, std::vector<int32_t>> mSiteNeighbors;
     };
 }

@@ -1,7 +1,7 @@
 // Comprehensive End-to-End Test for Anisotropic Remeshing
 // Tests the complete anisotropic remeshing pipeline with quality validation
 
-#include <GTE/Mathematics/MeshRemeshFull.h>
+#include <GTE/Mathematics/MeshRemesh.h>
 #include <GTE/Mathematics/MeshAnisotropy.h>
 #include <GTE/Mathematics/MeshRepair.h>
 #include <iostream>
@@ -213,14 +213,14 @@ int main()
         auto testVerts = vertices;
         auto testTris = triangles;
         
-        MeshRemeshFull<double>::Parameters params;
+        MeshRemesh<double>::Parameters params;
         params.lloydIterations = 10;
         params.useAnisotropic = false;
         params.useCVTN = true;
         params.projectToSurface = true;
         params.smoothingFactor = 0.3;
         
-        MeshRemeshFull<double>::Remesh(testVerts, testTris, params);
+        MeshRemesh<double>::Remesh(testVerts, testTris, params);
         
         MeshQuality quality = ComputeMeshQuality(testVerts, testTris);
         quality.Print("After Isotropic CVT");
@@ -238,7 +238,7 @@ int main()
         auto testVerts = vertices;
         auto testTris = triangles;
         
-        MeshRemeshFull<double>::Parameters params;
+        MeshRemesh<double>::Parameters params;
         params.lloydIterations = 10;
         params.useAnisotropic = true;
         params.anisotropyScale = 0.04;
@@ -246,7 +246,7 @@ int main()
         params.projectToSurface = true;
         params.smoothingFactor = 0.3;
         
-        MeshRemeshFull<double>::Remesh(testVerts, testTris, params);
+        MeshRemesh<double>::Remesh(testVerts, testTris, params);
         
         MeshQuality quality = ComputeMeshQuality(testVerts, testTris);
         quality.Print("After Anisotropic CVT (Uniform)");
@@ -264,7 +264,7 @@ int main()
         auto testVerts = vertices;
         auto testTris = triangles;
         
-        MeshRemeshFull<double>::Parameters params;
+        MeshRemesh<double>::Parameters params;
         params.lloydIterations = 10;
         params.useAnisotropic = true;
         params.anisotropyScale = 0.04;
@@ -272,7 +272,7 @@ int main()
         params.projectToSurface = true;
         params.smoothingFactor = 0.3;
         
-        MeshRemeshFull<double>::Remesh(testVerts, testTris, params);
+        MeshRemesh<double>::Remesh(testVerts, testTris, params);
         
         MeshQuality quality = ComputeMeshQuality(testVerts, testTris);
         quality.Print("After Curvature-Adaptive CVT");
@@ -294,14 +294,14 @@ int main()
             auto testVerts = vertices;
             auto testTris = triangles;
             
-            MeshRemeshFull<double>::Parameters params;
+            MeshRemesh<double>::Parameters params;
             params.lloydIterations = 10;
             params.useAnisotropic = (scale > 0.0);
             params.anisotropyScale = scale;
             params.projectToSurface = true;
             params.smoothingFactor = 0.3;
             
-            MeshRemeshFull<double>::Remesh(testVerts, testTris, params);
+            MeshRemesh<double>::Remesh(testVerts, testTris, params);
             
             MeshQuality quality = ComputeMeshQuality(testVerts, testTris);
             std::cout << "Scale " << scale << ": avg quality = " 
@@ -318,7 +318,7 @@ int main()
         auto testVerts = vertices;
         auto testTris = triangles;
         
-        MeshRemeshFull<double>::Parameters params;
+        MeshRemesh<double>::Parameters params;
         params.useAnisotropic = true;
         params.anisotropyScale = 0.04;
         params.projectToSurface = true;
@@ -332,7 +332,7 @@ int main()
             auto iterTris = testTris;
             
             params.lloydIterations = iter;
-            MeshRemeshFull<double>::Remesh(iterVerts, iterTris, params);
+            MeshRemesh<double>::Remesh(iterVerts, iterTris, params);
             
             MeshQuality quality = ComputeMeshQuality(iterVerts, iterTris);
             std::cout << iter << " iterations: avg quality = " 

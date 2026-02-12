@@ -1,5 +1,5 @@
 // Simple test for Co3Ne
-#include <GTE/Mathematics/Co3NeFull.h>
+#include <GTE/Mathematics/Co3Ne.h>
 #include <iostream>
 #include <vector>
 
@@ -19,14 +19,14 @@ int main()
     std::vector<Vector3<double>> vertices;
     std::vector<std::array<int32_t, 3>> triangles;
 
-    Co3NeFull<double>::Parameters params;
+    Co3Ne<double>::Parameters params;
     params.kNeighbors = 10;
     params.maxNormalAngle = 80.0;
     params.smoothWithRVD = false;  // Test without RVD first
 
     std::cout << "Testing Co3Ne with " << points.size() << " points..." << std::endl;
     
-    if (Co3NeFull<double>::Reconstruct(points, vertices, triangles, params))
+    if (Co3Ne<double>::Reconstruct(points, vertices, triangles, params))
     {
         std::cout << "SUCCESS: Generated " << triangles.size() << " triangles" << std::endl;
     }

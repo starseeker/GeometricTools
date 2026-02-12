@@ -1,6 +1,6 @@
-// Test program for Co3NeFull with RVD smoothing
+// Test program for Co3Ne with RVD smoothing
 
-#include <GTE/Mathematics/Co3NeFull.h>
+#include <GTE/Mathematics/Co3Ne.h>
 #include <GTE/Mathematics/Vector3.h>
 #include <iostream>
 #include <vector>
@@ -156,7 +156,7 @@ std::vector<Vector3<double>> GenerateSpherePointCloud(int numPoints, double radi
 
 int main(int argc, char* argv[])
 {
-    std::cout << "===== Co3NeFull with RVD Smoothing Test =====" << std::endl;
+    std::cout << "===== Co3Ne with RVD Smoothing Test =====" << std::endl;
 
     // Generate sphere point cloud
     int numPoints = 200;
@@ -174,12 +174,12 @@ int main(int argc, char* argv[])
         std::vector<Vector3<double>> vertices;
         std::vector<std::array<int32_t, 3>> triangles;
 
-        Co3NeFull<double>::Parameters params;
+        Co3Ne<double>::Parameters params;
         params.kNeighbors = 20;
         params.orientNormals = true;
         params.smoothWithRVD = false;  // Disable RVD smoothing
 
-        if (Co3NeFull<double>::Reconstruct(points, vertices, triangles, params))
+        if (Co3Ne<double>::Reconstruct(points, vertices, triangles, params))
         {
             std::cout << "SUCCESS: Reconstruction complete" << std::endl;
             std::cout << "  Output: " << vertices.size() << " vertices, "
@@ -203,13 +203,13 @@ int main(int argc, char* argv[])
         std::vector<Vector3<double>> vertices;
         std::vector<std::array<int32_t, 3>> triangles;
 
-        Co3NeFull<double>::Parameters params;
+        Co3Ne<double>::Parameters params;
         params.kNeighbors = 20;
         params.orientNormals = true;
         params.smoothWithRVD = true;       // Enable RVD smoothing
         params.rvdSmoothIterations = 3;    // 3 iterations
 
-        if (Co3NeFull<double>::Reconstruct(points, vertices, triangles, params))
+        if (Co3Ne<double>::Reconstruct(points, vertices, triangles, params))
         {
             std::cout << "SUCCESS: Reconstruction complete" << std::endl;
             std::cout << "  Output: " << vertices.size() << " vertices, "

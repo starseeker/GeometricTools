@@ -232,15 +232,15 @@ int main(int argc, char* argv[])
     params.searchRadius = searchRadius;
     params.maxNormalAngle = maxAngle;
     params.kNeighbors = 20;
-    params.ensureManifold = true;
-    params.orientConsistently = true;
+    params.orientNormals = true;
+    params.smoothWithRVD = true;
 
     std::vector<gte::Vector3<double>> outVertices;
     std::vector<std::array<int32_t, 3>> outTriangles;
 
     std::cout << "\nRunning Co3Ne reconstruction..." << std::endl;
     bool success = gte::Co3Ne<double>::Reconstruct(
-        points, normals, outVertices, outTriangles, params);
+        points, outVertices, outTriangles, params);
 
     if (!success)
     {
