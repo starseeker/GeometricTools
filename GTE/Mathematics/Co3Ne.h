@@ -69,6 +69,7 @@ namespace gte
             bool smoothWithRVD;             // Post-process with RVD-based smoothing (improves quality)
             size_t rvdSmoothIterations;     // Number of RVD smoothing iterations
             bool relaxedManifoldExtraction; // Use relaxed manifold extraction (accept more triangles)
+            bool bypassManifoldExtraction;  // Skip manifold extraction entirely (output all unique triangles)
             
             Parameters()
                 : kNeighbors(20)
@@ -81,6 +82,7 @@ namespace gte
                 , smoothWithRVD(true)       // Enable RVD smoothing for better quality
                 , rvdSmoothIterations(3)    // 3 iterations usually sufficient
                 , relaxedManifoldExtraction(false)  // Default to original behavior
+                , bypassManifoldExtraction(false)   // Default to standard manifold extraction
             {
             }
         };
@@ -491,6 +493,32 @@ namespace gte
             std::vector<std::array<int32_t, 3>>& outTriangles,
             Parameters const& params)
         {
+            // Option: Bypass manifold extraction entirely and output unique triangles
+            if (params.bypassManifoldExtraction)
+            {
+                // Just take unique triangles
+                std::set<std::array<int32_t, 3>> uniqueTriangles;
+                
+                for (auto const& tri : candidateTriangles)
+                {
+                    std::array<int32_t, 3> normalized = tri;
+                    std::sort(normalized.begin(), normalized.end());
+                    uniqueTriangles.insert(normalized);
+                }
+                
+                outTriangles.clear();
+                outTriangles.reserve(uniqueTriangles.size());
+                
+                for (auto const& tri : uniqueTriangles)
+                {
+                    outTriangles.push_back(tri);
+                }
+                
+                return;
+            }
+            
+            // Standard manifold extraction follows...
+            
             // Separate triangles into "good" and "not-so-good" categories
             // Good triangles: appear exactly 3 times (seen from 3 Voronoi cells)
             // These form a reliable manifold seed
