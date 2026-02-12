@@ -70,6 +70,7 @@ namespace gte
             size_t rvdSmoothIterations;     // Number of RVD smoothing iterations
             bool relaxedManifoldExtraction; // Use relaxed manifold extraction (accept more triangles)
             bool bypassManifoldExtraction;  // Skip manifold extraction entirely (output all unique triangles)
+            bool autoFixNonManifold;        // Automatically fix non-manifold edges (guarantees manifold output)
             
             Parameters()
                 : kNeighbors(20)
@@ -83,6 +84,7 @@ namespace gte
                 , rvdSmoothIterations(3)    // 3 iterations usually sufficient
                 , relaxedManifoldExtraction(false)  // Default to original behavior
                 , bypassManifoldExtraction(false)   // Default to standard manifold extraction
+                , autoFixNonManifold(false)         // Default: don't auto-fix
             {
             }
         };
@@ -123,6 +125,12 @@ namespace gte
 
             // Step 4: Extract manifold surface
             ExtractManifold(points, normals, candidateTriangles, outTriangles, params);
+            
+            // Step 4.5: Auto-fix non-manifold edges if requested
+            if (params.autoFixNonManifold && !outTriangles.empty())
+            {
+                AutoFixNonManifoldEdges(outTriangles);
+            }
 
             // Copy vertices
             outVertices = points;
@@ -665,6 +673,59 @@ namespace gte
             // This scales better than a fixed percentage of diagonal
             Real multiplier = static_cast<Real>(4.0);  // Works well in practice
             return avgSpacing * multiplier;
+        }
+        
+        // Automatically fix non-manifold edges by removing offending triangles
+        // Uses greedy strategy: for each edge with >2 triangles, keep first 2
+        static void AutoFixNonManifoldEdges(
+            std::vector<std::array<int32_t, 3>>& triangles)
+        {
+            // Build edge to triangles map
+            std::map<std::pair<int32_t, int32_t>, std::vector<int32_t>> edgeToTriangles;
+            
+            for (size_t t = 0; t < triangles.size(); ++t)
+            {
+                auto const& tri = triangles[t];
+                for (int i = 0; i < 3; ++i)
+                {
+                    int32_t v0 = tri[i];
+                    int32_t v1 = tri[(i + 1) % 3];
+                    auto edge = std::make_pair(std::min(v0, v1), std::max(v0, v1));
+                    edgeToTriangles[edge].push_back(static_cast<int32_t>(t));
+                }
+            }
+            
+            // Find triangles to remove
+            std::set<int32_t> trianglesToRemove;
+            for (auto const& pair : edgeToTriangles)
+            {
+                size_t count = pair.second.size();
+                if (count > 2)
+                {
+                    // Keep first 2 triangles, remove the rest
+                    for (size_t i = 2; i < count; ++i)
+                    {
+                        trianglesToRemove.insert(pair.second[i]);
+                    }
+                }
+            }
+            
+            // Build new triangle list without removed triangles
+            if (!trianglesToRemove.empty())
+            {
+                std::vector<std::array<int32_t, 3>> fixedTriangles;
+                fixedTriangles.reserve(triangles.size() - trianglesToRemove.size());
+                
+                for (size_t t = 0; t < triangles.size(); ++t)
+                {
+                    if (trianglesToRemove.find(static_cast<int32_t>(t)) == trianglesToRemove.end())
+                    {
+                        fixedTriangles.push_back(triangles[t]);
+                    }
+                }
+                
+                triangles = std::move(fixedTriangles);
+            }
         }
     };
 }
