@@ -51,10 +51,6 @@
 #include <set>
 #include <vector>
 
-#ifdef CO3NE_DEBUG_OUTPUT
-#include <iostream>
-#endif
-
 namespace gte
 {
     template <typename Real>
@@ -542,20 +538,6 @@ namespace gte
             int minGoodCount = params.relaxedManifoldExtraction ? 2 : 3;
             int maxGoodCount = 3;
             
-            // DEBUG: Count triangle frequency distribution
-            #ifdef CO3NE_DEBUG_OUTPUT
-            std::map<int, int> freqDist;
-            for (auto const& pair : triangleCounts)
-            {
-                freqDist[pair.second]++;
-            }
-            std::cout << "Triangle frequency distribution:" << std::endl;
-            for (auto const& p : freqDist)
-            {
-                std::cout << "  Count " << p.first << ": " << p.second << " triangles" << std::endl;
-            }
-            #endif
-            
             // Add each UNIQUE triangle once based on its count
             for (auto const& pair : triangleCounts)
             {
@@ -578,11 +560,6 @@ namespace gte
                 }
                 // Triangles appearing > 3 times are discarded (like Geogram)
             }
-            
-            #ifdef CO3NE_DEBUG_OUTPUT
-            std::cout << "Good triangles: " << goodTriangles.size() << std::endl;
-            std::cout << "Not-so-good triangles: " << notSoGoodTriangles.size() << std::endl;
-            #endif
             
             // Use full manifold extraction
             typename Co3NeManifoldExtractor<Real>::Parameters extractorParams;

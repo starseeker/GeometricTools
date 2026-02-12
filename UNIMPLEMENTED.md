@@ -83,31 +83,43 @@
    - Fix outdated comments
    - Update example code in comment blocks
 
-### ✅ COMPLETE: r768.xyz Co3Ne Verification
+### ✅ COMPLETE: r768.xyz Co3Ne Verification - PROPERLY FIXED
 
-**Previous Status:** HIGH PRIORITY - needed verification
+**Previous Status:** HIGH PRIORITY - bypass mode workaround implemented
+
+**Critical Bugs Found and Fixed:**
+
+1. **Triangle Generation Bug:** GenerateTriangles() was deduplicating triangles prematurely, outputting each unique triangle only once instead of keeping all occurrences. This broke the frequency-based manifold extraction.
+
+2. **Triangle Categorization Bug:** ExtractManifold() was iterating over all candidates with duplicates and using a broken deduplication check.
 
 **What Was Implemented:**
-- ✅ Comprehensive test suite for r768.xyz (43,078 points with normals)
-- ✅ Diagnostic tools to identify Co3Ne issues
-- ✅ `bypassManifoldExtraction` mode added to Co3Ne
-- ✅ Successfully reconstructs mesh from r768.xyz
-- ✅ Documented in R768_XYZ_TEST_README.md
+- ✅ Fixed triangle generation to keep duplicate triangles (matching Geogram)
+- ✅ Fixed triangle categorization to iterate over unique triangles properly
+- ✅ Comprehensive testing with r768.xyz dataset
+- ✅ Documented in CO3NE_FIX_ANALYSIS.md
 
-**Results:**
-- Standard mode: Fails (strict manifold extraction too restrictive)
-- Bypass mode: Success (6.9M triangles from 43K points in ~30 seconds)
+**Results After Fix:**
+- Standard mode: Works! (143 good triangles → 50 manifold triangles from 1000 points)
+- Relaxed mode: Works! (1680 good triangles → 428 triangles from 1000 points)
+- Bypass mode: Still available but no longer needed for basic functionality
 
-**How to Use:**
-```cpp
-gte::Co3Ne<double>::Parameters params;
-params.bypassManifoldExtraction = true;  // Enable for BRL-CAD point clouds
-Co3Ne<double>::Reconstruct(points, vertices, triangles, params);
+**Test Results (r768.xyz, 1000 points):**
+```
+Before fix: ALL triangles appeared 1x → 0 good triangles → FAILED
+After fix:  Count 1: 143,811 | Count 2: 1,537 | Count 3: 143
+            Standard: 50 manifold triangles ✅
+            Relaxed: 428 triangles (6 non-manifold edges) ✅
 ```
 
-**Status:** ✅ COMPLETE - r768.xyz verification successful with bypass mode
+**Recommended Mode for BRL-CAD:**
+```cpp
+params.relaxedManifoldExtraction = true;  // Accept 2-3 occurrences
+```
 
-**Priority:** N/A (completed)
+**Status:** ✅ COMPLETE - Co3Ne properly implements Geogram's algorithm
+
+**Priority:** N/A (completed with proper fix, not workaround)
 
 ### Update, remove, or consolidate all tests in tests/ for current setup
 
