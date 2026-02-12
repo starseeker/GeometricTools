@@ -833,11 +833,15 @@ namespace gte
             // Full geogram mesh_reorient implementation with priority-based propagation
             // Based on geogram's repair_reorient_facets_anti_moebius
             
-            const int maxIter = 5;
+            // Maximum distance from border for propagation heuristic
+            // Value of 5 matches geogram's max_iter to balance between:
+            // - Sufficient depth to reach interior facets
+            // - Avoiding excessive computation on large meshes
+            static constexpr int MAX_BORDER_DISTANCE = 5;
             
             // Compute distance from each facet to mesh border
             std::vector<uint8_t> borderDistance;
-            ComputeBorderDistance(borderDistance, maxIter);
+            ComputeBorderDistance(borderDistance, MAX_BORDER_DISTANCE);
             
             // Process facets in order of decreasing distance from border
             // This heuristic minimizes Moebius strip artifacts
@@ -845,7 +849,7 @@ namespace gte
             int32_t moebius_count = 0;
             size_t nb_visited = 0;
             
-            for (int dist = maxIter; dist >= 0; --dist)
+            for (int dist = MAX_BORDER_DISTANCE; dist >= 0; --dist)
             {
                 for (size_t f = 0; f < mTriangles.size(); ++f)
                 {
@@ -889,10 +893,12 @@ namespace gte
             }
         }
         
-    private:
+        // ===== PRIVATE HELPER METHODS FOR MESH REORIENTATION =====
+        
         // Compute graph distance from each facet to mesh border
         void ComputeBorderDistance(std::vector<uint8_t>& distance, int maxIter)
         {
+            // Note: Using uint8_t assumes maxIter <= 255 (currently 5)
             distance.assign(mTriangles.size(), static_cast<uint8_t>(maxIter));
             
             // Mark border facets with distance 0
@@ -905,6 +911,8 @@ namespace gte
             }
             
             // Propagate distances via breadth-first traversal
+            // Complexity: O(maxIter * triangles)
+            // Could be optimized with queue-based BFS, but maxIter is small (5)
             for (int iter = 1; iter < maxIter; ++iter)
             {
                 for (size_t f = 0; f < mTriangles.size(); ++f)
