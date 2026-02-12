@@ -51,6 +51,10 @@
 #include <set>
 #include <vector>
 
+#ifdef CO3NE_DEBUG_OUTPUT
+#include <iostream>
+#endif
+
 namespace gte
 {
     template <typename Real>
@@ -370,8 +374,6 @@ namespace gte
             Real maxCosAngle = std::cos(params.maxNormalAngle * static_cast<Real>(3.14159265358979323846) / static_cast<Real>(180));
 
             // For each point, generate local triangles
-            std::map<std::array<int32_t, 3>, int32_t> triangleCount;
-
             for (size_t i = 0; i < points.size(); ++i)
             {
                 // Find k-nearest neighbors
@@ -425,21 +427,16 @@ namespace gte
                             continue;
                         }
 
-                        // Create normalized triangle (sorted indices)
+                        // Create triangle - DON'T normalize yet!
+                        // We want to keep duplicates so they can be counted
                         std::array<int32_t, 3> tri = { v0, v1, v2 };
-                        std::sort(tri.begin(), tri.end());
-
-                        // Count occurrences
-                        triangleCount[tri]++;
+                        
+                        // Add the triangle directly (with duplicates)
+                        // This is critical: Geogram's algorithm relies on counting
+                        // how many times each triangle appears from different Voronoi cells
+                        triangles.push_back(tri);
                     }
                 }
-            }
-
-            // Extract triangles that appear at least once
-            // Geogram uses occurrence count to filter, we'll keep all for now
-            for (auto const& entry : triangleCount)
-            {
-                triangles.push_back(entry.first);
             }
         }
 
@@ -535,32 +532,57 @@ namespace gte
                 triangleCounts[normalized]++;
             }
             
-            // Categorize triangles
-            // In relaxed mode, also accept triangles that appear 2 times as "good"
-            int minGoodCount = params.relaxedManifoldExtraction ? 2 : 3;
+            // Categorize triangles based on frequency
+            // Following Geogram's logic exactly:
+            // - Triangles appearing exactly 3 times → good (reliable manifold seed)
+            // - Triangles appearing 1-2 times → not-so-good (added incrementally)
+            // - Triangles appearing > 3 times → discarded (overly constrained)
+            // In relaxed mode, triangles appearing 2-3 times are considered good
             
-            for (auto const& tri : candidateTriangles)
+            int minGoodCount = params.relaxedManifoldExtraction ? 2 : 3;
+            int maxGoodCount = 3;
+            
+            // DEBUG: Count triangle frequency distribution
+            #ifdef CO3NE_DEBUG_OUTPUT
+            std::map<int, int> freqDist;
+            for (auto const& pair : triangleCounts)
             {
-                std::array<int32_t, 3> normalized = tri;
-                std::sort(normalized.begin(), normalized.end());
-                int count = triangleCounts[normalized];
-                
-                if (count >= minGoodCount && count <= 3)
-                {
-                    // Only add once (avoid duplicates)
-                    if (goodTriangles.empty() || goodTriangles.back() != tri)
-                    {
-                        goodTriangles.push_back(tri);
-                    }
-                }
-                else if (count == 1 || (count > 3 && count <= 5))
-                {
-                    if (notSoGoodTriangles.empty() || notSoGoodTriangles.back() != tri)
-                    {
-                        notSoGoodTriangles.push_back(tri);
-                    }
-                }
+                freqDist[pair.second]++;
             }
+            std::cout << "Triangle frequency distribution:" << std::endl;
+            for (auto const& p : freqDist)
+            {
+                std::cout << "  Count " << p.first << ": " << p.second << " triangles" << std::endl;
+            }
+            #endif
+            
+            // Add each UNIQUE triangle once based on its count
+            for (auto const& pair : triangleCounts)
+            {
+                std::array<int32_t, 3> const& normalized = pair.first;
+                int count = pair.second;
+                
+                if (count >= minGoodCount && count <= maxGoodCount)
+                {
+                    // Good triangles (appear 2-3 times depending on mode)
+                    goodTriangles.push_back(normalized);
+                }
+                else if (count <= 2 && count >= 1)
+                {
+                    // Not-so-good triangles (appear 1-2 times)
+                    // Only add if not already in good triangles
+                    if (count < minGoodCount)
+                    {
+                        notSoGoodTriangles.push_back(normalized);
+                    }
+                }
+                // Triangles appearing > 3 times are discarded (like Geogram)
+            }
+            
+            #ifdef CO3NE_DEBUG_OUTPUT
+            std::cout << "Good triangles: " << goodTriangles.size() << std::endl;
+            std::cout << "Not-so-good triangles: " << notSoGoodTriangles.size() << std::endl;
+            #endif
             
             // Use full manifold extraction
             typename Co3NeManifoldExtractor<Real>::Parameters extractorParams;
