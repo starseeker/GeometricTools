@@ -60,12 +60,15 @@ git clone https://github.com/starseeker/GeometricTools.git
 cd GeometricTools
 ```
 
+1a. ** Update submodules **
+git submodule update --init
+
 2. **Build all tests:**
 ```bash
 make all
 ```
 
-3. **Run basic validation:**
+3. **Run basic validation (tests are in tests subdirectory):**
 ```bash
 make test
 # Or manually:
@@ -146,7 +149,7 @@ params.maxEdges = std::numeric_limits<size_t>::max();
 MeshHoleFilling<double>::FillHoles(vertices, triangles, params);
 ```
 
-### 3. Co3NeFull.h
+### 3. Co3Ne.h
 
 **Purpose:** Surface reconstruction from point clouds
 
@@ -257,63 +260,6 @@ for (auto& future : futures) {
     auto result = future.get();
     // Use result...
 }
-```
-
----
-
-## Building and Testing
-
-### Build System
-
-**Makefile Targets:**
-```bash
-make all                    # Build all test programs
-make test_mesh_repair      # Build specific test
-make test_remesh           # Build remeshing test
-make test_co3ne            # Build Co3Ne test
-make stress_test           # Build stress tests
-make clean                 # Remove built executables
-make test                  # Run basic validation
-```
-
-**Manual Compilation:**
-```bash
-g++ -std=c++17 -O2 -Wall -I. -IGTE -pthread \
-    test_mesh_repair.cpp -o test_mesh_repair
-```
-
-### Running Tests
-
-**Basic Tests:**
-```bash
-./test_mesh_repair gt.obj gt_repaired.obj
-./test_remesh gt.obj gt_remeshed.obj 1000
-./test_co3ne points.obj output.obj
-```
-
-**Stress Tests:**
-```bash
-./stress_test                    # Run all stress tests
-./run_stress_tests.sh           # Automated test suite
-```
-
-**Performance Tests:**
-```bash
-./test_rvd_performance gt.obj 100
-```
-
-### Creating Test Data
-
-**Python Scripts in tests/scripts/:**
-```bash
-# Generate stress test meshes
-python3 tests/scripts/create_stress_meshes.py
-
-# Create self-intersecting test
-python3 tests/scripts/create_self_intersecting_test.py
-
-# Create wrapped sphere hole
-python3 tests/scripts/create_wrapped_sphere_hole.py
 ```
 
 ---
@@ -599,7 +545,6 @@ Segmentation fault
 ## Resources
 
 ### Documentation
-- **STATUS.md** - Current implementation status
 - **GOALS.md** - Project objectives
 - **UNIMPLEMENTED.md** - Remaining features
 - **tests/README.md** - Test documentation
