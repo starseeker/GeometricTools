@@ -47,3 +47,9 @@ tests/data/co3ne_*.obj
 *.swp
 *~
 .DS_Store
+
+# Test binaries and temporary files
+test_*
+a.out
+*.gch
+*.pch
