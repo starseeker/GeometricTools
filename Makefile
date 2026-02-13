@@ -148,4 +148,8 @@ POISSON_FLAGS = -fopenmp -Wno-deprecated -pthread
 test_hybrid: $(TEST_DIR)/test_hybrid_reconstruction.cpp GTE/Mathematics/HybridReconstruction.h GTE/Mathematics/PoissonWrapper.h GTE/Mathematics/Co3Ne.h
 	$(CXX) $(CXXFLAGS) $(POISSON_INC) $(POISSON_FLAGS) -o test_hybrid $(TEST_DIR)/test_hybrid_reconstruction.cpp GTE/Mathematics/BallPivotReconstruction.cpp $(LDFLAGS) -lgomp
 
+# Hybrid validation test - comprehensive validation of all merge strategies
+test_hybrid_validation: $(TEST_DIR)/test_hybrid_validation.cpp GTE/Mathematics/HybridReconstruction.h GTE/Mathematics/PoissonWrapper.h GTE/Mathematics/Co3Ne.h
+	$(CXX) $(CXXFLAGS) $(POISSON_INC) $(POISSON_FLAGS) -o test_hybrid_validation $(TEST_DIR)/test_hybrid_validation.cpp GTE/Mathematics/BallPivotReconstruction.cpp $(LDFLAGS) -lgomp
+
 
