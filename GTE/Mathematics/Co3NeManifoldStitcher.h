@@ -231,7 +231,7 @@ namespace gte
                 }
             }
             
-            // Step 4: Fill holes using existing hole filling
+            // Step 4: Fill holes using existing hole filling (with validation)
             if (params.enableHoleFilling)
             {
                 typename MeshHoleFilling<Real>::Parameters holeParams;
@@ -244,20 +244,35 @@ namespace gte
                 MeshHoleFilling<Real>::FillHoles(vertices, triangles, holeParams);
                 size_t trianglesAfter = triangles.size();
                 
-                if (params.verbose && trianglesAfter > trianglesBefore)
+                // Validate no non-manifold edges were created
+                std::map<std::pair<int32_t, int32_t>, EdgeType> checkEdgeTypes;
+                std::vector<std::pair<int32_t, int32_t>> checkNonManifold;
+                AnalyzeEdgeTopology(triangles, checkEdgeTypes, checkNonManifold);
+                
+                if (!checkNonManifold.empty())
+                {
+                    // Hole filling created non-manifold edges - revert
+                    if (params.verbose)
+                    {
+                        std::cout << "  Warning: Hole filling created " << checkNonManifold.size() 
+                                  << " non-manifold edges, reverting\n";
+                    }
+                    triangles.resize(trianglesBefore);
+                }
+                else if (params.verbose && trianglesAfter > trianglesBefore)
                 {
                     std::cout << "Hole filling added " << (trianglesAfter - trianglesBefore) 
                               << " triangles\n";
                 }
             }
             
-            // Step 5: Ball pivot stitching (if enabled) - AGGRESSIVE mode
+            // Step 5: Ball pivot stitching (if enabled) - SMART mode
             if (params.enableBallPivot && patches.size() > 1)
             {
                 size_t trianglesBefore = triangles.size();
                 
-                // Process patch pairs for welding - UNLIMITED attempts
-                BallPivotWeldPatches(vertices, triangles, patches, patchPairs, params);
+                // Process patch pairs for welding - with validation after each weld
+                BallPivotWeldPatchesSmart(vertices, triangles, patches, patchPairs, params);
                 
                 size_t trianglesAfter = triangles.size();
                 
@@ -268,13 +283,13 @@ namespace gte
                 }
             }
             
-            // Step 6: Re-analyze and fill any remaining holes aggressively
+            // Step 6: Final hole filling (conservative, not aggressive)
             if (params.enableHoleFilling)
             {
-                // Re-analyze to find any new holes created by welding
+                // Fill remaining holes conservatively
                 typename MeshHoleFilling<Real>::Parameters holeParams;
-                holeParams.maxArea = params.maxHoleArea * static_cast<Real>(10);  // 10x larger area
-                holeParams.maxEdges = params.maxHoleEdges * 10;  // 10x more edges
+                holeParams.maxArea = params.maxHoleArea;
+                holeParams.maxEdges = params.maxHoleEdges;
                 holeParams.method = params.holeFillingMethod;
                 holeParams.repair = true;
                 
@@ -282,9 +297,23 @@ namespace gte
                 MeshHoleFilling<Real>::FillHoles(vertices, triangles, holeParams);
                 size_t trianglesAfter = triangles.size();
                 
-                if (params.verbose && trianglesAfter > trianglesBefore)
+                // Validate no non-manifold edges were created
+                std::map<std::pair<int32_t, int32_t>, EdgeType> checkEdgeTypes;
+                std::vector<std::pair<int32_t, int32_t>> checkNonManifold;
+                AnalyzeEdgeTopology(triangles, checkEdgeTypes, checkNonManifold);
+                
+                if (!checkNonManifold.empty())
                 {
-                    std::cout << "Final aggressive hole filling added " 
+                    // Hole filling created non-manifold edges - revert
+                    if (params.verbose)
+                    {
+                        std::cout << "  Warning: Final hole filling created non-manifold edges, reverting\n";
+                    }
+                    triangles.resize(trianglesBefore);
+                }
+                else if (params.verbose && trianglesAfter > trianglesBefore)
+                {
+                    std::cout << "Final hole filling added " 
                               << (trianglesAfter - trianglesBefore) << " triangles\n";
                 }
             }
@@ -816,6 +845,140 @@ namespace gte
             if (params.verbose && successfulWelds > 0)
             {
                 std::cout << "  Successfully welded " << successfulWelds << " patch pairs\n";
+            }
+        }
+        
+        // Smart Ball Pivot welding that validates after each weld
+        static void BallPivotWeldPatchesSmart(
+            std::vector<Vector3<Real>>& vertices,
+            std::vector<std::array<int32_t, 3>>& triangles,
+            std::vector<Patch> const& patches,
+            std::vector<PatchPair> const& patchPairs,
+            Parameters const& params)
+        {
+            if (patchPairs.empty() || patches.empty())
+            {
+                return;
+            }
+            
+            size_t successfulWelds = 0;
+            size_t skippedWelds = 0;
+            
+            // Process patch pairs, validating after each weld
+            for (size_t pairIdx = 0; pairIdx < patchPairs.size(); ++pairIdx)
+            {
+                auto const& pair = patchPairs[pairIdx];
+                
+                // Save state before welding
+                size_t trianglesBefore = triangles.size();
+                std::vector<std::array<int32_t, 3>> trianglesBackup = triangles;
+                
+                if (params.verbose && (pairIdx < 10 || successfulWelds < 5))
+                {
+                    std::cout << "  Attempting to weld patches " << pair.patch1Index 
+                              << " and " << pair.patch2Index 
+                              << " (min dist = " << pair.minDistance << ")\n";
+                }
+                
+                // Try welding using boundary points from current mesh state
+                std::set<int32_t> allBoundaryVerts;
+                std::map<std::pair<int32_t, int32_t>, EdgeType> updatedEdgeTypes;
+                std::vector<std::pair<int32_t, int32_t>> dummy;
+                AnalyzeEdgeTopology(triangles, updatedEdgeTypes, dummy);
+                
+                for (auto const& et : updatedEdgeTypes)
+                {
+                    if (et.second == EdgeType::Boundary)
+                    {
+                        allBoundaryVerts.insert(et.first.first);
+                        allBoundaryVerts.insert(et.first.second);
+                    }
+                }
+                
+                if (allBoundaryVerts.size() < 3)
+                {
+                    skippedWelds++;
+                    continue;  // Not enough boundary points
+                }
+                
+                // Extract boundary points and normals
+                std::vector<Vector3<Real>> boundaryPoints;
+                std::vector<Vector3<Real>> boundaryNormals;
+                ExtractBoundaryPointsFromVertices(vertices, triangles, 
+                    allBoundaryVerts, boundaryPoints, boundaryNormals);
+                
+                if (boundaryPoints.size() < 4)
+                {
+                    skippedWelds++;
+                    continue;  // Not enough points for Ball Pivot
+                }
+                
+                // Estimate ball radius
+                Real ballRadius = EstimateBallRadiusForGap(boundaryPoints, pair.minDistance);
+                
+                // Run Ball Pivot on boundary region
+                typename BallPivotReconstruction<Real>::Parameters bpParams;
+                bpParams.verbose = false;
+                bpParams.radii = {ballRadius};
+                
+                std::vector<Vector3<Real>> weldPoints;
+                std::vector<std::array<int32_t, 3>> weldTriangles;
+                
+                bool bpSuccess = BallPivotReconstruction<Real>::Reconstruct(
+                    boundaryPoints, boundaryNormals, weldPoints, weldTriangles, bpParams);
+                
+                if (!bpSuccess || weldTriangles.empty())
+                {
+                    skippedWelds++;
+                    continue;
+                }
+                
+                // Merge welding triangles
+                MergeWeldingTriangles(vertices, triangles, boundaryPoints, weldTriangles);
+                
+                // Validate: check for non-manifold edges
+                std::map<std::pair<int32_t, int32_t>, EdgeType> checkEdgeTypes;
+                std::vector<std::pair<int32_t, int32_t>> checkNonManifold;
+                AnalyzeEdgeTopology(triangles, checkEdgeTypes, checkNonManifold);
+                
+                if (!checkNonManifold.empty())
+                {
+                    // Welding created non-manifold edges - revert
+                    triangles = trianglesBackup;
+                    skippedWelds++;
+                    
+                    if (params.verbose && (pairIdx < 10 || successfulWelds < 5))
+                    {
+                        std::cout << "    Weld created non-manifold edges, reverted\n";
+                    }
+                }
+                else
+                {
+                    // Success!
+                    successfulWelds++;
+                    
+                    if (params.verbose && (pairIdx < 10 || successfulWelds < 5))
+                    {
+                        std::cout << "    Added " << (triangles.size() - trianglesBefore) 
+                                  << " welding triangles\n";
+                    }
+                    
+                    // Stop after reasonable number of successful welds to avoid conflicts
+                    if (successfulWelds >= 50)
+                    {
+                        if (params.verbose)
+                        {
+                            std::cout << "  Reached 50 successful welds, stopping to avoid conflicts\n";
+                        }
+                        break;
+                    }
+                }
+            }
+            
+            if (params.verbose)
+            {
+                std::cout << "  Smart welding: " << successfulWelds << " successful, " 
+                          << skippedWelds << " skipped/reverted\n";
             }
         }
         
