@@ -40,7 +40,9 @@ namespace gte
             sites.push_back(PositionSite<3, Real>(p));
         }
         
-        NearestNeighborQuery<3, Real, PositionSite<3, Real>> nnQuery(sites);
+        int32_t maxLeafSize = 10;
+        int32_t maxLevel = 20;
+        NearestNeighborQuery<3, Real, PositionSite<3, Real>> nnQuery(sites, maxLeafSize, maxLevel);
         
         // Compute average spacing for heuristics
         state.avgSpacing = ComputeAverageSpacingInternal(points, nnQuery);
@@ -151,7 +153,9 @@ namespace gte
             sites.push_back(PositionSite<3, Real>(p));
         }
         
-        NearestNeighborQuery<3, Real, PositionSite<3, Real>> nnQuery(sites);
+        int32_t maxLeafSize = 10;
+        int32_t maxLevel = 20;
+        NearestNeighborQuery<3, Real, PositionSite<3, Real>> nnQuery(sites, maxLeafSize, maxLevel);
         return ComputeAverageSpacingInternal(points, nnQuery);
     }
     
@@ -173,14 +177,39 @@ namespace gte
         
         for (size_t i = 0; i < points.size(); i += step)
         {
-            // Find 2 nearest neighbors (self + 1 other)
-            auto results = nnQuery.FindNearest(points[i], 2);
+            // Find nearest neighbors
+            constexpr int32_t MaxNeighbors = 10;
+            std::array<int32_t, MaxNeighbors> indices;
             
-            if (results.size() >= 2)
+            // Use large radius to ensure we find neighbors
+            Real searchRadius = static_cast<Real>(1000);  // Very large
+            int32_t numFound = nnQuery.template FindNeighbors<MaxNeighbors>(
+                points[i], searchRadius, indices);
+            
+            if (numFound >= 2)
             {
-                // Distance to second nearest (first is self with distance 0)
-                totalDistance += std::sqrt(results[1].distance);
-                ++numSamples;
+                // Find nearest neighbor that's not self
+                Real minDist = std::numeric_limits<Real>::max();
+                for (int32_t j = 0; j < numFound; ++j)
+                {
+                    if (indices[j] == static_cast<int32_t>(i))
+                    {
+                        continue;  // Skip self
+                    }
+                    
+                    Vector3<Real> diff = points[indices[j]] - points[i];
+                    Real dist = Length(diff);
+                    if (dist > static_cast<Real>(0) && dist < minDist)
+                    {
+                        minDist = dist;
+                    }
+                }
+                
+                if (minDist < std::numeric_limits<Real>::max())
+                {
+                    totalDistance += minDist;
+                    ++numSamples;
+                }
             }
         }
         
@@ -204,17 +233,44 @@ namespace gte
             sites.push_back(PositionSite<3, Real>(p));
         }
         
-        NearestNeighborQuery<3, Real, PositionSite<3, Real>> nnQuery(sites);
+        int32_t maxLeafSize = 10;
+        int32_t maxLevel = 20;
+        NearestNeighborQuery<3, Real, PositionSite<3, Real>> nnQuery(sites, maxLeafSize, maxLevel);
         
         std::vector<Real> distances;
         distances.reserve(points.size());
         
-        for (auto const& p : points)
+        for (size_t i = 0; i < points.size(); ++i)
         {
-            auto results = nnQuery.FindNearest(p, 2);
-            if (results.size() >= 2)
+            constexpr int32_t MaxNeighbors = 10;
+            std::array<int32_t, MaxNeighbors> indices;
+            Real searchRadius = static_cast<Real>(1000);  // Very large
+            int32_t numFound = nnQuery.template FindNeighbors<MaxNeighbors>(
+                points[i], searchRadius, indices);
+                
+            if (numFound >= 2)
             {
-                distances.push_back(std::sqrt(results[1].distance));
+                // Find nearest neighbor that's not self
+                Real minDist = std::numeric_limits<Real>::max();
+                for (int32_t j = 0; j < numFound; ++j)
+                {
+                    if (indices[j] == static_cast<int32_t>(i))
+                    {
+                        continue;  // Skip self
+                    }
+                    
+                    Vector3<Real> diff = points[indices[j]] - points[i];
+                    Real dist = Length(diff);
+                    if (dist > static_cast<Real>(0) && dist < minDist)
+                    {
+                        minDist = dist;
+                    }
+                }
+                
+                if (minDist < std::numeric_limits<Real>::max())
+                {
+                    distances.push_back(minDist);
+                }
             }
         }
         
@@ -460,26 +516,29 @@ namespace gte
             }
             
             // Search for neighbors
-            auto neighbors = nnQuery.FindRange(state.vertices[i].position, static_cast<Real>(2) * radius);
+            constexpr int32_t MaxNeighbors = 256;  // Reasonable limit for seed search
+            std::array<int32_t, MaxNeighbors> neighborIndices;
+            int32_t numFound = nnQuery.template FindNeighbors<MaxNeighbors>(
+                state.vertices[i].position, static_cast<Real>(2) * radius, neighborIndices);
             
-            if (neighbors.size() < 3)
+            if (numFound < 3)
             {
                 continue;
             }
             
             // Try combinations of 3 vertices
-            for (size_t j = 0; j < neighbors.size(); ++j)
+            for (int32_t j = 0; j < numFound; ++j)
             {
-                int32_t idx0 = static_cast<int32_t>(neighbors[j].site);
+                int32_t idx0 = neighborIndices[j];
                 
                 if (state.vertices[idx0].type != VertexType::Orphan || idx0 == static_cast<int32_t>(i))
                 {
                     continue;
                 }
                 
-                for (size_t k = j + 1; k < neighbors.size(); ++k)
+                for (int32_t k = j + 1; k < numFound; ++k)
                 {
-                    int32_t idx1 = static_cast<int32_t>(neighbors[k].site);
+                    int32_t idx1 = neighborIndices[k];
                     
                     if (state.vertices[idx1].type != VertexType::Orphan || idx1 == static_cast<int32_t>(i))
                     {
@@ -523,9 +582,9 @@ namespace gte
                     
                     // Check if ball is empty
                     bool empty = true;
-                    for (auto const& nb : neighbors)
+                    for (int32_t idx = 0; idx < numFound; ++idx)
                     {
-                        int32_t nbIdx = static_cast<int32_t>(nb.site);
+                        int32_t nbIdx = neighborIndices[idx];
                         if (nbIdx == v0 || nbIdx == v1 || nbIdx == v2)
                         {
                             continue;
@@ -779,32 +838,35 @@ namespace gte
         }
         
         // Search for candidates
-        auto candidates = nnQuery.FindRange(midpoint, static_cast<Real>(2) * radius);
+        constexpr int32_t MaxCandidates = 512;
+        std::array<int32_t, MaxCandidates> candidateIndices;
+        int32_t numCandidates = nnQuery.template FindNeighbors<MaxCandidates>(
+            midpoint, static_cast<Real>(2) * radius, candidateIndices);
         
         int32_t bestCandidate = -1;
         Real minAngle = static_cast<Real>(2) * static_cast<Real>(3.14159265358979323846);  // 2π
         Vector3<Real> bestCenter;
         
-        for (auto const& cand : candidates)
+        for (int32_t candIdx = 0; candIdx < numCandidates; ++candIdx)
         {
-            int32_t candIdx = static_cast<int32_t>(cand.site);
+            int32_t idx = candidateIndices[candIdx];
             
-            if (candIdx == va || candIdx == vb || candIdx == oppVertex)
+            if (idx == va || idx == vb || idx == oppVertex)
             {
                 continue;
             }
             
-            if (state.vertices[candIdx].type == VertexType::Inner)
+            if (state.vertices[idx].type == VertexType::Inner)
             {
                 continue;
             }
             
             // Check normal compatibility
             if (!AreNormalsCompatible(
-                state.vertices[candIdx].normal,
+                state.vertices[idx].normal,
                 state.vertices[va].normal,
                 state.vertices[vb].normal,
-                state.vertices[candIdx].position,
+                state.vertices[idx].position,
                 state.vertices[va].position,
                 state.vertices[vb].position,
                 params.nsumMinDot))
@@ -817,10 +879,10 @@ namespace gte
             if (!ComputeBallCenter(
                 state.vertices[va].position,
                 state.vertices[vb].position,
-                state.vertices[candIdx].position,
+                state.vertices[idx].position,
                 state.vertices[va].normal,
                 state.vertices[vb].normal,
-                state.vertices[candIdx].normal,
+                state.vertices[idx].normal,
                 radius,
                 &midpoint,
                 &prevCenter,
@@ -862,10 +924,10 @@ namespace gte
             
             // Check if ball is empty
             bool empty = true;
-            for (auto const& nb : candidates)
+            for (int32_t nbIdx2 = 0; nbIdx2 < numCandidates; ++nbIdx2)
             {
-                int32_t nbIdx = static_cast<int32_t>(nb.site);
-                if (nbIdx == va || nbIdx == vb || nbIdx == candIdx)
+                int32_t nbIdx = candidateIndices[nbIdx2];
+                if (nbIdx == va || nbIdx == vb || nbIdx == idx)
                 {
                     continue;
                 }
@@ -881,7 +943,7 @@ namespace gte
             if (empty)
             {
                 minAngle = angle;
-                bestCandidate = candIdx;
+                bestCandidate = idx;
                 bestCenter = newCenter;
             }
         }
@@ -979,15 +1041,15 @@ namespace gte
                 ballCenter))
             {
                 // Check if ball is empty
-                Vector3<Real> midpoint = static_cast<Real>(0.5) * 
-                    (state.vertices[edge.vertexA].position + state.vertices[edge.vertexB].position);
-                
-                auto neighbors = nnQuery.FindRange(ballCenter, radius);
+                constexpr int32_t MaxNeighbors = 256;
+                std::array<int32_t, MaxNeighbors> neighborIndices;
+                int32_t numNeighbors = nnQuery.template FindNeighbors<MaxNeighbors>(
+                    ballCenter, radius, neighborIndices);
                 
                 bool empty = true;
-                for (auto const& nb : neighbors)
+                for (int32_t idx = 0; idx < numNeighbors; ++idx)
                 {
-                    int32_t nbIdx = static_cast<int32_t>(nb.site);
+                    int32_t nbIdx = neighborIndices[idx];
                     if (nbIdx != face.v0 && nbIdx != face.v1 && nbIdx != face.v2)
                     {
                         Vector3<Real> diff = ballCenter - state.vertices[nbIdx].position;
