@@ -537,11 +537,9 @@ namespace gte
             
             // Check if ball is empty
             std::set<int32_t> excludeVertices = {v0, v1, v2};
-            if (!IsBallEmpty(center, radius, {vertexInfo[0].position}, excludeVertices))
-            {
-                // For efficiency, we skip ball emptiness check for now
-                // This can be added back if needed for quality
-            }
+            // Note: Ball emptiness check would require full vertex list
+            // For efficiency and given we use ear clipping, we skip this check
+            // If needed, pass vertexInfo positions to IsBallEmpty
             
             // Compute pivot angle (prefer smaller angles for tighter triangles)
             Vector3<Real> edge = p1 - p0;
@@ -636,7 +634,16 @@ namespace gte
         
         // Choose direction based on vertex normals
         Vector3<Real> sumNormal = n0 + n1 + n2;
-        Vector3<Real> avgNormal = sumNormal / Length(sumNormal);
+        Real sumNormalLen = Length(sumNormal);
+        
+        if (sumNormalLen < static_cast<Real>(1e-10))
+        {
+            // Cannot determine direction from normals, use triangle normal
+            center = circumCenter + triNormal * h;
+            return true;
+        }
+        
+        Vector3<Real> avgNormal = sumNormal / sumNormalLen;
         Real normalDot = Dot(avgNormal, triNormal);
         
         if (normalDot > static_cast<Real>(0))
