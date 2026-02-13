@@ -1049,27 +1049,66 @@ namespace gte
     {
         if (params.verbose)
         {
-            std::cout << "[BallPivotMeshHoleFiller] Component-aware hole filling...\n";
+            std::cout << "\n[BallPivotMeshHoleFiller] Multi-Phase Component-Aware Hole Filling\n";
+            std::cout << "========================================================\n";
         }
         
         bool anyProgress = false;
         int32_t iteration = 0;
+        size_t initialTriangleCount = triangles.size();
+        
+        // Calculate average edge length for adaptive thresholds
+        auto calculateAvgEdgeLength = [&]() -> Real
+        {
+            auto holes = DetectBoundaryLoops(vertices, triangles);
+            Real avgEdgeLength = static_cast<Real>(0);
+            int32_t edgeCount = 0;
+            for (auto const& hole : holes)
+            {
+                if (hole.avgEdgeLength > static_cast<Real>(0))
+                {
+                    avgEdgeLength += hole.avgEdgeLength;
+                    ++edgeCount;
+                }
+            }
+            if (edgeCount > 0)
+            {
+                return avgEdgeLength / static_cast<Real>(edgeCount);
+            }
+            return static_cast<Real>(50.0);  // Default fallback
+        };
+        
+        Real baseEdgeLength = calculateAvgEdgeLength();
+        
+        if (params.verbose)
+        {
+            std::cout << "Base edge length: " << baseEdgeLength << "\n";
+        }
         
         while (iteration < params.maxIterations)
         {
             ++iteration;
             bool progressThisIteration = false;
             
+            // Recalculate base edge length each iteration as mesh changes
+            baseEdgeLength = calculateAvgEdgeLength();
+            
+            if (params.verbose)
+            {
+                std::cout << "\n--- Iteration " << iteration << " ---\n";
+                std::cout << "Base edge length: " << baseEdgeLength << "\n";
+            }
+            
             // Step 1: Fill regular holes within components
             auto holes = DetectBoundaryLoops(vertices, triangles);
             
             if (params.verbose && !holes.empty())
             {
-                std::cout << "  Iteration " << iteration << ": Found " << holes.size() << " hole(s) within components\n";
+                std::cout << "Found " << holes.size() << " hole(s) within components\n";
             }
             
             size_t holesFilled = 0;
-            size_t trianglesBefore = triangles.size();
+            size_t holeTrianglesBefore = triangles.size();
             
             for (auto const& hole : holes)
             {
@@ -1077,86 +1116,135 @@ namespace gte
                 {
                     ++holesFilled;
                     progressThisIteration = true;
+                    anyProgress = true;
                 }
             }
             
             if (params.verbose && holesFilled > 0)
             {
-                std::cout << "    Filled " << holesFilled << " hole(s), added " 
-                          << (triangles.size() - trianglesBefore) << " triangles\n";
+                std::cout << "  Filled " << holesFilled << "/" << holes.size() << " hole(s), added " 
+                          << (triangles.size() - holeTrianglesBefore) << " triangles\n";
             }
             
-            // Step 2: Bridge between disconnected components
+            // Step 2: Progressive component bridging (conservative to aggressive)
             auto components = DetectConnectedComponents(triangles);
             
             if (components.size() > 1)
             {
                 if (params.verbose)
                 {
-                    std::cout << "    Found " << components.size() << " disconnected components\n";
+                    std::cout << "  Components: " << components.size() << " (need bridging)\n";
                 }
                 
-                // Calculate average edge length for gap threshold
-                Real avgEdgeLength = static_cast<Real>(0);
-                int32_t edgeCount = 0;
-                for (auto const& hole : holes)
+                // Progressive gap threshold scales: start small, increase gradually
+                // Use very aggressive scales for sparse/distant components
+                std::vector<Real> gapScales = {1.5, 2.0, 3.0, 5.0, 7.5, 10.0, 15.0, 20.0, 30.0, 50.0, 75.0, 100.0, 150.0, 200.0};
+                
+                bool bridgedThisIteration = false;
+                
+                // Debug: Show component boundary edge counts
+                if (params.verbose)
                 {
-                    if (hole.avgEdgeLength > static_cast<Real>(0))
+                    std::map<std::pair<int32_t, int32_t>, int32_t> edgeCount;
+                    for (auto const& tri : triangles)
                     {
-                        avgEdgeLength += hole.avgEdgeLength;
-                        ++edgeCount;
+                        for (int i = 0; i < 3; ++i)
+                        {
+                            int32_t v0 = tri[i];
+                            int32_t v1 = tri[(i + 1) % 3];
+                            auto edge = std::make_pair(std::min(v0, v1), std::max(v0, v1));
+                            edgeCount[edge]++;
+                        }
                     }
+                    int32_t boundaryEdgeCount = 0;
+                    for (auto const& ec : edgeCount)
+                    {
+                        if (ec.second == 1) ++boundaryEdgeCount;
+                    }
+                    std::cout << "    Total boundary edges: " << boundaryEdgeCount << "\n";
                 }
-                if (edgeCount > 0)
-                {
-                    avgEdgeLength /= static_cast<Real>(edgeCount);
-                }
-                else
-                {
-                    avgEdgeLength = static_cast<Real>(50.0);  // Default
-                }
-                
-                // Try progressively larger gap distances
-                std::vector<Real> gapScales = {2.0, 3.0, 5.0, 10.0};
                 
                 for (Real scale : gapScales)
                 {
-                    Real maxGapDist = avgEdgeLength * scale;
+                    Real maxGapDist = baseEdgeLength * scale;
+                    
+                    if (params.verbose)
+                    {
+                        std::cout << "    Searching for gaps at threshold " << scale << "x (" << maxGapDist << ")...\n";
+                    }
+                    
                     auto gaps = FindComponentGaps(vertices, triangles, components, maxGapDist);
                     
-                    if (!gaps.empty())
+                    if (gaps.empty())
                     {
                         if (params.verbose)
                         {
-                            std::cout << "      Found " << gaps.size() << " gap(s) at distance threshold " 
-                                      << maxGapDist << "\n";
+                            std::cout << "      No gaps found\n";
                         }
-                        
-                        size_t gapsFilled = 0;
-                        size_t gapTrianglesBefore = triangles.size();
-                        
-                        for (auto const& gap : gaps)
+                        continue;  // Try next threshold
+                    }
+                    
+                    if (params.verbose)
+                    {
+                        std::cout << "    Threshold " << scale << "x (" << maxGapDist 
+                                  << "): found " << gaps.size() << " potential gap(s)\n";
+                    }
+                    
+                    size_t gapsFilled = 0;
+                    size_t gapTrianglesBefore = triangles.size();
+                    
+                    // Try to fill gaps at this threshold
+                    for (auto const& gap : gaps)
+                    {
+                        auto virtualLoop = CreateVirtualBoundaryLoop(vertices, gap.first, gap.second);
+                        if (FillHole(vertices, triangles, virtualLoop, params))
                         {
-                            auto virtualLoop = CreateVirtualBoundaryLoop(vertices, gap.first, gap.second);
-                            if (FillHole(vertices, triangles, virtualLoop, params))
-                            {
-                                ++gapsFilled;
-                                progressThisIteration = true;
-                                anyProgress = true;
-                            }
-                        }
-                        
-                        if (params.verbose && gapsFilled > 0)
-                        {
-                            std::cout << "        Bridged " << gapsFilled << " gap(s), added "
-                                      << (triangles.size() - gapTrianglesBefore) << " triangles\n";
-                        }
-                        
-                        if (gapsFilled > 0)
-                        {
-                            break;  // Re-detect components after bridging
+                            ++gapsFilled;
+                            bridgedThisIteration = true;
+                            progressThisIteration = true;
+                            anyProgress = true;
                         }
                     }
+                    
+                    if (params.verbose && gapsFilled > 0)
+                    {
+                        std::cout << "      Bridged " << gapsFilled << " gap(s), added "
+                                  << (triangles.size() - gapTrianglesBefore) << " triangles\n";
+                    }
+                    
+                    // If we bridged any gaps, re-detect components and start over with small thresholds
+                    if (gapsFilled > 0)
+                    {
+                        components = DetectConnectedComponents(triangles);
+                        if (components.size() == 1)
+                        {
+                            if (params.verbose)
+                            {
+                                std::cout << "    Single component achieved!\n";
+                            }
+                            break;  // Exit gap bridging loop
+                        }
+                        else if (params.verbose)
+                        {
+                            std::cout << "    Components reduced to: " << components.size() << "\n";
+                        }
+                        break;  // Restart with conservative thresholds
+                    }
+                }
+                
+                if (!bridgedThisIteration && components.size() > 1)
+                {
+                    if (params.verbose)
+                    {
+                        std::cout << "    No gaps bridged at any threshold\n";
+                    }
+                }
+            }
+            else
+            {
+                if (params.verbose)
+                {
+                    std::cout << "  Single component achieved!\n";
                 }
             }
             
@@ -1164,11 +1252,18 @@ namespace gte
             auto remainingHoles = DetectBoundaryLoops(vertices, triangles);
             auto remainingComponents = DetectConnectedComponents(triangles);
             
+            if (params.verbose)
+            {
+                std::cout << "  Iteration summary: " << remainingHoles.size() << " holes, " 
+                          << remainingComponents.size() << " components, "
+                          << triangles.size() << " triangles\n";
+            }
+            
             if (remainingHoles.empty() && remainingComponents.size() <= 1)
             {
                 if (params.verbose)
                 {
-                    std::cout << "  Mesh is now closed with single component!\n";
+                    std::cout << "\n✓ Mesh is closed with single component!\n";
                 }
                 break;
             }
@@ -1177,19 +1272,35 @@ namespace gte
             {
                 if (params.verbose)
                 {
-                    std::cout << "  No progress in iteration " << iteration << ", stopping.\n";
+                    std::cout << "\nNo progress in iteration " << iteration << ", stopping.\n";
                 }
                 break;
             }
         }
         
+        // Final summary
         if (params.verbose)
         {
             auto finalHoles = DetectBoundaryLoops(vertices, triangles);
             auto finalComponents = DetectConnectedComponents(triangles);
-            std::cout << "[BallPivotMeshHoleFiller] Complete: " 
-                      << finalHoles.size() << " holes, " 
-                      << finalComponents.size() << " components\n";
+            
+            std::cout << "\n========================================================\n";
+            std::cout << "[BallPivotMeshHoleFiller] Multi-Phase Complete\n";
+            std::cout << "  Initial triangles: " << initialTriangleCount << "\n";
+            std::cout << "  Final triangles: " << triangles.size() << "\n";
+            std::cout << "  Triangles added: " << (triangles.size() - initialTriangleCount) << "\n";
+            std::cout << "  Remaining holes: " << finalHoles.size() << "\n";
+            std::cout << "  Connected components: " << finalComponents.size() << "\n";
+            
+            if (finalHoles.empty() && finalComponents.size() == 1)
+            {
+                std::cout << "  Status: ✓ CLOSED MANIFOLD (pending non-manifold check)\n";
+            }
+            else
+            {
+                std::cout << "  Status: ✗ Not yet closed\n";
+            }
+            std::cout << "========================================================\n";
         }
         
         return anyProgress;

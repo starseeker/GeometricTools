@@ -161,6 +161,10 @@ test_ball_pivot_hole_filler: $(TEST_DIR)/test_ball_pivot_hole_filler.cpp GTE/Mat
 test_ball_pivot_integration: $(TEST_DIR)/test_ball_pivot_integration.cpp GTE/Mathematics/BallPivotMeshHoleFiller.h GTE/Mathematics/BallPivotMeshHoleFiller.cpp GTE/Mathematics/Co3NeManifoldStitcher.h GTE/Mathematics/Co3Ne.h
 	$(CXX) $(CXXFLAGS) -o test_ball_pivot_integration $(TEST_DIR)/test_ball_pivot_integration.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp GTE/Mathematics/BallPivotReconstruction.cpp $(LDFLAGS)
 
+# Iterative component bridging test
+test_iterative_bridging: $(TEST_DIR)/test_iterative_bridging.cpp GTE/Mathematics/BallPivotMeshHoleFiller.h GTE/Mathematics/BallPivotMeshHoleFiller.cpp GTE/Mathematics/Co3Ne.h
+	$(CXX) $(CXXFLAGS) -o test_iterative_bridging $(TEST_DIR)/test_iterative_bridging.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp GTE/Mathematics/BallPivotReconstruction.cpp $(LDFLAGS)
+
 # Manifold Closure test with r768.xyz
 test_manifold_closure_r768: $(TEST_DIR)/test_manifold_closure_r768.cpp GTE/Mathematics/BallPivotMeshHoleFiller.h GTE/Mathematics/BallPivotMeshHoleFiller.cpp GTE/Mathematics/Co3NeManifoldStitcher.h GTE/Mathematics/Co3Ne.h
 	$(CXX) $(CXXFLAGS) -o test_manifold_closure_r768 $(TEST_DIR)/test_manifold_closure_r768.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp GTE/Mathematics/BallPivotReconstruction.cpp $(LDFLAGS)
