@@ -986,10 +986,15 @@ namespace gte
         }
         
         // Find close boundary edges between different components
+        // Skip components that have no boundary edges (they're closed)
         for (size_t i = 0; i < components.size(); ++i)
         {
+            if (componentBoundaries[i].empty()) continue;  // Skip closed components
+            
             for (size_t j = i + 1; j < components.size(); ++j)
             {
+                if (componentBoundaries[j].empty()) continue;  // Skip closed components
+                
                 for (auto const& edge1 : componentBoundaries[i])
                 {
                     Vector3<Real> mid1 = (vertices[edge1.first] + vertices[edge1.second]) / static_cast<Real>(2);
@@ -1139,6 +1144,46 @@ namespace gte
                 // Progressive gap threshold scales: start small, increase gradually
                 // Use very aggressive scales for sparse/distant components
                 std::vector<Real> gapScales = {1.5, 2.0, 3.0, 5.0, 7.5, 10.0, 15.0, 20.0, 30.0, 50.0, 75.0, 100.0, 150.0, 200.0};
+                
+                // Debug: Show component boundary edge counts  
+                if (params.verbose)
+                {
+                    std::cout << "    Component boundary edge distribution:\n";
+                    std::map<std::pair<int32_t, int32_t>, int32_t> edgeCount;
+                    for (auto const& tri : triangles)
+                    {
+                        for (int i = 0; i < 3; ++i)
+                        {
+                            int32_t v0 = tri[i];
+                            int32_t v1 = tri[(i + 1) % 3];
+                            auto edge = std::make_pair(std::min(v0, v1), std::max(v0, v1));
+                            edgeCount[edge]++;
+                        }
+                    }
+                    
+                    std::vector<int32_t> boundaryEdgesPerComponent(components.size(), 0);
+                    for (auto const& ec : edgeCount)
+                    {
+                        if (ec.second == 1)  // Boundary edge
+                        {
+                            for (size_t i = 0; i < components.size(); ++i)
+                            {
+                                if (components[i].count(ec.first.first) && components[i].count(ec.first.second))
+                                {
+                                    boundaryEdgesPerComponent[i]++;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    
+                    for (size_t i = 0; i < boundaryEdgesPerComponent.size(); ++i)
+                    {
+                        std::cout << "      Component " << i << ": " << components[i].size() 
+                                  << " vertices, " << boundaryEdgesPerComponent[i] << " boundary edges"
+                                  << (boundaryEdgesPerComponent[i] == 0 ? " (CLOSED)" : "") << "\n";
+                    }
+                }
                 
                 bool bridgedThisIteration = false;
                 
