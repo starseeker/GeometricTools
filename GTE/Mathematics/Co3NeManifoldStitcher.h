@@ -251,12 +251,12 @@ namespace gte
                 }
             }
             
-            // Step 5: Ball pivot stitching (if enabled)
+            // Step 5: Ball pivot stitching (if enabled) - AGGRESSIVE mode
             if (params.enableBallPivot && patches.size() > 1)
             {
                 size_t trianglesBefore = triangles.size();
                 
-                // Process patch pairs for welding
+                // Process patch pairs for welding - UNLIMITED attempts
                 BallPivotWeldPatches(vertices, triangles, patches, patchPairs, params);
                 
                 size_t trianglesAfter = triangles.size();
@@ -268,7 +268,28 @@ namespace gte
                 }
             }
             
-            // Step 6: UV parameterization merging (if enabled)
+            // Step 6: Re-analyze and fill any remaining holes aggressively
+            if (params.enableHoleFilling)
+            {
+                // Re-analyze to find any new holes created by welding
+                typename MeshHoleFilling<Real>::Parameters holeParams;
+                holeParams.maxArea = params.maxHoleArea * static_cast<Real>(10);  // 10x larger area
+                holeParams.maxEdges = params.maxHoleEdges * 10;  // 10x more edges
+                holeParams.method = params.holeFillingMethod;
+                holeParams.repair = true;
+                
+                size_t trianglesBefore = triangles.size();
+                MeshHoleFilling<Real>::FillHoles(vertices, triangles, holeParams);
+                size_t trianglesAfter = triangles.size();
+                
+                if (params.verbose && trianglesAfter > trianglesBefore)
+                {
+                    std::cout << "Final aggressive hole filling added " 
+                              << (trianglesAfter - trianglesBefore) << " triangles\n";
+                }
+            }
+            
+            // Step 7: UV parameterization merging (if enabled)
             if (params.enableUVMerging)
             {
                 // TODO: Implement UV-based patch merging
@@ -278,16 +299,26 @@ namespace gte
                 }
             }
             
-            // Step 7: Final validation
-            bool isManifold = ValidateManifold(triangles);
+            // Step 8: Final validation with detailed reporting
+            bool isClosedManifold = false;
+            bool hasNonManifoldEdges = false;
+            size_t boundaryEdgeCount = 0;
+            size_t componentCount = 0;
+            
+            ValidateManifoldDetailed(triangles, isClosedManifold, hasNonManifoldEdges, 
+                                    boundaryEdgeCount, componentCount);
             
             if (params.verbose)
             {
-                std::cout << "Final mesh: " << triangles.size() << " triangles, "
-                          << (isManifold ? "manifold" : "non-manifold") << "\n";
+                std::cout << "\n=== Final Mesh Status ===\n";
+                std::cout << "  Triangles: " << triangles.size() << "\n";
+                std::cout << "  Boundary edges: " << boundaryEdgeCount << "\n";
+                std::cout << "  Connected components: " << componentCount << "\n";
+                std::cout << "  Non-manifold edges: " << (hasNonManifoldEdges ? "YES" : "NO") << "\n";
+                std::cout << "  Closed manifold: " << (isClosedManifold ? "YES" : "NO") << "\n";
             }
             
-            return isManifold;
+            return isClosedManifold;
         }
         
     private:
@@ -657,9 +688,10 @@ namespace gte
             }
             
             // Process patch pairs in order of proximity
-            // We'll weld the closest pairs first
-            size_t pairsToProcess = std::min(static_cast<size_t>(10), patchPairs.size());
+            // AGGRESSIVE MODE: Process ALL viable pairs (no limit)
+            size_t pairsToProcess = patchPairs.size();  // Process all pairs!
             
+            size_t successfulWelds = 0;
             for (size_t pairIdx = 0; pairIdx < pairsToProcess; ++pairIdx)
             {
                 auto const& pair = patchPairs[pairIdx];
@@ -770,10 +802,20 @@ namespace gte
                 size_t addedTriangles = MergeWeldingTriangles(
                     vertices, triangles, boundaryPoints, weldTriangles);
                 
+                if (addedTriangles > 0)
+                {
+                    successfulWelds++;
+                }
+                
                 if (params.verbose && addedTriangles > 0)
                 {
                     std::cout << "    Added " << addedTriangles << " welding triangles\n";
                 }
+            }
+            
+            if (params.verbose && successfulWelds > 0)
+            {
+                std::cout << "  Successfully welded " << successfulWelds << " patch pairs\n";
             }
         }
         
@@ -1136,7 +1178,7 @@ namespace gte
             return addedCount;
         }
         
-        // Validate that mesh is manifold
+        // Validate that mesh is manifold (simple check)
         static bool ValidateManifold(std::vector<std::array<int32_t, 3>> const& triangles)
         {
             std::map<std::pair<int32_t, int32_t>, size_t> edgeCounts;
@@ -1161,6 +1203,120 @@ namespace gte
             }
             
             return true;
+        }
+        
+        // Detailed manifold validation
+        static void ValidateManifoldDetailed(
+            std::vector<std::array<int32_t, 3>> const& triangles,
+            bool& isClosedManifold,
+            bool& hasNonManifoldEdges,
+            size_t& boundaryEdgeCount,
+            size_t& componentCount)
+        {
+            isClosedManifold = false;
+            hasNonManifoldEdges = false;
+            boundaryEdgeCount = 0;
+            componentCount = 0;
+            
+            if (triangles.empty())
+            {
+                return;
+            }
+            
+            // Count edge occurrences
+            std::map<std::pair<int32_t, int32_t>, size_t> edgeCounts;
+            
+            for (auto const& tri : triangles)
+            {
+                for (int i = 0; i < 3; ++i)
+                {
+                    int32_t v0 = tri[i];
+                    int32_t v1 = tri[(i + 1) % 3];
+                    auto edge = std::make_pair(std::min(v0, v1), std::max(v0, v1));
+                    edgeCounts[edge]++;
+                }
+            }
+            
+            // Analyze edges
+            for (auto const& ec : edgeCounts)
+            {
+                if (ec.second == 1)
+                {
+                    boundaryEdgeCount++;
+                }
+                else if (ec.second > 2)
+                {
+                    hasNonManifoldEdges = true;
+                }
+            }
+            
+            // Count connected components using BFS
+            std::set<size_t> visited;
+            componentCount = 0;
+            
+            for (size_t startIdx = 0; startIdx < triangles.size(); ++startIdx)
+            {
+                if (visited.count(startIdx) > 0)
+                {
+                    continue;
+                }
+                
+                // Start new component
+                componentCount++;
+                std::vector<size_t> queue;
+                queue.push_back(startIdx);
+                visited.insert(startIdx);
+                
+                // BFS to find all connected triangles
+                while (!queue.empty())
+                {
+                    size_t currentIdx = queue.back();
+                    queue.pop_back();
+                    
+                    auto const& currentTri = triangles[currentIdx];
+                    
+                    // Find triangles sharing edges with current
+                    for (size_t otherIdx = 0; otherIdx < triangles.size(); ++otherIdx)
+                    {
+                        if (visited.count(otherIdx) > 0)
+                        {
+                            continue;
+                        }
+                        
+                        auto const& otherTri = triangles[otherIdx];
+                        
+                        // Check if they share an edge
+                        bool sharesEdge = false;
+                        for (int i = 0; i < 3 && !sharesEdge; ++i)
+                        {
+                            auto e1 = std::make_pair(
+                                std::min(currentTri[i], currentTri[(i + 1) % 3]),
+                                std::max(currentTri[i], currentTri[(i + 1) % 3]));
+                            
+                            for (int j = 0; j < 3 && !sharesEdge; ++j)
+                            {
+                                auto e2 = std::make_pair(
+                                    std::min(otherTri[j], otherTri[(j + 1) % 3]),
+                                    std::max(otherTri[j], otherTri[(j + 1) % 3]));
+                                
+                                if (e1 == e2)
+                                {
+                                    sharesEdge = true;
+                                }
+                            }
+                        }
+                        
+                        if (sharesEdge)
+                        {
+                            queue.push_back(otherIdx);
+                            visited.insert(otherIdx);
+                        }
+                    }
+                }
+            }
+            
+            // A closed manifold has no boundary edges, no non-manifold edges, and is connected
+            isClosedManifold = (boundaryEdgeCount == 0) && (!hasNonManifoldEdges) && (componentCount == 1);
         }
         
         // Estimate average edge length in the mesh
