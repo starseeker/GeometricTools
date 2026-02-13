@@ -106,6 +106,13 @@ namespace gte
             std::vector<std::array<int32_t, 3>>& triangles,
             Parameters const& params = Parameters());
         
+        // Component-aware hole filling that also bridges disconnected components
+        // This is a unified approach that treats inter-component gaps as fillable holes
+        static bool FillAllHolesWithComponentBridging(
+            std::vector<Vector3<Real>>& vertices,
+            std::vector<std::array<int32_t, 3>>& triangles,
+            Parameters const& params = Parameters());
+        
         // Fill a specific hole given its boundary loop
         static bool FillHole(
             std::vector<Vector3<Real>>& vertices,
@@ -235,6 +242,24 @@ namespace gte
         static void RemoveTriangles(
             std::vector<std::array<int32_t, 3>>& triangles,
             std::vector<int32_t> const& indicesToRemove);
+        
+        // Detect connected components in the mesh
+        static std::vector<std::set<int32_t>> DetectConnectedComponents(
+            std::vector<std::array<int32_t, 3>> const& triangles);
+        
+        // Find close boundary edges between different components
+        static std::vector<std::pair<std::pair<int32_t, int32_t>, std::pair<int32_t, int32_t>>>
+        FindComponentGaps(
+            std::vector<Vector3<Real>> const& vertices,
+            std::vector<std::array<int32_t, 3>> const& triangles,
+            std::vector<std::set<int32_t>> const& components,
+            Real maxGapDistance);
+        
+        // Create virtual boundary loop from component gap
+        static BoundaryLoop CreateVirtualBoundaryLoop(
+            std::vector<Vector3<Real>> const& vertices,
+            std::pair<int32_t, int32_t> const& edge1,
+            std::pair<int32_t, int32_t> const& edge2);
     };
 }
 

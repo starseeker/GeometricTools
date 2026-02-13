@@ -887,6 +887,314 @@ namespace gte
         }
     }
     
+    template <typename Real>
+    std::vector<std::set<int32_t>> BallPivotMeshHoleFiller<Real>::DetectConnectedComponents(
+        std::vector<std::array<int32_t, 3>> const& triangles)
+    {
+        // Build adjacency from triangles
+        std::map<int32_t, std::set<int32_t>> adjacency;
+        for (auto const& tri : triangles)
+        {
+            for (int i = 0; i < 3; ++i)
+            {
+                adjacency[tri[i]].insert(tri[(i + 1) % 3]);
+                adjacency[tri[i]].insert(tri[(i + 2) % 3]);
+            }
+        }
+        
+        // DFS to find components
+        std::vector<std::set<int32_t>> components;
+        std::set<int32_t> visited;
+        
+        for (auto const& adj : adjacency)
+        {
+            int32_t start = adj.first;
+            if (visited.count(start))
+                continue;
+            
+            std::set<int32_t> component;
+            std::vector<int32_t> stack = {start};
+            
+            while (!stack.empty())
+            {
+                int32_t v = stack.back();
+                stack.pop_back();
+                
+                if (visited.count(v))
+                    continue;
+                
+                visited.insert(v);
+                component.insert(v);
+                
+                for (int32_t neighbor : adjacency[v])
+                {
+                    if (!visited.count(neighbor))
+                    {
+                        stack.push_back(neighbor);
+                    }
+                }
+            }
+            
+            if (!component.empty())
+            {
+                components.push_back(component);
+            }
+        }
+        
+        return components;
+    }
+    
+    template <typename Real>
+    std::vector<std::pair<std::pair<int32_t, int32_t>, std::pair<int32_t, int32_t>>>
+    BallPivotMeshHoleFiller<Real>::FindComponentGaps(
+        std::vector<Vector3<Real>> const& vertices,
+        std::vector<std::array<int32_t, 3>> const& triangles,
+        std::vector<std::set<int32_t>> const& components,
+        Real maxGapDistance)
+    {
+        std::vector<std::pair<std::pair<int32_t, int32_t>, std::pair<int32_t, int32_t>>> gaps;
+        
+        // Find boundary edges for each component
+        std::map<std::pair<int32_t, int32_t>, int32_t> edgeCount;
+        for (auto const& tri : triangles)
+        {
+            for (int i = 0; i < 3; ++i)
+            {
+                int32_t v0 = tri[i];
+                int32_t v1 = tri[(i + 1) % 3];
+                auto edge = std::make_pair(std::min(v0, v1), std::max(v0, v1));
+                edgeCount[edge]++;
+            }
+        }
+        
+        std::vector<std::vector<std::pair<int32_t, int32_t>>> componentBoundaries(components.size());
+        
+        for (auto const& ec : edgeCount)
+        {
+            if (ec.second == 1)  // Boundary edge
+            {
+                // Find which component this edge belongs to
+                for (size_t i = 0; i < components.size(); ++i)
+                {
+                    if (components[i].count(ec.first.first) && components[i].count(ec.first.second))
+                    {
+                        componentBoundaries[i].push_back(ec.first);
+                        break;
+                    }
+                }
+            }
+        }
+        
+        // Find close boundary edges between different components
+        for (size_t i = 0; i < components.size(); ++i)
+        {
+            for (size_t j = i + 1; j < components.size(); ++j)
+            {
+                for (auto const& edge1 : componentBoundaries[i])
+                {
+                    Vector3<Real> mid1 = (vertices[edge1.first] + vertices[edge1.second]) / static_cast<Real>(2);
+                    
+                    for (auto const& edge2 : componentBoundaries[j])
+                    {
+                        Vector3<Real> mid2 = (vertices[edge2.first] + vertices[edge2.second]) / static_cast<Real>(2);
+                        
+                        Real dist = Length(mid2 - mid1);
+                        if (dist < maxGapDistance)
+                        {
+                            gaps.push_back(std::make_pair(edge1, edge2));
+                        }
+                    }
+                }
+            }
+        }
+        
+        return gaps;
+    }
+    
+    template <typename Real>
+    typename BallPivotMeshHoleFiller<Real>::BoundaryLoop
+    BallPivotMeshHoleFiller<Real>::CreateVirtualBoundaryLoop(
+        std::vector<Vector3<Real>> const& vertices,
+        std::pair<int32_t, int32_t> const& edge1,
+        std::pair<int32_t, int32_t> const& edge2)
+    {
+        BoundaryLoop loop;
+        
+        // Create a quadrilateral loop connecting the two edges
+        // Order vertices to form a closed loop
+        loop.vertexIndices = {edge1.first, edge1.second, edge2.second, edge2.first};
+        loop.isClosed = true;
+        
+        // Calculate edge statistics
+        Real totalLength = static_cast<Real>(0);
+        for (size_t i = 0; i < 4; ++i)
+        {
+            int32_t v0 = loop.vertexIndices[i];
+            int32_t v1 = loop.vertexIndices[(i + 1) % 4];
+            Real len = Length(vertices[v1] - vertices[v0]);
+            totalLength += len;
+            loop.minEdgeLength = std::min(loop.minEdgeLength, len);
+            loop.maxEdgeLength = std::max(loop.maxEdgeLength, len);
+        }
+        loop.avgEdgeLength = totalLength / static_cast<Real>(4);
+        
+        return loop;
+    }
+    
+    template <typename Real>
+    bool BallPivotMeshHoleFiller<Real>::FillAllHolesWithComponentBridging(
+        std::vector<Vector3<Real>>& vertices,
+        std::vector<std::array<int32_t, 3>>& triangles,
+        Parameters const& params)
+    {
+        if (params.verbose)
+        {
+            std::cout << "[BallPivotMeshHoleFiller] Component-aware hole filling...\n";
+        }
+        
+        bool anyProgress = false;
+        int32_t iteration = 0;
+        
+        while (iteration < params.maxIterations)
+        {
+            ++iteration;
+            bool progressThisIteration = false;
+            
+            // Step 1: Fill regular holes within components
+            auto holes = DetectBoundaryLoops(vertices, triangles);
+            
+            if (params.verbose && !holes.empty())
+            {
+                std::cout << "  Iteration " << iteration << ": Found " << holes.size() << " hole(s) within components\n";
+            }
+            
+            size_t holesFilled = 0;
+            size_t trianglesBefore = triangles.size();
+            
+            for (auto const& hole : holes)
+            {
+                if (FillHole(vertices, triangles, hole, params))
+                {
+                    ++holesFilled;
+                    progressThisIteration = true;
+                }
+            }
+            
+            if (params.verbose && holesFilled > 0)
+            {
+                std::cout << "    Filled " << holesFilled << " hole(s), added " 
+                          << (triangles.size() - trianglesBefore) << " triangles\n";
+            }
+            
+            // Step 2: Bridge between disconnected components
+            auto components = DetectConnectedComponents(triangles);
+            
+            if (components.size() > 1)
+            {
+                if (params.verbose)
+                {
+                    std::cout << "    Found " << components.size() << " disconnected components\n";
+                }
+                
+                // Calculate average edge length for gap threshold
+                Real avgEdgeLength = static_cast<Real>(0);
+                int32_t edgeCount = 0;
+                for (auto const& hole : holes)
+                {
+                    if (hole.avgEdgeLength > static_cast<Real>(0))
+                    {
+                        avgEdgeLength += hole.avgEdgeLength;
+                        ++edgeCount;
+                    }
+                }
+                if (edgeCount > 0)
+                {
+                    avgEdgeLength /= static_cast<Real>(edgeCount);
+                }
+                else
+                {
+                    avgEdgeLength = static_cast<Real>(50.0);  // Default
+                }
+                
+                // Try progressively larger gap distances
+                std::vector<Real> gapScales = {2.0, 3.0, 5.0, 10.0};
+                
+                for (Real scale : gapScales)
+                {
+                    Real maxGapDist = avgEdgeLength * scale;
+                    auto gaps = FindComponentGaps(vertices, triangles, components, maxGapDist);
+                    
+                    if (!gaps.empty())
+                    {
+                        if (params.verbose)
+                        {
+                            std::cout << "      Found " << gaps.size() << " gap(s) at distance threshold " 
+                                      << maxGapDist << "\n";
+                        }
+                        
+                        size_t gapsFilled = 0;
+                        size_t gapTrianglesBefore = triangles.size();
+                        
+                        for (auto const& gap : gaps)
+                        {
+                            auto virtualLoop = CreateVirtualBoundaryLoop(vertices, gap.first, gap.second);
+                            if (FillHole(vertices, triangles, virtualLoop, params))
+                            {
+                                ++gapsFilled;
+                                progressThisIteration = true;
+                                anyProgress = true;
+                            }
+                        }
+                        
+                        if (params.verbose && gapsFilled > 0)
+                        {
+                            std::cout << "        Bridged " << gapsFilled << " gap(s), added "
+                                      << (triangles.size() - gapTrianglesBefore) << " triangles\n";
+                        }
+                        
+                        if (gapsFilled > 0)
+                        {
+                            break;  // Re-detect components after bridging
+                        }
+                    }
+                }
+            }
+            
+            // Check if mesh is now closed
+            auto remainingHoles = DetectBoundaryLoops(vertices, triangles);
+            auto remainingComponents = DetectConnectedComponents(triangles);
+            
+            if (remainingHoles.empty() && remainingComponents.size() <= 1)
+            {
+                if (params.verbose)
+                {
+                    std::cout << "  Mesh is now closed with single component!\n";
+                }
+                break;
+            }
+            
+            if (!progressThisIteration)
+            {
+                if (params.verbose)
+                {
+                    std::cout << "  No progress in iteration " << iteration << ", stopping.\n";
+                }
+                break;
+            }
+        }
+        
+        if (params.verbose)
+        {
+            auto finalHoles = DetectBoundaryLoops(vertices, triangles);
+            auto finalComponents = DetectConnectedComponents(triangles);
+            std::cout << "[BallPivotMeshHoleFiller] Complete: " 
+                      << finalHoles.size() << " holes, " 
+                      << finalComponents.size() << " components\n";
+        }
+        
+        return anyProgress;
+    }
+    
     // Explicit instantiations
     template class BallPivotMeshHoleFiller<float>;
     template class BallPivotMeshHoleFiller<double>;
