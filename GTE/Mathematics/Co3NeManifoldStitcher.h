@@ -47,9 +47,34 @@ namespace gte
             std::set<int32_t> vertexIndices;       // Unique vertices in this patch
             std::vector<std::pair<int32_t, int32_t>> boundaryEdges;  // Boundary edges
             bool isManifold;                        // Whether patch is locally manifold
+            bool isClosed;                          // Whether patch has no boundary edges
             Real area;                              // Total patch area
+            Vector3<Real> centroid;                 // Patch centroid
             
-            Patch() : isManifold(false), area(static_cast<Real>(0)) {}
+            Patch() 
+                : isManifold(false)
+                , isClosed(false)
+                , area(static_cast<Real>(0)) 
+                , centroid{static_cast<Real>(0), static_cast<Real>(0), static_cast<Real>(0)}
+            {}
+        };
+        
+        // Patch pair with gap analysis
+        struct PatchPair
+        {
+            size_t patch1Index;
+            size_t patch2Index;
+            Real minDistance;               // Minimum distance between patches
+            Real maxDistance;               // Maximum distance between patches
+            size_t closeBoundaryVertices;   // Number of boundary vertices within threshold
+            
+            PatchPair()
+                : patch1Index(0)
+                , patch2Index(0)
+                , minDistance(std::numeric_limits<Real>::max())
+                , maxDistance(static_cast<Real>(0))
+                , closeBoundaryVertices(0)
+            {}
         };
         
         // Edge classification
@@ -158,12 +183,50 @@ namespace gte
             if (params.verbose)
             {
                 std::cout << "Found " << patches.size() << " connected patches\n";
+                size_t closedPatches = 0;
                 for (size_t i = 0; i < patches.size(); ++i)
                 {
                     std::cout << "  Patch " << i << ": " 
                               << patches[i].triangleIndices.size() << " triangles, "
                               << patches[i].boundaryEdges.size() << " boundary edges, "
-                              << (patches[i].isManifold ? "manifold" : "non-manifold") << "\n";
+                              << (patches[i].isManifold ? "manifold" : "non-manifold")
+                              << (patches[i].isClosed ? ", closed" : ", open") << "\n";
+                    
+                    if (patches[i].isClosed)
+                    {
+                        closedPatches++;
+                    }
+                }
+                std::cout << "  " << closedPatches << " closed patches (no boundaries)\n";
+                std::cout << "  " << (patches.size() - closedPatches) << " open patches (have boundaries)\n";
+            }
+            
+            // Step 4a: Analyze patch pairs to identify stitching opportunities
+            std::vector<PatchPair> patchPairs;
+            if (patches.size() > 1)
+            {
+                // Estimate a reasonable max distance based on mesh scale
+                Real avgEdgeLength = EstimateAverageEdgeLength(vertices, triangles);
+                Real maxPairDistance = avgEdgeLength * static_cast<Real>(3);  // 3x average edge
+                
+                AnalyzePatchPairs(vertices, patches, patchPairs, maxPairDistance);
+                
+                if (params.verbose && !patchPairs.empty())
+                {
+                    std::cout << "\nFound " << patchPairs.size() << " patch pairs for potential stitching\n";
+                    size_t toShow = std::min(static_cast<size_t>(5), patchPairs.size());
+                    for (size_t i = 0; i < toShow; ++i)
+                    {
+                        auto const& pair = patchPairs[i];
+                        std::cout << "  Pair " << i << ": patches " << pair.patch1Index 
+                                  << " and " << pair.patch2Index
+                                  << ", min dist = " << pair.minDistance
+                                  << ", close vertices = " << pair.closeBoundaryVertices << "\n";
+                    }
+                    if (patchPairs.size() > toShow)
+                    {
+                        std::cout << "  ... and " << (patchPairs.size() - toShow) << " more pairs\n";
+                    }
                 }
             }
             
@@ -434,8 +497,10 @@ namespace gte
             std::map<std::pair<int32_t, int32_t>, EdgeType> const& edgeTypes,
             Patch& patch)
         {
-            // Compute area
+            // Compute area and centroid
             patch.area = static_cast<Real>(0);
+            Vector3<Real> weightedCentroid{static_cast<Real>(0), static_cast<Real>(0), static_cast<Real>(0)};
+            
             for (auto triIdx : patch.triangleIndices)
             {
                 auto const& tri = triangles[triIdx];
@@ -446,7 +511,17 @@ namespace gte
                 Vector3<Real> edge1 = v1 - v0;
                 Vector3<Real> edge2 = v2 - v0;
                 Vector3<Real> cross = Cross(edge1, edge2);
-                patch.area += Length(cross) * static_cast<Real>(0.5);
+                Real triArea = Length(cross) * static_cast<Real>(0.5);
+                patch.area += triArea;
+                
+                // Triangle centroid
+                Vector3<Real> triCentroid = (v0 + v1 + v2) / static_cast<Real>(3);
+                weightedCentroid += triCentroid * triArea;
+            }
+            
+            if (patch.area > static_cast<Real>(0))
+            {
+                patch.centroid = weightedCentroid / patch.area;
             }
             
             // Find boundary edges and check manifold status
@@ -466,17 +541,98 @@ namespace gte
             
             // Classify edges within this patch
             patch.isManifold = true;
+            patch.isClosed = true;
+            
             for (auto const& ec : patchEdgeCounts)
             {
                 if (ec.second == 1)
                 {
                     patch.boundaryEdges.push_back(ec.first);
+                    patch.isClosed = false;
                 }
                 else if (ec.second > 2)
                 {
                     patch.isManifold = false;
                 }
             }
+        }
+        
+        // Analyze distances between patch pairs
+        static void AnalyzePatchPairs(
+            std::vector<Vector3<Real>> const& vertices,
+            std::vector<Patch> const& patches,
+            std::vector<PatchPair>& patchPairs,
+            Real maxDistance = static_cast<Real>(0))
+        {
+            // Find pairs of patches that are close enough to potentially stitch
+            for (size_t i = 0; i < patches.size(); ++i)
+            {
+                for (size_t j = i + 1; j < patches.size(); ++j)
+                {
+                    PatchPair pair;
+                    pair.patch1Index = i;
+                    pair.patch2Index = j;
+                    
+                    // Quick distance check using centroids
+                    Vector3<Real> centroidDiff = patches[i].centroid - patches[j].centroid;
+                    Real centroidDist = Length(centroidDiff);
+                    
+                    // If centroids are too far apart, skip detailed analysis
+                    if (maxDistance > static_cast<Real>(0) && 
+                        centroidDist > maxDistance * static_cast<Real>(5))
+                    {
+                        continue;
+                    }
+                    
+                    // Analyze boundary vertex distances
+                    std::set<int32_t> boundary1, boundary2;
+                    for (auto const& edge : patches[i].boundaryEdges)
+                    {
+                        boundary1.insert(edge.first);
+                        boundary1.insert(edge.second);
+                    }
+                    for (auto const& edge : patches[j].boundaryEdges)
+                    {
+                        boundary2.insert(edge.first);
+                        boundary2.insert(edge.second);
+                    }
+                    
+                    // Find min/max distances between boundary vertices
+                    pair.minDistance = std::numeric_limits<Real>::max();
+                    pair.maxDistance = static_cast<Real>(0);
+                    pair.closeBoundaryVertices = 0;
+                    
+                    for (auto v1 : boundary1)
+                    {
+                        for (auto v2 : boundary2)
+                        {
+                            Vector3<Real> diff = vertices[v1] - vertices[v2];
+                            Real dist = Length(diff);
+                            
+                            pair.minDistance = std::min(pair.minDistance, dist);
+                            pair.maxDistance = std::max(pair.maxDistance, dist);
+                            
+                            if (maxDistance > static_cast<Real>(0) && dist < maxDistance)
+                            {
+                                pair.closeBoundaryVertices++;
+                            }
+                        }
+                    }
+                    
+                    // Only add pairs that are close enough
+                    if (maxDistance <= static_cast<Real>(0) || 
+                        pair.minDistance < maxDistance)
+                    {
+                        patchPairs.push_back(pair);
+                    }
+                }
+            }
+            
+            // Sort by minimum distance (closest pairs first)
+            std::sort(patchPairs.begin(), patchPairs.end(),
+                [](PatchPair const& a, PatchPair const& b) {
+                    return a.minDistance < b.minDistance;
+                });
         }
         
         // Validate that mesh is manifold
@@ -504,6 +660,37 @@ namespace gte
             }
             
             return true;
+        }
+        
+        // Estimate average edge length in the mesh
+        static Real EstimateAverageEdgeLength(
+            std::vector<Vector3<Real>> const& vertices,
+            std::vector<std::array<int32_t, 3>> const& triangles)
+        {
+            if (triangles.empty())
+            {
+                return static_cast<Real>(1);
+            }
+            
+            Real totalLength = static_cast<Real>(0);
+            size_t edgeCount = 0;
+            
+            // Sample edges from triangles (just use first few to be efficient)
+            size_t samplesToUse = std::min(static_cast<size_t>(100), triangles.size());
+            
+            for (size_t i = 0; i < samplesToUse; ++i)
+            {
+                auto const& tri = triangles[i];
+                for (int j = 0; j < 3; ++j)
+                {
+                    Vector3<Real> v0 = vertices[tri[j]];
+                    Vector3<Real> v1 = vertices[tri[(j + 1) % 3]];
+                    totalLength += Length(v1 - v0);
+                    edgeCount++;
+                }
+            }
+            
+            return edgeCount > 0 ? totalLength / static_cast<Real>(edgeCount) : static_cast<Real>(1);
         }
     };
 }

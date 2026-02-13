@@ -53,3 +53,4 @@ test_*
 a.out
 *.gch
 *.pch
+*.obj
