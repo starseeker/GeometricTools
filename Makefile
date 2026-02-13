@@ -138,3 +138,8 @@ test_co3ne_stitcher: $(TEST_DIR)/test_co3ne_stitcher.cpp GTE/Mathematics/Co3NeMa
 test_topology: $(TEST_DIR)/test_topology_bridging.cpp GTE/Mathematics/Co3NeManifoldStitcher.h GTE/Mathematics/Co3Ne.h GTE/Mathematics/BallPivotReconstruction.h GTE/Mathematics/BallPivotReconstruction.cpp
 	$(CXX) $(CXXFLAGS) -o test_topology $(TEST_DIR)/test_topology_bridging.cpp GTE/Mathematics/BallPivotReconstruction.cpp $(LDFLAGS)
 
+# Large input performance test
+test_large: $(TEST_DIR)/test_large_input.cpp GTE/Mathematics/Co3NeManifoldStitcher.h GTE/Mathematics/Co3Ne.h
+	$(CXX) $(CXXFLAGS) -o test_large $(TEST_DIR)/test_large_input.cpp GTE/Mathematics/BallPivotReconstruction.cpp $(LDFLAGS)
+
+
