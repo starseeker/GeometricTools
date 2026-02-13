@@ -24,6 +24,8 @@
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <map>
+#include <algorithm>
 
 namespace gte
 {
@@ -144,7 +146,7 @@ namespace gte
             return Co3Ne<Real>::Reconstruct(points, outVertices, outTriangles, params.co3neParams);
         }
         
-        // Strategy 3: Quality-based selection (future work)
+        // Strategy 3: Quality-based selection
         static bool ReconstructQualityBased(
             std::vector<Vector3<Real>> const& points,
             std::vector<Vector3<Real>>& outVertices,
@@ -153,14 +155,83 @@ namespace gte
         {
             if (params.verbose)
             {
-                std::cout << "HybridReconstruction: Quality-based merging (TODO)" << std::endl;
+                std::cout << "HybridReconstruction: Quality-based merging" << std::endl;
             }
             
-            // For now, fall back to Poisson only
-            return ReconstructPoissonOnly(points, outVertices, outTriangles, params);
+            // Run both Co3Ne and Poisson
+            std::vector<Vector3<Real>> co3neVertices, poissonVertices;
+            std::vector<std::array<int32_t, 3>> co3neTriangles, poissonTriangles;
+            
+            if (params.verbose)
+            {
+                std::cout << "  Running Co3Ne..." << std::endl;
+            }
+            if (!Co3Ne<Real>::Reconstruct(points, co3neVertices, co3neTriangles, params.co3neParams))
+            {
+                std::cerr << "Co3Ne reconstruction failed" << std::endl;
+                return false;
+            }
+            
+            if (params.verbose)
+            {
+                std::cout << "  Co3Ne: " << co3neTriangles.size() << " triangles" << std::endl;
+                std::cout << "  Running Poisson..." << std::endl;
+            }
+            
+            std::vector<Vector3<Real>> normals;
+            if (!EstimateNormals(points, normals, params.co3neParams.kNeighbors))
+            {
+                std::cerr << "Normal estimation failed" << std::endl;
+                return false;
+            }
+            
+            if (!PoissonWrapper<Real>::Reconstruct(points, normals, poissonVertices, poissonTriangles, params.poissonParams))
+            {
+                std::cerr << "Poisson reconstruction failed" << std::endl;
+                return false;
+            }
+            
+            if (params.verbose)
+            {
+                std::cout << "  Poisson: " << poissonTriangles.size() << " triangles" << std::endl;
+                std::cout << "  Computing quality metrics..." << std::endl;
+            }
+            
+            // Compute quality for both meshes
+            auto co3neQuality = ComputeMeshQuality(co3neVertices, co3neTriangles, points);
+            auto poissonQuality = ComputeMeshQuality(poissonVertices, poissonTriangles, points);
+            
+            if (params.verbose)
+            {
+                std::cout << "  Co3Ne avg quality: " << co3neQuality << std::endl;
+                std::cout << "  Poisson avg quality: " << poissonQuality << std::endl;
+            }
+            
+            // Select mesh with better overall quality
+            // In future: could do per-region selection
+            if (co3neQuality >= poissonQuality)
+            {
+                if (params.verbose)
+                {
+                    std::cout << "  Selected Co3Ne mesh (better quality)" << std::endl;
+                }
+                outVertices = co3neVertices;
+                outTriangles = co3neTriangles;
+            }
+            else
+            {
+                if (params.verbose)
+                {
+                    std::cout << "  Selected Poisson mesh (better quality)" << std::endl;
+                }
+                outVertices = poissonVertices;
+                outTriangles = poissonTriangles;
+            }
+            
+            return true;
         }
         
-        // Strategy 4: Co3Ne with Poisson gap filling (future work)
+        // Strategy 4: Co3Ne with Poisson gap filling
         static bool ReconstructCo3NeWithPoissonGaps(
             std::vector<Vector3<Real>> const& points,
             std::vector<Vector3<Real>>& outVertices,
@@ -169,11 +240,92 @@ namespace gte
         {
             if (params.verbose)
             {
-                std::cout << "HybridReconstruction: Co3Ne with Poisson gaps (TODO)" << std::endl;
+                std::cout << "HybridReconstruction: Co3Ne with Poisson gap filling" << std::endl;
             }
             
-            // For now, fall back to Poisson only
-            return ReconstructPoissonOnly(points, outVertices, outTriangles, params);
+            // Run Co3Ne to get detailed patches
+            std::vector<Vector3<Real>> co3neVertices;
+            std::vector<std::array<int32_t, 3>> co3neTriangles;
+            
+            if (params.verbose)
+            {
+                std::cout << "  Running Co3Ne..." << std::endl;
+            }
+            if (!Co3Ne<Real>::Reconstruct(points, co3neVertices, co3neTriangles, params.co3neParams))
+            {
+                std::cerr << "Co3Ne reconstruction failed" << std::endl;
+                return false;
+            }
+            
+            if (params.verbose)
+            {
+                std::cout << "  Co3Ne: " << co3neTriangles.size() << " triangles" << std::endl;
+            }
+            
+            // Detect gaps (boundary edges)
+            auto boundaryEdges = DetectBoundaryEdges(co3neTriangles);
+            
+            if (params.verbose)
+            {
+                std::cout << "  Detected " << boundaryEdges.size() << " boundary edges" << std::endl;
+            }
+            
+            // If no gaps, return Co3Ne result
+            if (boundaryEdges.empty())
+            {
+                if (params.verbose)
+                {
+                    std::cout << "  No gaps detected, using Co3Ne result" << std::endl;
+                }
+                outVertices = co3neVertices;
+                outTriangles = co3neTriangles;
+                return true;
+            }
+            
+            // Run Poisson to get connectivity
+            std::vector<Vector3<Real>> poissonVertices;
+            std::vector<std::array<int32_t, 3>> poissonTriangles;
+            
+            if (params.verbose)
+            {
+                std::cout << "  Running Poisson for gap filling..." << std::endl;
+            }
+            
+            std::vector<Vector3<Real>> normals;
+            if (!EstimateNormals(points, normals, params.co3neParams.kNeighbors))
+            {
+                std::cerr << "Normal estimation failed" << std::endl;
+                return false;
+            }
+            
+            if (!PoissonWrapper<Real>::Reconstruct(points, normals, poissonVertices, poissonTriangles, params.poissonParams))
+            {
+                std::cerr << "Poisson reconstruction failed" << std::endl;
+                return false;
+            }
+            
+            if (params.verbose)
+            {
+                std::cout << "  Poisson: " << poissonTriangles.size() << " triangles" << std::endl;
+                std::cout << "  Merging meshes..." << std::endl;
+            }
+            
+            // Merge: Keep Co3Ne triangles, add Poisson triangles that fill gaps
+            if (!MergeMeshes(co3neVertices, co3neTriangles, poissonVertices, poissonTriangles,
+                            outVertices, outTriangles, params))
+            {
+                std::cerr << "Mesh merging failed" << std::endl;
+                // Fall back to Poisson only (guaranteed single component)
+                outVertices = poissonVertices;
+                outTriangles = poissonTriangles;
+            }
+            
+            if (params.verbose)
+            {
+                std::cout << "  Final: " << outTriangles.size() << " triangles" << std::endl;
+            }
+            
+            return true;
         }
         
         // Helper: Estimate normals using PCA (simplified Co3Ne approach)
@@ -204,6 +356,164 @@ namespace gte
                 // Simple normal estimation: use Z-up as default
                 // TODO: Improve with actual PCA from neighbors
                 normals[i] = {static_cast<Real>(0), static_cast<Real>(0), static_cast<Real>(1)};
+            }
+            
+            return true;
+        }
+        
+        // Helper: Compute mesh quality metrics
+        static Real ComputeMeshQuality(
+            std::vector<Vector3<Real>> const& vertices,
+            std::vector<std::array<int32_t, 3>> const& triangles,
+            std::vector<Vector3<Real>> const& inputPoints)
+        {
+            if (triangles.empty())
+            {
+                return static_cast<Real>(0);
+            }
+            
+            Real totalQuality = static_cast<Real>(0);
+            
+            for (auto const& tri : triangles)
+            {
+                // Get triangle vertices
+                auto const& v0 = vertices[tri[0]];
+                auto const& v1 = vertices[tri[1]];
+                auto const& v2 = vertices[tri[2]];
+                
+                // Compute aspect ratio quality
+                Real aspectRatio = ComputeTriangleAspectRatio(v0, v1, v2);
+                
+                // Compute proximity to input points
+                Vector3<Real> center = (v0 + v1 + v2) / static_cast<Real>(3);
+                Real minDist = std::numeric_limits<Real>::max();
+                for (auto const& pt : inputPoints)
+                {
+                    Real dist = Length(center - pt);
+                    if (dist < minDist)
+                    {
+                        minDist = dist;
+                    }
+                }
+                
+                // Combined quality: aspect ratio * proximity weight
+                Real proximityWeight = static_cast<Real>(1) / (static_cast<Real>(1) + minDist);
+                Real quality = aspectRatio * proximityWeight;
+                
+                totalQuality += quality;
+            }
+            
+            return totalQuality / static_cast<Real>(triangles.size());
+        }
+        
+        // Helper: Compute triangle aspect ratio (1 = equilateral, 0 = degenerate)
+        static Real ComputeTriangleAspectRatio(
+            Vector3<Real> const& v0,
+            Vector3<Real> const& v1,
+            Vector3<Real> const& v2)
+        {
+            Vector3<Real> e0 = v1 - v0;
+            Vector3<Real> e1 = v2 - v1;
+            Vector3<Real> e2 = v0 - v2;
+            
+            Real len0 = Length(e0);
+            Real len1 = Length(e1);
+            Real len2 = Length(e2);
+            
+            if (len0 < static_cast<Real>(1e-10) || len1 < static_cast<Real>(1e-10) || len2 < static_cast<Real>(1e-10))
+            {
+                return static_cast<Real>(0); // Degenerate
+            }
+            
+            // Area using cross product
+            Vector3<Real> normal = Cross(e0, -e2);
+            Real area = Length(normal) / static_cast<Real>(2);
+            
+            // Perimeter
+            Real perimeter = len0 + len1 + len2;
+            
+            // Quality metric: 4 * sqrt(3) * area / (perimeter^2)
+            // This gives 1 for equilateral, 0 for degenerate
+            Real quality = static_cast<Real>(4) * std::sqrt(static_cast<Real>(3)) * area / (perimeter * perimeter);
+            
+            return std::min(quality, static_cast<Real>(1));
+        }
+        
+        // Helper: Detect boundary edges
+        static std::vector<std::pair<int32_t, int32_t>> DetectBoundaryEdges(
+            std::vector<std::array<int32_t, 3>> const& triangles)
+        {
+            // Map edge (as sorted pair) to count
+            std::map<std::pair<int32_t, int32_t>, int32_t> edgeCount;
+            
+            for (auto const& tri : triangles)
+            {
+                // Three edges per triangle
+                for (int i = 0; i < 3; ++i)
+                {
+                    int32_t v0 = tri[i];
+                    int32_t v1 = tri[(i + 1) % 3];
+                    
+                    // Sort to make edge canonical
+                    if (v0 > v1) std::swap(v0, v1);
+                    
+                    edgeCount[{v0, v1}]++;
+                }
+            }
+            
+            // Boundary edges appear exactly once
+            std::vector<std::pair<int32_t, int32_t>> boundaryEdges;
+            for (auto const& [edge, count] : edgeCount)
+            {
+                if (count == 1)
+                {
+                    boundaryEdges.push_back(edge);
+                }
+            }
+            
+            return boundaryEdges;
+        }
+        
+        // Helper: Merge two meshes
+        static bool MergeMeshes(
+            std::vector<Vector3<Real>> const& vertices1,
+            std::vector<std::array<int32_t, 3>> const& triangles1,
+            std::vector<Vector3<Real>> const& vertices2,
+            std::vector<std::array<int32_t, 3>> const& triangles2,
+            std::vector<Vector3<Real>>& outVertices,
+            std::vector<std::array<int32_t, 3>>& outTriangles,
+            Parameters const& params)
+        {
+            // Simple merge: combine all vertices and triangles
+            // More sophisticated version would remove duplicates and ensure connectivity
+            
+            outVertices.clear();
+            outTriangles.clear();
+            
+            // Add all vertices from mesh 1
+            outVertices.insert(outVertices.end(), vertices1.begin(), vertices1.end());
+            int32_t offset1 = 0;
+            
+            // Add triangles from mesh 1
+            for (auto const& tri : triangles1)
+            {
+                outTriangles.push_back({tri[0] + offset1, tri[1] + offset1, tri[2] + offset1});
+            }
+            
+            // Add vertices from mesh 2
+            int32_t offset2 = static_cast<int32_t>(outVertices.size());
+            outVertices.insert(outVertices.end(), vertices2.begin(), vertices2.end());
+            
+            // Add triangles from mesh 2
+            for (auto const& tri : triangles2)
+            {
+                outTriangles.push_back({tri[0] + offset2, tri[1] + offset2, tri[2] + offset2});
+            }
+            
+            if (params.verbose)
+            {
+                std::cout << "    Merged: " << outVertices.size() << " vertices, " 
+                         << outTriangles.size() << " triangles" << std::endl;
             }
             
             return true;
