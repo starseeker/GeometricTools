@@ -72,7 +72,7 @@ namespace gte
             bool bypassManifoldExtraction;  // Skip manifold extraction entirely (output all unique triangles)
             bool autoFixNonManifold;        // Automatically fix non-manifold edges (guarantees manifold output)
             bool fixWindingOrder;           // Fix triangle winding to be consistent (outward-facing)
-            bool preventSelfIntersections;  // Reject triangles that would cause self-intersections
+            bool preventSelfIntersections;  // Reject triangles that would cause self-intersections (EXPERIMENTAL - can be too aggressive)
             
             Parameters()
                 : kNeighbors(20)
@@ -88,7 +88,7 @@ namespace gte
                 , bypassManifoldExtraction(false)   // Default to standard manifold extraction
                 , autoFixNonManifold(false)         // Default: don't auto-fix
                 , fixWindingOrder(true)             // Default: fix winding (important for BRL-CAD)
-                , preventSelfIntersections(true)    // Default: prevent intersections (important for BRL-CAD)
+                , preventSelfIntersections(false)   // Default: DISABLED (too aggressive, experimental)
             {
             }
         };
