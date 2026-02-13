@@ -328,37 +328,14 @@ namespace gte
             return true;
         }
         
-        // Helper: Estimate normals using PCA (simplified Co3Ne approach)
+        // Helper: Estimate normals using PCA (using Co3Ne's implementation)
         static bool EstimateNormals(
             std::vector<Vector3<Real>> const& points,
             std::vector<Vector3<Real>>& normals,
             size_t kNeighbors)
         {
-            // Use Co3Ne's normal estimation by running partial reconstruction
-            typename Co3Ne<Real>::Parameters params;
-            params.kNeighbors = kNeighbors;
-            params.orientNormals = true;
-            
-            std::vector<Vector3<Real>> vertices;
-            std::vector<std::array<int32_t, 3>> triangles;
-            
-            // Run Co3Ne just to get normals (we discard the mesh)
-            if (!Co3Ne<Real>::Reconstruct(points, vertices, triangles, params))
-            {
-                return false;
-            }
-            
-            // For now, estimate normals from point cloud using simple PCA
-            // (proper implementation would extract from Co3Ne's internal state)
-            normals.resize(points.size());
-            for (size_t i = 0; i < points.size(); ++i)
-            {
-                // Simple normal estimation: use Z-up as default
-                // TODO: Improve with actual PCA from neighbors
-                normals[i] = {static_cast<Real>(0), static_cast<Real>(0), static_cast<Real>(1)};
-            }
-            
-            return true;
+            // Use Co3Ne's public PCA-based normal estimation
+            return Co3Ne<Real>::ComputeNormalsPublic(points, normals, kNeighbors, true);
         }
         
         // Helper: Compute mesh quality metrics
@@ -474,7 +451,7 @@ namespace gte
             return boundaryEdges;
         }
         
-        // Helper: Merge two meshes
+        // Helper: Merge two meshes with vertex deduplication
         static bool MergeMeshes(
             std::vector<Vector3<Real>> const& vertices1,
             std::vector<std::array<int32_t, 3>> const& triangles1,
@@ -484,36 +461,100 @@ namespace gte
             std::vector<std::array<int32_t, 3>>& outTriangles,
             Parameters const& params)
         {
-            // Simple merge: combine all vertices and triangles
-            // More sophisticated version would remove duplicates and ensure connectivity
+            // Intelligent merge: deduplicate vertices and remove duplicate triangles
             
             outVertices.clear();
             outTriangles.clear();
             
             // Add all vertices from mesh 1
-            outVertices.insert(outVertices.end(), vertices1.begin(), vertices1.end());
-            int32_t offset1 = 0;
+            outVertices = vertices1;
             
-            // Add triangles from mesh 1
-            for (auto const& tri : triangles1)
+            // Add triangles from mesh 1 with original indices
+            outTriangles = triangles1;
+            
+            // Vertex deduplication threshold
+            Real epsilon = static_cast<Real>(1e-6);
+            
+            // For each vertex in mesh2, find if it already exists in outVertices
+            std::vector<int32_t> vertexMap(vertices2.size());
+            
+            for (size_t i = 0; i < vertices2.size(); ++i)
             {
-                outTriangles.push_back({tri[0] + offset1, tri[1] + offset1, tri[2] + offset1});
+                auto const& v2 = vertices2[i];
+                
+                // Check if this vertex is close to any existing vertex
+                bool found = false;
+                for (size_t j = 0; j < outVertices.size(); ++j)
+                {
+                    auto const& v1 = outVertices[j];
+                    Vector3<Real> diff = v2 - v1;
+                    Real distSq = Dot(diff, diff);
+                    
+                    if (distSq < epsilon * epsilon)
+                    {
+                        // Reuse existing vertex
+                        vertexMap[i] = static_cast<int32_t>(j);
+                        found = true;
+                        break;
+                    }
+                }
+                
+                if (!found)
+                {
+                    // Add new vertex
+                    vertexMap[i] = static_cast<int32_t>(outVertices.size());
+                    outVertices.push_back(v2);
+                }
             }
             
-            // Add vertices from mesh 2
-            int32_t offset2 = static_cast<int32_t>(outVertices.size());
-            outVertices.insert(outVertices.end(), vertices2.begin(), vertices2.end());
-            
-            // Add triangles from mesh 2
+            // Add triangles from mesh 2 with remapped indices
             for (auto const& tri : triangles2)
             {
-                outTriangles.push_back({tri[0] + offset2, tri[1] + offset2, tri[2] + offset2});
+                std::array<int32_t, 3> remappedTri = {
+                    vertexMap[tri[0]],
+                    vertexMap[tri[1]],
+                    vertexMap[tri[2]]
+                };
+                
+                // Check for degenerate triangle
+                if (remappedTri[0] == remappedTri[1] || 
+                    remappedTri[1] == remappedTri[2] || 
+                    remappedTri[2] == remappedTri[0])
+                {
+                    continue; // Skip degenerate
+                }
+                
+                // Check if this triangle already exists
+                bool duplicate = false;
+                for (auto const& existingTri : outTriangles)
+                {
+                    // Check all permutations (same triangle, different winding)
+                    std::array<int32_t, 3> sorted1 = existingTri;
+                    std::array<int32_t, 3> sorted2 = remappedTri;
+                    std::sort(sorted1.begin(), sorted1.end());
+                    std::sort(sorted2.begin(), sorted2.end());
+                    
+                    if (sorted1[0] == sorted2[0] && 
+                        sorted1[1] == sorted2[1] && 
+                        sorted1[2] == sorted2[2])
+                    {
+                        duplicate = true;
+                        break;
+                    }
+                }
+                
+                if (!duplicate)
+                {
+                    outTriangles.push_back(remappedTri);
+                }
             }
             
             if (params.verbose)
             {
                 std::cout << "    Merged: " << outVertices.size() << " vertices, " 
                          << outTriangles.size() << " triangles" << std::endl;
+                std::cout << "    (Deduplicated " << (vertices1.size() + vertices2.size() - outVertices.size())
+                         << " vertices)" << std::endl;
             }
             
             return true;

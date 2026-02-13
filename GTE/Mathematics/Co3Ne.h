@@ -159,6 +159,31 @@ namespace gte
 
             return !outTriangles.empty();
         }
+        
+        // Public utility: Compute normals using PCA
+        // Exposed for use by other algorithms (e.g., HybridReconstruction)
+        static bool ComputeNormalsPublic(
+            std::vector<Vector3<Real>> const& points,
+            std::vector<Vector3<Real>>& normals,
+            size_t kNeighbors = 20,
+            bool orientNormals = true)
+        {
+            Parameters params;
+            params.kNeighbors = kNeighbors;
+            params.orientNormals = orientNormals;
+            
+            if (!ComputeNormals(points, normals, params))
+            {
+                return false;
+            }
+            
+            if (orientNormals)
+            {
+                OrientNormalsConsistently(points, normals, params);
+            }
+            
+            return true;
+        }
 
     protected:
         static constexpr int32_t NO_VERTEX = -1;
