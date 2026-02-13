@@ -700,12 +700,33 @@ namespace gte
                     }
                 }
                 
-                // Step 3: Extract boundary points and normals from both patches
+                // Step 3: Re-identify patches after triangle removal to get updated boundaries
+                // We need fresh boundary information after removing outer triangles
+                std::map<std::pair<int32_t, int32_t>, EdgeType> updatedEdgeTypes;
+                std::vector<std::pair<int32_t, int32_t>> dummy;
+                AnalyzeEdgeTopology(triangles, updatedEdgeTypes, dummy);
+                
+                std::vector<Patch> updatedPatches;
+                IdentifyPatches(vertices, triangles, updatedEdgeTypes, updatedPatches);
+                
+                // Find which updated patches correspond to our original pair
+                // This is a bit tricky since patches may have merged or split
+                // For now, we'll extract all boundary points from the current mesh state
+                std::set<int32_t> allBoundaryVerts;
+                for (auto const& et : updatedEdgeTypes)
+                {
+                    if (et.second == EdgeType::Boundary)
+                    {
+                        allBoundaryVerts.insert(et.first.first);
+                        allBoundaryVerts.insert(et.first.second);
+                    }
+                }
+                
+                // Extract boundary points and normals
                 std::vector<Vector3<Real>> boundaryPoints;
                 std::vector<Vector3<Real>> boundaryNormals;
-                ExtractPatchBoundaryPoints(vertices, triangles, 
-                    patches[pair.patch1Index], patches[pair.patch2Index],
-                    boundaryPoints, boundaryNormals);
+                ExtractBoundaryPointsFromVertices(vertices, triangles, 
+                    allBoundaryVerts, boundaryPoints, boundaryNormals);
                 
                 if (boundaryPoints.empty())
                 {
@@ -833,6 +854,70 @@ namespace gte
             return sortedIndices.size();
         }
         
+        // Extract boundary points given a set of vertex indices
+        static void ExtractBoundaryPointsFromVertices(
+            std::vector<Vector3<Real>> const& vertices,
+            std::vector<std::array<int32_t, 3>> const& triangles,
+            std::set<int32_t> const& boundaryVertices,
+            std::vector<Vector3<Real>>& boundaryPoints,
+            std::vector<Vector3<Real>>& boundaryNormals)
+        {
+            boundaryPoints.clear();
+            boundaryNormals.clear();
+            
+            if (boundaryVertices.empty())
+            {
+                return;
+            }
+            
+            boundaryPoints.reserve(boundaryVertices.size());
+            boundaryNormals.reserve(boundaryVertices.size());
+            
+            // For each boundary vertex, get position and estimate normal
+            for (auto vIdx : boundaryVertices)
+            {
+                boundaryPoints.push_back(vertices[vIdx]);
+                
+                // Estimate normal by averaging adjacent triangle normals
+                Vector3<Real> avgNormal = Vector3<Real>::Zero();
+                int normalCount = 0;
+                
+                // Find all triangles using this vertex
+                for (auto const& tri : triangles)
+                {
+                    if (tri[0] == vIdx || tri[1] == vIdx || tri[2] == vIdx)
+                    {
+                        Vector3<Real> e1 = vertices[tri[1]] - vertices[tri[0]];
+                        Vector3<Real> e2 = vertices[tri[2]] - vertices[tri[0]];
+                        Vector3<Real> n = Cross(e1, e2);
+                        Real len = Length(n);
+                        if (len > static_cast<Real>(0))
+                        {
+                            avgNormal += n / len;
+                            normalCount++;
+                        }
+                    }
+                }
+                
+                if (normalCount > 0)
+                {
+                    avgNormal /= static_cast<Real>(normalCount);
+                    Real avgLen = Length(avgNormal);
+                    if (avgLen > static_cast<Real>(0))
+                    {
+                        avgNormal /= avgLen;
+                    }
+                }
+                else
+                {
+                    // Default normal if no triangles found
+                    avgNormal = Vector3<Real>::Unit(2);  // Z-axis
+                }
+                
+                boundaryNormals.push_back(avgNormal);
+            }
+        }
+        
         // Extract boundary points from patch pair for welding
         static void ExtractPatchBoundaryPoints(
             std::vector<Vector3<Real>> const& vertices,
@@ -946,13 +1031,12 @@ namespace gte
             Real avgSpacing = static_cast<Real>(0);
             size_t count = 0;
             
-            size_t samplesToUse = std::min(static_cast<size_t>(50), boundaryPoints.size());
-            size_t step = std::max<size_t>(1, boundaryPoints.size() / samplesToUse);
-            
-            for (size_t i = 0; i < boundaryPoints.size(); i += step)
+            // Sample uniformly across all boundary points
+            for (size_t i = 0; i < boundaryPoints.size(); ++i)
             {
                 Real minDist = std::numeric_limits<Real>::max();
                 
+                // Find nearest neighbor
                 for (size_t j = 0; j < boundaryPoints.size(); ++j)
                 {
                     if (i == j) continue;
@@ -977,41 +1061,20 @@ namespace gte
             }
             else
             {
-                // Fallback: compute bounding box diagonal
-                if (!boundaryPoints.empty())
+                // Fallback: use minDistance if available
+                if (minDistance > static_cast<Real>(0))
                 {
-                    Vector3<Real> minPt = boundaryPoints[0];
-                    Vector3<Real> maxPt = boundaryPoints[0];
-                    
-                    for (auto const& p : boundaryPoints)
-                    {
-                        for (int i = 0; i < 3; ++i)
-                        {
-                            minPt[i] = std::min(minPt[i], p[i]);
-                            maxPt[i] = std::max(maxPt[i], p[i]);
-                        }
-                    }
-                    
-                    Real diagonal = Length(maxPt - minPt);
-                    avgSpacing = diagonal / static_cast<Real>(10);  // Use 1/10 of diagonal
+                    avgSpacing = minDistance * static_cast<Real>(2);
+                }
+                else
+                {
+                    avgSpacing = static_cast<Real>(1);
                 }
             }
             
-            // Use reasonable radius: between avgSpacing and 2x avgSpacing
-            // But limit it to be reasonable relative to point cloud
+            // Use 1.5x the average spacing as the ball radius
+            // This is large enough to bridge gaps but not so large it creates bad triangles
             Real radius = avgSpacing * static_cast<Real>(1.5);
-            
-            // Don't let radius be too small or too large
-            Real minRadius = avgSpacing * static_cast<Real>(0.8);
-            Real maxRadius = avgSpacing * static_cast<Real>(3.0);
-            
-            radius = std::max(minRadius, std::min(maxRadius, radius));
-            
-            // Make sure we at least cover the gap
-            if (minDistance > static_cast<Real>(0))
-            {
-                radius = std::max(radius, minDistance);
-            }
             
             return radius;
         }
