@@ -68,6 +68,11 @@ namespace gte
             bool removeIsolatedTriangles;   // Remove isolated triangles
             bool smoothWithRVD;             // Post-process with RVD-based smoothing (improves quality)
             size_t rvdSmoothIterations;     // Number of RVD smoothing iterations
+            bool relaxedManifoldExtraction; // Use relaxed manifold extraction (accept more triangles)
+            bool bypassManifoldExtraction;  // Skip manifold extraction entirely (output all unique triangles)
+            bool autoFixNonManifold;        // Automatically fix non-manifold edges (guarantees manifold output)
+            bool fixWindingOrder;           // Fix triangle winding to be consistent (outward-facing)
+            bool preventSelfIntersections;  // Reject triangles that would cause self-intersections (EXPERIMENTAL - can be too aggressive)
             
             Parameters()
                 : kNeighbors(20)
@@ -79,6 +84,11 @@ namespace gte
                 , removeIsolatedTriangles(true)
                 , smoothWithRVD(true)       // Enable RVD smoothing for better quality
                 , rvdSmoothIterations(3)    // 3 iterations usually sufficient
+                , relaxedManifoldExtraction(false)  // Default to original behavior
+                , bypassManifoldExtraction(false)   // Default to standard manifold extraction
+                , autoFixNonManifold(false)         // Default: don't auto-fix
+                , fixWindingOrder(true)             // Default: fix winding (important for BRL-CAD)
+                , preventSelfIntersections(false)   // Default: DISABLED (too aggressive, experimental)
             {
             }
         };
@@ -119,6 +129,24 @@ namespace gte
 
             // Step 4: Extract manifold surface
             ExtractManifold(points, normals, candidateTriangles, outTriangles, params);
+            
+            // Step 4.5: Auto-fix non-manifold edges if requested
+            if (params.autoFixNonManifold && !outTriangles.empty())
+            {
+                AutoFixNonManifoldEdges(outTriangles);
+            }
+            
+            // Step 4.6: Fix winding order to be consistent (outward-facing)
+            if (params.fixWindingOrder && !outTriangles.empty())
+            {
+                FixWindingOrder(points, outTriangles);
+            }
+            
+            // Step 4.7: Remove self-intersecting triangles if requested
+            if (params.preventSelfIntersections && !outTriangles.empty())
+            {
+                RemoveSelfIntersectingTriangles(points, outTriangles);
+            }
 
             // Copy vertices
             outVertices = points;
@@ -366,8 +394,6 @@ namespace gte
             Real maxCosAngle = std::cos(params.maxNormalAngle * static_cast<Real>(3.14159265358979323846) / static_cast<Real>(180));
 
             // For each point, generate local triangles
-            std::map<std::array<int32_t, 3>, int32_t> triangleCount;
-
             for (size_t i = 0; i < points.size(); ++i)
             {
                 // Find k-nearest neighbors
@@ -421,21 +447,16 @@ namespace gte
                             continue;
                         }
 
-                        // Create normalized triangle (sorted indices)
+                        // Create triangle - DON'T normalize yet!
+                        // We want to keep duplicates so they can be counted
                         std::array<int32_t, 3> tri = { v0, v1, v2 };
-                        std::sort(tri.begin(), tri.end());
-
-                        // Count occurrences
-                        triangleCount[tri]++;
+                        
+                        // Add the triangle directly (with duplicates)
+                        // This is critical: Geogram's algorithm relies on counting
+                        // how many times each triangle appears from different Voronoi cells
+                        triangles.push_back(tri);
                     }
                 }
-            }
-
-            // Extract triangles that appear at least once
-            // Geogram uses occurrence count to filter, we'll keep all for now
-            for (auto const& entry : triangleCount)
-            {
-                triangles.push_back(entry.first);
             }
         }
 
@@ -489,6 +510,32 @@ namespace gte
             std::vector<std::array<int32_t, 3>>& outTriangles,
             Parameters const& params)
         {
+            // Option: Bypass manifold extraction entirely and output unique triangles
+            if (params.bypassManifoldExtraction)
+            {
+                // Just take unique triangles
+                std::set<std::array<int32_t, 3>> uniqueTriangles;
+                
+                for (auto const& tri : candidateTriangles)
+                {
+                    std::array<int32_t, 3> normalized = tri;
+                    std::sort(normalized.begin(), normalized.end());
+                    uniqueTriangles.insert(normalized);
+                }
+                
+                outTriangles.clear();
+                outTriangles.reserve(uniqueTriangles.size());
+                
+                for (auto const& tri : uniqueTriangles)
+                {
+                    outTriangles.push_back(tri);
+                }
+                
+                return;
+            }
+            
+            // Standard manifold extraction follows...
+            
             // Separate triangles into "good" and "not-so-good" categories
             // Good triangles: appear exactly 3 times (seen from 3 Voronoi cells)
             // These form a reliable manifold seed
@@ -505,28 +552,37 @@ namespace gte
                 triangleCounts[normalized]++;
             }
             
-            // Categorize triangles
-            for (auto const& tri : candidateTriangles)
+            // Categorize triangles based on frequency
+            // Following Geogram's logic exactly:
+            // - Triangles appearing exactly 3 times → good (reliable manifold seed)
+            // - Triangles appearing 1-2 times → not-so-good (added incrementally)
+            // - Triangles appearing > 3 times → discarded (overly constrained)
+            // In relaxed mode, triangles appearing 2-3 times are considered good
+            
+            int minGoodCount = params.relaxedManifoldExtraction ? 2 : 3;
+            int maxGoodCount = 3;
+            
+            // Add each UNIQUE triangle once based on its count
+            for (auto const& pair : triangleCounts)
             {
-                std::array<int32_t, 3> normalized = tri;
-                std::sort(normalized.begin(), normalized.end());
-                int count = triangleCounts[normalized];
+                std::array<int32_t, 3> const& normalized = pair.first;
+                int count = pair.second;
                 
-                if (count == 3)
+                if (count >= minGoodCount && count <= maxGoodCount)
                 {
-                    // Only add once (avoid duplicates)
-                    if (goodTriangles.empty() || goodTriangles.back() != tri)
+                    // Good triangles (appear 2-3 times depending on mode)
+                    goodTriangles.push_back(normalized);
+                }
+                else if (count <= 2 && count >= 1)
+                {
+                    // Not-so-good triangles (appear 1-2 times)
+                    // Only add if not already in good triangles
+                    if (count < minGoodCount)
                     {
-                        goodTriangles.push_back(tri);
+                        notSoGoodTriangles.push_back(normalized);
                     }
                 }
-                else if (count <= 2)
-                {
-                    if (notSoGoodTriangles.empty() || notSoGoodTriangles.back() != tri)
-                    {
-                        notSoGoodTriangles.push_back(tri);
-                    }
-                }
+                // Triangles appearing > 3 times are discarded (like Geogram)
             }
             
             // Use full manifold extraction
@@ -633,6 +689,246 @@ namespace gte
             // This scales better than a fixed percentage of diagonal
             Real multiplier = static_cast<Real>(4.0);  // Works well in practice
             return avgSpacing * multiplier;
+        }
+        
+        // Automatically fix non-manifold edges by removing offending triangles
+        // Uses greedy strategy: for each edge with >2 triangles, keep first 2
+        static void AutoFixNonManifoldEdges(
+            std::vector<std::array<int32_t, 3>>& triangles)
+        {
+            // Build edge to triangles map
+            std::map<std::pair<int32_t, int32_t>, std::vector<int32_t>> edgeToTriangles;
+            
+            for (size_t t = 0; t < triangles.size(); ++t)
+            {
+                auto const& tri = triangles[t];
+                for (int i = 0; i < 3; ++i)
+                {
+                    int32_t v0 = tri[i];
+                    int32_t v1 = tri[(i + 1) % 3];
+                    auto edge = std::make_pair(std::min(v0, v1), std::max(v0, v1));
+                    edgeToTriangles[edge].push_back(static_cast<int32_t>(t));
+                }
+            }
+            
+            // Find triangles to remove
+            std::set<int32_t> trianglesToRemove;
+            for (auto const& pair : edgeToTriangles)
+            {
+                size_t count = pair.second.size();
+                if (count > 2)
+                {
+                    // Keep first 2 triangles, remove the rest
+                    for (size_t i = 2; i < count; ++i)
+                    {
+                        trianglesToRemove.insert(pair.second[i]);
+                    }
+                }
+            }
+            
+            // Build new triangle list without removed triangles
+            if (!trianglesToRemove.empty())
+            {
+                std::vector<std::array<int32_t, 3>> fixedTriangles;
+                fixedTriangles.reserve(triangles.size() - trianglesToRemove.size());
+                
+                for (size_t t = 0; t < triangles.size(); ++t)
+                {
+                    if (trianglesToRemove.find(static_cast<int32_t>(t)) == trianglesToRemove.end())
+                    {
+                        fixedTriangles.push_back(triangles[t]);
+                    }
+                }
+                
+                triangles = std::move(fixedTriangles);
+            }
+        }
+        
+        // Fix triangle winding order to be consistent (outward-facing from centroid)
+        static void FixWindingOrder(
+            std::vector<Vector3<Real>> const& vertices,
+            std::vector<std::array<int32_t, 3>>& triangles)
+        {
+            if (triangles.empty() || vertices.empty())
+            {
+                return;
+            }
+            
+            // Compute centroid
+            Vector3<Real> centroid = vertices[0];
+            for (size_t i = 1; i < vertices.size(); ++i)
+            {
+                centroid += vertices[i];
+            }
+            centroid /= static_cast<Real>(vertices.size());
+            
+            // Fix each triangle's winding
+            for (auto& tri : triangles)
+            {
+                Vector3<Real> const& p0 = vertices[tri[0]];
+                Vector3<Real> const& p1 = vertices[tri[1]];
+                Vector3<Real> const& p2 = vertices[tri[2]];
+                
+                // Compute triangle normal
+                Vector3<Real> e1 = p1 - p0;
+                Vector3<Real> e2 = p2 - p0;
+                Vector3<Real> normal = Cross(e1, e2);
+                
+                // Vector from centroid to triangle center
+                Vector3<Real> triCenter = (p0 + p1 + p2) / static_cast<Real>(3);
+                Vector3<Real> outward = triCenter - centroid;
+                
+                // If normal points inward (dot < 0), flip triangle
+                if (Dot(normal, outward) < static_cast<Real>(0))
+                {
+                    std::swap(tri[1], tri[2]);  // Reverse winding
+                }
+            }
+        }
+        
+        // Remove self-intersecting triangles
+        // Uses greedy approach: check each triangle against all others, remove if intersects
+        static void RemoveSelfIntersectingTriangles(
+            std::vector<Vector3<Real>> const& vertices,
+            std::vector<std::array<int32_t, 3>>& triangles)
+        {
+            if (triangles.size() < 2)
+            {
+                return;
+            }
+            
+            std::set<int32_t> trianglesToRemove;
+            
+            // For large meshes, use spatial partitioning
+            // For now, use simple O(n^2) check with early termination
+            size_t maxChecks = 50000;  // Limit to prevent excessive runtime
+            size_t numChecks = 0;
+            
+            for (size_t i = 0; i < triangles.size() && numChecks < maxChecks; ++i)
+            {
+                if (trianglesToRemove.find(static_cast<int32_t>(i)) != trianglesToRemove.end())
+                {
+                    continue;  // Already marked for removal
+                }
+                
+                auto const& tri1 = triangles[i];
+                Vector3<Real> const& p0 = vertices[tri1[0]];
+                Vector3<Real> const& p1 = vertices[tri1[1]];
+                Vector3<Real> const& p2 = vertices[tri1[2]];
+                
+                for (size_t j = i + 1; j < triangles.size() && numChecks < maxChecks; ++j)
+                {
+                    if (trianglesToRemove.find(static_cast<int32_t>(j)) != trianglesToRemove.end())
+                    {
+                        continue;
+                    }
+                    
+                    auto const& tri2 = triangles[j];
+                    
+                    // Skip if triangles share vertices (adjacent)
+                    bool adjacent = false;
+                    for (int vi = 0; vi < 3 && !adjacent; ++vi)
+                    {
+                        for (int vj = 0; vj < 3; ++vj)
+                        {
+                            if (tri1[vi] == tri2[vj])
+                            {
+                                adjacent = true;
+                                break;
+                            }
+                        }
+                    }
+                    
+                    if (adjacent)
+                    {
+                        continue;
+                    }
+                    
+                    Vector3<Real> const& q0 = vertices[tri2[0]];
+                    Vector3<Real> const& q1 = vertices[tri2[1]];
+                    Vector3<Real> const& q2 = vertices[tri2[2]];
+                    
+                    numChecks++;
+                    
+                    // Simple triangle-triangle intersection test
+                    // Check if any edge of tri1 intersects tri2 or vice versa
+                    if (TrianglesIntersect(p0, p1, p2, q0, q1, q2))
+                    {
+                        // Mark the larger-index triangle for removal (greedy)
+                        trianglesToRemove.insert(static_cast<int32_t>(j));
+                    }
+                }
+            }
+            
+            // Remove marked triangles
+            if (!trianglesToRemove.empty())
+            {
+                std::vector<std::array<int32_t, 3>> cleanTriangles;
+                cleanTriangles.reserve(triangles.size() - trianglesToRemove.size());
+                
+                for (size_t t = 0; t < triangles.size(); ++t)
+                {
+                    if (trianglesToRemove.find(static_cast<int32_t>(t)) == trianglesToRemove.end())
+                    {
+                        cleanTriangles.push_back(triangles[t]);
+                    }
+                }
+                
+                triangles = std::move(cleanTriangles);
+            }
+        }
+        
+        // Simple triangle-triangle intersection test
+        static bool TrianglesIntersect(
+            Vector3<Real> const& p0, Vector3<Real> const& p1, Vector3<Real> const& p2,
+            Vector3<Real> const& q0, Vector3<Real> const& q1, Vector3<Real> const& q2)
+        {
+            // Simplified intersection test using separating axis theorem
+            // Check if triangles are on opposite sides of each other's planes
+            
+            // Compute normals
+            Vector3<Real> n1 = Cross(p1 - p0, p2 - p0);
+            Vector3<Real> n2 = Cross(q1 - q0, q2 - q0);
+            
+            Real epsilon = static_cast<Real>(1e-10);
+            Real len1 = Length(n1);
+            Real len2 = Length(n2);
+            
+            if (len1 < epsilon || len2 < epsilon)
+            {
+                return false;  // Degenerate triangle
+            }
+            
+            n1 /= len1;
+            n2 /= len2;
+            
+            // Check if tri2 vertices are all on same side of tri1's plane
+            Real d0 = Dot(q0 - p0, n1);
+            Real d1 = Dot(q1 - p0, n1);
+            Real d2 = Dot(q2 - p0, n1);
+            
+            Real thresh = static_cast<Real>(1e-6);
+            if ((d0 > thresh && d1 > thresh && d2 > thresh) ||
+                (d0 < -thresh && d1 < -thresh && d2 < -thresh))
+            {
+                return false;  // All on same side
+            }
+            
+            // Check if tri1 vertices are all on same side of tri2's plane
+            d0 = Dot(p0 - q0, n2);
+            d1 = Dot(p1 - q0, n2);
+            d2 = Dot(p2 - q0, n2);
+            
+            if ((d0 > thresh && d1 > thresh && d2 > thresh) ||
+                (d0 < -thresh && d1 < -thresh && d2 < -thresh))
+            {
+                return false;  // All on same side
+            }
+            
+            // If we get here, triangles potentially intersect
+            // For a complete test we'd need edge-edge checks, but this is
+            // good enough for filtering obvious non-intersecting cases
+            return true;
         }
     };
 }
