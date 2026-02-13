@@ -104,6 +104,13 @@ namespace gte
             bool enableUVMerging;
             Real uvMergingThreshold;
             
+            // Topology bridging parameters
+            bool enableIterativeBridging;  // Multi-pass bridging with hole filling
+            size_t maxIterations;          // Max number of bridging iterations
+            Real initialBridgeThreshold;   // Initial distance threshold multiplier
+            Real maxBridgeThreshold;       // Maximum distance threshold multiplier
+            bool targetSingleComponent;    // Stop when single component achieved
+            
             // General parameters
             bool removeNonManifoldEdges;  // Remove triangles causing non-manifold edges
             bool verbose;
@@ -117,6 +124,11 @@ namespace gte
                 , minNeighborsForPivot(10)
                 , enableUVMerging(false)  // Disabled by default (not yet implemented)
                 , uvMergingThreshold(static_cast<Real>(0.1))
+                , enableIterativeBridging(true)  // Enabled by default
+                , maxIterations(10)
+                , initialBridgeThreshold(static_cast<Real>(2.0))
+                , maxBridgeThreshold(static_cast<Real>(10.0))
+                , targetSingleComponent(true)
                 , removeNonManifoldEdges(true)
                 , verbose(false)
             {
@@ -1735,7 +1747,7 @@ namespace gte
             return true;
         }
         
-        // Topology-aware component bridging
+        // Optimized topology-aware component bridging with iterative multi-pass strategy
         static void TopologyAwareComponentBridging(
             std::vector<Vector3<Real>>& vertices,
             std::vector<std::array<int32_t, 3>>& triangles,
@@ -1743,33 +1755,154 @@ namespace gte
         {
             if (params.verbose)
             {
-                std::cout << "\n=== Topology-Aware Component Bridging ===\n";
+                std::cout << "\n=== Optimized Topology-Aware Component Bridging ===\n";
             }
             
-            // Extract boundary loops
-            std::vector<BoundaryLoop> loops;
-            ExtractBoundaryLoops(vertices, triangles, loops);
-            
-            if (params.verbose)
+            if (!params.enableIterativeBridging)
             {
-                std::cout << "Found " << loops.size() << " boundary loops\n";
-            }
-            
-            if (loops.empty())
-            {
-                if (params.verbose)
-                {
-                    std::cout << "No boundary loops found - mesh is already closed\n";
-                }
+                // Fallback to single-pass bridging
+                TopologyAwareComponentBridgingSinglePass(vertices, triangles, params);
                 return;
             }
             
-            // Step 1: Try to bridge nearby boundary edges
-            size_t bridgesCreated = 0;
+            // Multi-pass iterative strategy: bridge → hole fill → repeat
             Real avgEdgeLength = EstimateAverageEdgeLength(vertices, triangles);
-            Real bridgeThreshold = avgEdgeLength * static_cast<Real>(3);
+            Real currentThreshold = avgEdgeLength * params.initialBridgeThreshold;
+            Real maxThreshold = avgEdgeLength * params.maxBridgeThreshold;
             
-            // Find all boundary edges
+            bool isClosedManifold = false;
+            bool hasNonManifold = false;
+            size_t boundaryCount = 0;
+            size_t componentCount = 0;
+            size_t totalBridges = 0;
+            size_t totalHolesFilled = 0;
+            
+            for (size_t iteration = 0; iteration < params.maxIterations; ++iteration)
+            {
+                if (params.verbose)
+                {
+                    std::cout << "\n--- Iteration " << (iteration + 1) << " ---\n";
+                    std::cout << "Bridge threshold: " << currentThreshold << " (" 
+                              << (currentThreshold / avgEdgeLength) << "x avg edge length)\n";
+                }
+                
+                // Step 1: Bridge nearby boundary edges
+                size_t bridgesThisPass = BridgeBoundaryEdgesOptimized(
+                    vertices, triangles, currentThreshold, params.verbose);
+                totalBridges += bridgesThisPass;
+                
+                if (params.verbose)
+                {
+                    std::cout << "Created " << bridgesThisPass << " bridges this pass\n";
+                }
+                
+                // Step 2: Fill holes that bridging created or exposed
+                size_t holesFilledThisPass = 0;
+                if (params.enableHoleFilling)
+                {
+                    holesFilledThisPass = FillHolesConservative(
+                        vertices, triangles, params, params.verbose);
+                    totalHolesFilled += holesFilledThisPass;
+                    
+                    if (params.verbose && holesFilledThisPass > 0)
+                    {
+                        std::cout << "Filled " << holesFilledThisPass << " holes this pass\n";
+                    }
+                }
+                
+                // Step 3: Check progress
+                ValidateManifoldDetailed(triangles, isClosedManifold, hasNonManifold, 
+                                       boundaryCount, componentCount);
+                
+                if (params.verbose)
+                {
+                    std::cout << "Progress: " << triangles.size() << " triangles, "
+                              << componentCount << " components, "
+                              << boundaryCount << " boundary edges\n";
+                }
+                
+                // Check termination conditions
+                if (isClosedManifold)
+                {
+                    if (params.verbose)
+                    {
+                        std::cout << "Achieved closed manifold!\n";
+                    }
+                    break;
+                }
+                
+                if (params.targetSingleComponent && componentCount == 1)
+                {
+                    if (params.verbose)
+                    {
+                        std::cout << "Achieved single connected component!\n";
+                    }
+                    break;
+                }
+                
+                // No progress this iteration - increase threshold
+                if (bridgesThisPass == 0 && holesFilledThisPass == 0)
+                {
+                    currentThreshold *= static_cast<Real>(1.5);
+                    
+                    if (currentThreshold > maxThreshold)
+                    {
+                        if (params.verbose)
+                        {
+                            std::cout << "Reached maximum threshold - stopping\n";
+                        }
+                        break;
+                    }
+                }
+            }
+            
+            // Final pass: Cap any remaining small boundary loops
+            std::vector<BoundaryLoop> loops;
+            ExtractBoundaryLoops(vertices, triangles, loops);
+            
+            if (!loops.empty() && params.verbose)
+            {
+                std::cout << "\nCapping " << loops.size() << " remaining boundary loops...\n";
+            }
+            
+            size_t cappedLoops = 0;
+            for (auto const& loop : loops)
+            {
+                if (loop.vertices.size() <= 10)  // Only cap small loops
+                {
+                    if (CapBoundaryLoop(vertices, triangles, loop, true))
+                    {
+                        cappedLoops++;
+                    }
+                }
+            }
+            
+            // Final validation
+            ValidateManifoldDetailed(triangles, isClosedManifold, hasNonManifold, 
+                                   boundaryCount, componentCount);
+            
+            if (params.verbose)
+            {
+                std::cout << "\n=== Final Results ===\n";
+                std::cout << "Total bridges created: " << totalBridges << "\n";
+                std::cout << "Total holes filled: " << totalHolesFilled << "\n";
+                std::cout << "Loops capped: " << cappedLoops << "\n";
+                std::cout << "Triangles: " << triangles.size() << "\n";
+                std::cout << "Boundary edges: " << boundaryCount << "\n";
+                std::cout << "Connected components: " << componentCount << "\n";
+                std::cout << "Non-manifold edges: " << (hasNonManifold ? "YES" : "NO") << "\n";
+                std::cout << "Closed manifold: " << (isClosedManifold ? "YES" : "NO") << "\n";
+            }
+        }
+        
+        // Optimized boundary edge bridging with spatial indexing
+        static size_t BridgeBoundaryEdgesOptimized(
+            std::vector<Vector3<Real>> const& vertices,
+            std::vector<std::array<int32_t, 3>>& triangles,
+            Real threshold,
+            bool verbose = false)
+        {
+            // Extract boundary edges
             std::map<std::pair<int32_t, int32_t>, EdgeType> edgeTypes;
             std::vector<std::pair<int32_t, int32_t>> dummy;
             AnalyzeEdgeTopology(triangles, edgeTypes, dummy);
@@ -1783,104 +1916,255 @@ namespace gte
                 }
             }
             
-            if (params.verbose)
+            if (boundaryEdges.empty())
             {
-                std::cout << "Found " << boundaryEdges.size() << " boundary edges\n";
-                std::cout << "Attempting edge bridging (threshold: " << bridgeThreshold << ")...\n";
+                return 0;
             }
             
-            // Try to bridge pairs of boundary edges
-            for (size_t i = 0; i < boundaryEdges.size() && bridgesCreated < 100; ++i)
+            // Build spatial index: simple grid-based approach for O(n) average case
+            // Group boundary edges by spatial grid cell
+            Real cellSize = threshold;
+            std::map<std::array<int, 3>, std::vector<size_t>> grid;
+            
+            for (size_t i = 0; i < boundaryEdges.size(); ++i)
             {
-                for (size_t j = i + 1; j < boundaryEdges.size() && bridgesCreated < 100; ++j)
+                auto const& edge = boundaryEdges[i];
+                Vector3<Real> midpoint = (vertices[edge.first] + vertices[edge.second]) * static_cast<Real>(0.5);
+                
+                std::array<int, 3> cell = {
+                    static_cast<int>(std::floor(midpoint[0] / cellSize)),
+                    static_cast<int>(std::floor(midpoint[1] / cellSize)),
+                    static_cast<int>(std::floor(midpoint[2] / cellSize))
+                };
+                
+                grid[cell].push_back(i);
+            }
+            
+            // Find candidate edge pairs using spatial grid
+            std::vector<std::pair<size_t, size_t>> candidatePairs;
+            
+            for (auto const& cell : grid)
+            {
+                auto const& edgesInCell = cell.second;
+                
+                // Check pairs within this cell
+                for (size_t i = 0; i < edgesInCell.size(); ++i)
                 {
-                    auto const& e1 = boundaryEdges[i];
-                    auto const& e2 = boundaryEdges[j];
-                    
-                    // Check if edges are close enough
-                    Real minDist = std::numeric_limits<Real>::max();
-                    minDist = std::min(minDist, Length(vertices[e1.first] - vertices[e2.first]));
-                    minDist = std::min(minDist, Length(vertices[e1.first] - vertices[e2.second]));
-                    minDist = std::min(minDist, Length(vertices[e1.second] - vertices[e2.first]));
-                    minDist = std::min(minDist, Length(vertices[e1.second] - vertices[e2.second]));
-                    
-                    if (minDist < bridgeThreshold)
+                    for (size_t j = i + 1; j < edgesInCell.size(); ++j)
                     {
-                        if (BridgeBoundaryEdges(vertices, triangles, e1, e2, true))
+                        candidatePairs.push_back({edgesInCell[i], edgesInCell[j]});
+                    }
+                }
+                
+                // Check neighboring cells (27-connectivity)
+                for (int dx = -1; dx <= 1; ++dx)
+                {
+                    for (int dy = -1; dy <= 1; ++dy)
+                    {
+                        for (int dz = -1; dz <= 1; ++dz)
                         {
-                            bridgesCreated++;
+                            if (dx == 0 && dy == 0 && dz == 0) continue;
                             
-                            if (params.verbose && bridgesCreated <= 10)
-                            {
-                                std::cout << "  Bridge " << bridgesCreated << ": connected edges at distance " << minDist << "\n";
-                            }
+                            std::array<int, 3> neighborCell = {
+                                cell.first[0] + dx,
+                                cell.first[1] + dy,
+                                cell.first[2] + dz
+                            };
                             
-                            // Re-analyze edges after successful bridge
-                            edgeTypes.clear();
-                            AnalyzeEdgeTopology(triangles, edgeTypes, dummy);
-                            boundaryEdges.clear();
-                            for (auto const& et : edgeTypes)
+                            auto it = grid.find(neighborCell);
+                            if (it != grid.end())
                             {
-                                if (et.second == EdgeType::Boundary)
+                                for (size_t i : edgesInCell)
                                 {
-                                    boundaryEdges.push_back(et.first);
+                                    for (size_t j : it->second)
+                                    {
+                                        if (i < j)
+                                        {
+                                            candidatePairs.push_back({i, j});
+                                        }
+                                    }
                                 }
                             }
-                            
-                            // Restart search
-                            i = 0;
-                            j = 0;
-                            break;
                         }
                     }
                 }
             }
             
-            if (params.verbose)
-            {
-                std::cout << "Edge bridging created " << bridgesCreated << " bridges\n";
-            }
-            
-            // Step 2: Cap remaining boundary loops
-            ExtractBoundaryLoops(vertices, triangles, loops);
-            
-            if (params.verbose && !loops.empty())
-            {
-                std::cout << "Capping " << loops.size() << " remaining boundary loops...\n";
-            }
-            
-            size_t cappedLoops = 0;
-            for (auto const& loop : loops)
-            {
-                if (CapBoundaryLoop(vertices, triangles, loop, true))
-                {
-                    cappedLoops++;
+            // Sort pairs by distance (closest first)
+            std::sort(candidatePairs.begin(), candidatePairs.end(),
+                [&](auto const& p1, auto const& p2) {
+                    auto const& e1a = boundaryEdges[p1.first];
+                    auto const& e1b = boundaryEdges[p1.second];
+                    auto const& e2a = boundaryEdges[p2.first];
+                    auto const& e2b = boundaryEdges[p2.second];
                     
-                    if (params.verbose && cappedLoops <= 10)
+                    Real minDist1 = std::numeric_limits<Real>::max();
+                    minDist1 = std::min(minDist1, Length(vertices[e1a.first] - vertices[e1b.first]));
+                    minDist1 = std::min(minDist1, Length(vertices[e1a.first] - vertices[e1b.second]));
+                    minDist1 = std::min(minDist1, Length(vertices[e1a.second] - vertices[e1b.first]));
+                    minDist1 = std::min(minDist1, Length(vertices[e1a.second] - vertices[e1b.second]));
+                    
+                    Real minDist2 = std::numeric_limits<Real>::max();
+                    minDist2 = std::min(minDist2, Length(vertices[e2a.first] - vertices[e2b.first]));
+                    minDist2 = std::min(minDist2, Length(vertices[e2a.first] - vertices[e2b.second]));
+                    minDist2 = std::min(minDist2, Length(vertices[e2a.second] - vertices[e2b.first]));
+                    minDist2 = std::min(minDist2, Length(vertices[e2a.second] - vertices[e2b.second]));
+                    
+                    return minDist1 < minDist2;
+                });
+            
+            // Try to bridge pairs (closest first)
+            size_t bridgesCreated = 0;
+            std::set<size_t> bridgedEdges;  // Track which edges have been bridged
+            
+            for (auto const& pair : candidatePairs)
+            {
+                // Skip if either edge already bridged
+                if (bridgedEdges.count(pair.first) || bridgedEdges.count(pair.second))
+                {
+                    continue;
+                }
+                
+                auto const& e1 = boundaryEdges[pair.first];
+                auto const& e2 = boundaryEdges[pair.second];
+                
+                // Check if edges are close enough
+                Real minDist = std::numeric_limits<Real>::max();
+                minDist = std::min(minDist, Length(vertices[e1.first] - vertices[e2.first]));
+                minDist = std::min(minDist, Length(vertices[e1.first] - vertices[e2.second]));
+                minDist = std::min(minDist, Length(vertices[e1.second] - vertices[e2.first]));
+                minDist = std::min(minDist, Length(vertices[e1.second] - vertices[e2.second]));
+                
+                if (minDist < threshold)
+                {
+                    if (BridgeBoundaryEdges(vertices, triangles, e1, e2, true))
                     {
-                        std::cout << "  Capped loop with " << loop.vertices.size() << " vertices\n";
+                        bridgesCreated++;
+                        bridgedEdges.insert(pair.first);
+                        bridgedEdges.insert(pair.second);
+                        
+                        if (verbose && bridgesCreated <= 10)
+                        {
+                            std::cout << "  Bridge " << bridgesCreated 
+                                      << ": connected edges at distance " << minDist << "\n";
+                        }
                     }
                 }
             }
             
-            if (params.verbose)
+            return bridgesCreated;
+        }
+        
+        // Conservative hole filling that validates each fill
+        static size_t FillHolesConservative(
+            std::vector<Vector3<Real>>& vertices,
+            std::vector<std::array<int32_t, 3>>& triangles,
+            Parameters const& params,
+            bool verbose = false)
+        {
+            std::vector<BoundaryLoop> loops;
+            ExtractBoundaryLoops(vertices, triangles, loops);
+            
+            size_t holesFilledCount = 0;
+            
+            for (auto const& loop : loops)
             {
-                std::cout << "Successfully capped " << cappedLoops << " loops\n";
+                // Only fill reasonably sized loops
+                if (loop.vertices.size() < 3 || loop.vertices.size() > params.maxHoleEdges)
+                {
+                    continue;
+                }
+                
+                // Check area if limit is set
+                if (params.maxHoleArea > static_cast<Real>(0))
+                {
+                    // Estimate area from perimeter (rough approximation)
+                    Real estimatedArea = loop.perimeter * loop.perimeter / static_cast<Real>(4 * 3.14159265);
+                    if (estimatedArea > params.maxHoleArea)
+                    {
+                        continue;
+                    }
+                }
+                
+                // Try to fill the hole
+                size_t oldTriCount = triangles.size();
+                
+                // Use MeshHoleFilling if available, otherwise try simple fan
+                bool filled = FillSingleHole(vertices, triangles, loop, params.holeFillingMethod);
+                
+                if (filled)
+                {
+                    // Validate manifold property
+                    if (ValidateManifold(triangles))
+                    {
+                        holesFilledCount++;
+                        
+                        if (verbose && holesFilledCount <= 10)
+                        {
+                            std::cout << "  Filled hole with " << loop.vertices.size() 
+                                      << " vertices (" << (triangles.size() - oldTriCount) 
+                                      << " triangles)\n";
+                        }
+                    }
+                    else
+                    {
+                        // Revert if non-manifold
+                        triangles.resize(oldTriCount);
+                    }
+                }
             }
             
-            // Final validation
-            bool isClosedManifold, hasNonManifold;
-            size_t boundaryCount, componentCount;
-            ValidateManifoldDetailed(triangles, isClosedManifold, hasNonManifold, boundaryCount, componentCount);
+            return holesFilledCount;
+        }
+        
+        // Simple hole filling for a single loop
+        static bool FillSingleHole(
+            std::vector<Vector3<Real>>& vertices,
+            std::vector<std::array<int32_t, 3>>& triangles,
+            BoundaryLoop const& loop,
+            typename MeshHoleFilling<Real>::TriangulationMethod method)
+        {
+            if (loop.vertices.size() < 3)
+            {
+                return false;
+            }
+            
+            // For small holes, use simple fan triangulation
+            if (loop.vertices.size() <= 5)
+            {
+                // Add centroid
+                int32_t centroidIdx = static_cast<int32_t>(vertices.size());
+                vertices.push_back(loop.centroid);
+                
+                // Create fan
+                for (size_t i = 0; i < loop.vertices.size(); ++i)
+                {
+                    size_t j = (i + 1) % loop.vertices.size();
+                    triangles.push_back({loop.vertices[i], loop.vertices[j], centroidIdx});
+                }
+                
+                return true;
+            }
+            
+            // For larger holes, would use MeshHoleFilling here
+            // For now, skip large holes
+            return false;
+        }
+        
+        // Single-pass bridging (legacy fallback)
+        static void TopologyAwareComponentBridgingSinglePass(
+            std::vector<Vector3<Real>>& vertices,
+            std::vector<std::array<int32_t, 3>>& triangles,
+            Parameters const& params)
+        {
+            Real avgEdgeLength = EstimateAverageEdgeLength(vertices, triangles);
+            Real threshold = avgEdgeLength * static_cast<Real>(3);
+            
+            size_t bridges = BridgeBoundaryEdgesOptimized(vertices, triangles, threshold, params.verbose);
             
             if (params.verbose)
             {
-                std::cout << "\nAfter topology-aware bridging:\n";
-                std::cout << "  Triangles: " << triangles.size() << "\n";
-                std::cout << "  Boundary edges: " << boundaryCount << "\n";
-                std::cout << "  Connected components: " << componentCount << "\n";
-                std::cout << "  Non-manifold edges: " << (hasNonManifold ? "YES" : "NO") << "\n";
-                std::cout << "  Closed manifold: " << (isClosedManifold ? "YES" : "NO") << "\n";
+                std::cout << "Single-pass bridging created " << bridges << " bridges\n";
             }
         }
     };
