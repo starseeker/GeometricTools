@@ -88,22 +88,8 @@ namespace gte
                         std::cout << "      FAILED: Could not fill hole " << (i + 1) << "\n";
                     }
                     
-                    // Try removing edge triangles and retrying
-                    if (params.removeEdgeTrianglesOnFailure && iteration == 1)  // Only on first iteration
-                    {
-                        auto edgeTriangles = IdentifyEdgeTriangles(vertices, triangles, hole, params.edgeTriangleThreshold);
-                        
-                        if (!edgeTriangles.empty())
-                        {
-                            if (params.verbose)
-                            {
-                                std::cout << "      Removing " << edgeTriangles.size() << " edge triangle(s) and will retry in next iteration\n";
-                            }
-                            
-                            RemoveTriangles(triangles, edgeTriangles);
-                            holeFilledThisIteration = true;  // Mark as progress (will retry)
-                        }
-                    }
+                    // Don't remove edge triangles - validation prevents non-manifold now
+                    // This was causing more harm than good
                 }
             }
             
@@ -415,23 +401,89 @@ namespace gte
         Real radius,
         Parameters const& params)
     {
+        // Skip degenerate holes (< 3 vertices)
+        if (hole.vertexIndices.size() < 3)
+        {
+            return false;  // Cannot fill
+        }
+        
+        // Build current edge topology to check for non-manifold creation
+        std::map<std::pair<int32_t, int32_t>, int32_t> edgeCount;
+        for (auto const& tri : triangles)
+        {
+            for (int i = 0; i < 3; ++i)
+            {
+                int32_t v0 = tri[i];
+                int32_t v1 = tri[(i + 1) % 3];
+                auto edge = std::make_pair(std::min(v0, v1), std::max(v0, v1));
+                edgeCount[edge]++;
+            }
+        }
+        
+        // Helper function to check if adding a triangle would create non-manifold edges
+        auto wouldCreateNonManifold = [&edgeCount](int32_t v0, int32_t v1, int32_t v2) -> bool
+        {
+            // Check all three edges
+            for (int i = 0; i < 3; ++i)
+            {
+                int32_t a = (i == 0) ? v0 : (i == 1) ? v1 : v2;
+                int32_t b = (i == 0) ? v1 : (i == 1) ? v2 : v0;
+                auto edge = std::make_pair(std::min(a, b), std::max(a, b));
+                
+                // If edge already has 2 triangles, adding another would make it non-manifold
+                if (edgeCount[edge] >= 2)
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+        
+        // Helper function to update edge counts after adding a triangle
+        auto updateEdgeCounts = [&edgeCount](int32_t v0, int32_t v1, int32_t v2)
+        {
+            for (int i = 0; i < 3; ++i)
+            {
+                int32_t a = (i == 0) ? v0 : (i == 1) ? v1 : v2;
+                int32_t b = (i == 0) ? v1 : (i == 1) ? v2 : v0;
+                auto edge = std::make_pair(std::min(a, b), std::max(a, b));
+                edgeCount[edge]++;
+            }
+        };
+        
         // For simple holes with 3-4 vertices, use direct triangulation
         if (hole.vertexIndices.size() == 3)
         {
-            // Simple triangle
-            triangles.push_back({hole.vertexIndices[0], hole.vertexIndices[1], hole.vertexIndices[2]});
-            return true;
+            int32_t v0 = hole.vertexIndices[0];
+            int32_t v1 = hole.vertexIndices[1];
+            int32_t v2 = hole.vertexIndices[2];
+            
+            if (!wouldCreateNonManifold(v0, v1, v2))
+            {
+                triangles.push_back({v0, v1, v2});
+                return true;
+            }
+            return false;  // Would create non-manifold
         }
         else if (hole.vertexIndices.size() == 4)
         {
-            // Simple quad - split into 2 triangles
-            triangles.push_back({hole.vertexIndices[0], hole.vertexIndices[1], hole.vertexIndices[2]});
-            triangles.push_back({hole.vertexIndices[0], hole.vertexIndices[2], hole.vertexIndices[3]});
-            return true;
+            int32_t v0 = hole.vertexIndices[0];
+            int32_t v1 = hole.vertexIndices[1];
+            int32_t v2 = hole.vertexIndices[2];
+            int32_t v3 = hole.vertexIndices[3];
+            
+            // Check both triangles
+            if (!wouldCreateNonManifold(v0, v1, v2) && !wouldCreateNonManifold(v0, v2, v3))
+            {
+                triangles.push_back({v0, v1, v2});
+                updateEdgeCounts(v0, v1, v2);
+                triangles.push_back({v0, v2, v3});
+                return true;
+            }
+            return false;  // Would create non-manifold
         }
         
-        // For more complex holes, use ear clipping algorithm
-        // Create a working copy of vertex indices
+        // For more complex holes, use ear clipping algorithm with validation
         std::vector<int32_t> remainingVerts = hole.vertexIndices;
         size_t initialTriangleCount = triangles.size();
         
@@ -449,7 +501,7 @@ namespace gte
                 int32_t v1 = remainingVerts[i];
                 int32_t v2 = remainingVerts[next];
                 
-                // Check if this forms a valid ear (convex and doesn't contain other vertices)
+                // Check if this forms a valid ear
                 Vector3<Real> const& p0 = vertices[v0];
                 Vector3<Real> const& p1 = vertices[v1];
                 Vector3<Real> const& p2 = vertices[v2];
@@ -460,10 +512,11 @@ namespace gte
                 Vector3<Real> triNormal = Cross(edge1, edge2);
                 Real area = Length(triNormal);
                 
-                if (area > static_cast<Real>(1e-10))
+                // Check if valid and wouldn't create non-manifold
+                if (area > static_cast<Real>(1e-10) && !wouldCreateNonManifold(v0, v1, v2))
                 {
-                    // This is a valid triangle - add it
                     triangles.push_back({v0, v1, v2});
+                    updateEdgeCounts(v0, v1, v2);
                     
                     // Remove the ear vertex
                     remainingVerts.erase(remainingVerts.begin() + i);
@@ -474,19 +527,35 @@ namespace gte
             
             if (!foundEar)
             {
-                // Cannot find a valid ear - try adding what we can
+                // Cannot find a valid ear - stop
                 if (remainingVerts.size() == 3)
                 {
                     break;
                 }
+                
+                // Revert triangles added in this iteration
+                triangles.resize(initialTriangleCount);
                 return false;
             }
         }
         
-        // Add final triangle
+        // Add final triangle if valid
         if (remainingVerts.size() == 3)
         {
-            triangles.push_back({remainingVerts[0], remainingVerts[1], remainingVerts[2]});
+            int32_t v0 = remainingVerts[0];
+            int32_t v1 = remainingVerts[1];
+            int32_t v2 = remainingVerts[2];
+            
+            if (!wouldCreateNonManifold(v0, v1, v2))
+            {
+                triangles.push_back({v0, v1, v2});
+            }
+            else
+            {
+                // Revert all triangles added in this hole fill
+                triangles.resize(initialTriangleCount);
+                return false;
+            }
         }
         
         return triangles.size() > initialTriangleCount;

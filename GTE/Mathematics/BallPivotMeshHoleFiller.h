@@ -62,8 +62,9 @@ namespace gte
             std::vector<Real> radiusScales;     // Scaling factors (e.g., {1.0, 1.5, 2.0, 3.0, 5.0})
             Real nsumMinDot;                    // Normal agreement threshold cos(angle) (default: 0.5 = 60°)
             int32_t maxIterations;              // Max iterations before giving up (default: 10)
-            bool removeEdgeTrianglesOnFailure;  // Remove edge triangles and retry (default: true)
+            bool removeEdgeTrianglesOnFailure;  // Remove edge triangles and retry (default: false, deprecated)
             Real edgeTriangleThreshold;         // Edge ratio threshold for "edge triangle" (default: 0.5)
+            bool allowNonManifoldEdges;         // Allow creating non-manifold edges if needed (default: false)
             bool verbose;                       // Enable diagnostic output (default: false)
             
             Parameters()
@@ -73,8 +74,9 @@ namespace gte
                                static_cast<Real>(5.0)})
                 , nsumMinDot(static_cast<Real>(0.5))
                 , maxIterations(10)
-                , removeEdgeTrianglesOnFailure(true)
+                , removeEdgeTrianglesOnFailure(false)  // Disabled - validation prevents non-manifold now
                 , edgeTriangleThreshold(static_cast<Real>(0.5))
+                , allowNonManifoldEdges(false)  // Conservative by default
                 , verbose(false)
             {
             }
