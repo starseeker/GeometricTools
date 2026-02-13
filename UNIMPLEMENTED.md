@@ -2,19 +2,6 @@
 
 ---
 
-### ✅ COMPLETE: RVD Integration
-
-**Previous Claim:**
-> "Full RVD Integration: RVD available but not fully integrated"
-
-**Actual Reality:**
-- RestrictedVoronoiDiagram.h - Full implementation
-- RestrictedVoronoiDiagramOptimized.h - Optimized with AABB tree
-- RestrictedVoronoiDiagramN.h - N-dimensional version
-- All integrated and working
-
-**Status:** ✅ COMPLETE
-
 ### ⚠️ MINOR: Additional Optimization Methods
 
 **Status:** Already have Lloyd and Newton/BFGS
@@ -82,42 +69,6 @@
 4. **Code Cleanup**
    - Fix outdated comments
    - Update example code in comment blocks
-
-### ✅ COMPLETE: r768.xyz Co3Ne Verification - PROPERLY FIXED
-
-**Previous Status:** HIGH PRIORITY - bypass mode workaround implemented
-
-**Critical Bugs Found and Fixed:**
-
-1. **Triangle Generation Bug:** GenerateTriangles() was deduplicating triangles prematurely, outputting each unique triangle only once instead of keeping all occurrences. This broke the frequency-based manifold extraction.
-
-2. **Triangle Categorization Bug:** ExtractManifold() was iterating over all candidates with duplicates and using a broken deduplication check.
-
-**What Was Implemented:**
-- ✅ Fixed triangle generation to keep duplicate triangles (matching Geogram)
-- ✅ Fixed triangle categorization to iterate over unique triangles properly
-- ✅ Comprehensive testing with r768.xyz dataset
-- ✅ Documented in CO3NE_FIX_ANALYSIS.md
-
-**Results After Fix:**
-- Standard mode: Works! (143 good triangles → 50 manifold triangles from 1000 points)
-- Relaxed mode: Works! (1680 good triangles → 428 triangles from 1000 points)
-- Bypass mode: Still available but no longer needed for basic functionality
-
-**Test Results (r768.xyz, 1000 points):**
-```
-Before fix: ALL triangles appeared 1x → 0 good triangles → FAILED
-After fix:  Count 1: 143,811 | Count 2: 1,537 | Count 3: 143
-            Standard: 50 manifold triangles ✅
-            Relaxed: 428 triangles (6 non-manifold edges) ✅
-```
-
-**Recommended Mode for BRL-CAD:**
-```cpp
-params.relaxedManifoldExtraction = true;  // Accept 2-3 occurrences
-```
-
-**Status:** ✅ COMPLETE - Co3Ne properly implements Geogram's algorithm
 
 **Priority:** N/A (completed with proper fix, not workaround)
 
