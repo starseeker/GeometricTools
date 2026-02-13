@@ -14,7 +14,7 @@ TARGETS = test_mesh_repair test_remesh test_co3ne test_co3ne_xyz test_full_algor
           test_rvd_performance stress_test test_threadpool test_parallel_rvd \
           test_enhanced_manifold test_anisotropic_remesh test_delaunay6 test_cvt6d \
           test_delaunay_n test_delaunay_nn test_rvd_n test_cvt_n test_phase4_integration \
-          test_anisotropic_end_to_end
+          test_anisotropic_end_to_end test_co3ne_stitcher
 
 all: $(TARGETS)
 
@@ -129,3 +129,27 @@ test_phase4_integration: $(TEST_DIR)/test_phase4_integration.cpp GTE/Mathematics
 # Comprehensive anisotropic remeshing end-to-end test
 test_anisotropic_end_to_end: $(TEST_DIR)/test_anisotropic_end_to_end.cpp GTE/Mathematics/MeshRemesh.h GTE/Mathematics/CVTN.h GTE/Mathematics/MeshAnisotropy.h
 	$(CXX) $(CXXFLAGS) -o test_anisotropic_end_to_end $(TEST_DIR)/test_anisotropic_end_to_end.cpp $(LDFLAGS)
+
+# Co3Ne Manifold Stitcher test
+test_co3ne_stitcher: $(TEST_DIR)/test_co3ne_stitcher.cpp GTE/Mathematics/Co3NeManifoldStitcher.h GTE/Mathematics/Co3Ne.h GTE/Mathematics/MeshHoleFilling.h GTE/Mathematics/BallPivotReconstruction.h GTE/Mathematics/BallPivotReconstruction.cpp
+	$(CXX) $(CXXFLAGS) -o test_co3ne_stitcher $(TEST_DIR)/test_co3ne_stitcher.cpp GTE/Mathematics/BallPivotReconstruction.cpp $(LDFLAGS)
+
+# Topology-aware bridging test
+test_topology: $(TEST_DIR)/test_topology_bridging.cpp GTE/Mathematics/Co3NeManifoldStitcher.h GTE/Mathematics/Co3Ne.h GTE/Mathematics/BallPivotReconstruction.h GTE/Mathematics/BallPivotReconstruction.cpp
+	$(CXX) $(CXXFLAGS) -o test_topology $(TEST_DIR)/test_topology_bridging.cpp GTE/Mathematics/BallPivotReconstruction.cpp $(LDFLAGS)
+
+# Large input performance test
+test_large: $(TEST_DIR)/test_large_input.cpp GTE/Mathematics/Co3NeManifoldStitcher.h GTE/Mathematics/Co3Ne.h
+	$(CXX) $(CXXFLAGS) -o test_large $(TEST_DIR)/test_large_input.cpp GTE/Mathematics/BallPivotReconstruction.cpp $(LDFLAGS)
+
+# Hybrid Co3Ne + Poisson reconstruction test (requires PoissonRecon submodule)
+POISSON_INC = -I./PoissonRecon/Src
+POISSON_FLAGS = -fopenmp -Wno-deprecated -pthread
+test_hybrid: $(TEST_DIR)/test_hybrid_reconstruction.cpp GTE/Mathematics/HybridReconstruction.h GTE/Mathematics/PoissonWrapper.h GTE/Mathematics/Co3Ne.h
+	$(CXX) $(CXXFLAGS) $(POISSON_INC) $(POISSON_FLAGS) -o test_hybrid $(TEST_DIR)/test_hybrid_reconstruction.cpp GTE/Mathematics/BallPivotReconstruction.cpp $(LDFLAGS) -lgomp
+
+# Hybrid validation test - comprehensive validation of all merge strategies
+test_hybrid_validation: $(TEST_DIR)/test_hybrid_validation.cpp GTE/Mathematics/HybridReconstruction.h GTE/Mathematics/PoissonWrapper.h GTE/Mathematics/Co3Ne.h
+	$(CXX) $(CXXFLAGS) $(POISSON_INC) $(POISSON_FLAGS) -o test_hybrid_validation $(TEST_DIR)/test_hybrid_validation.cpp GTE/Mathematics/BallPivotReconstruction.cpp $(LDFLAGS) -lgomp
+
+
