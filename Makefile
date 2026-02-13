@@ -152,4 +152,8 @@ test_hybrid: $(TEST_DIR)/test_hybrid_reconstruction.cpp GTE/Mathematics/HybridRe
 test_hybrid_validation: $(TEST_DIR)/test_hybrid_validation.cpp GTE/Mathematics/HybridReconstruction.h GTE/Mathematics/PoissonWrapper.h GTE/Mathematics/Co3Ne.h
 	$(CXX) $(CXXFLAGS) $(POISSON_INC) $(POISSON_FLAGS) -o test_hybrid_validation $(TEST_DIR)/test_hybrid_validation.cpp GTE/Mathematics/BallPivotReconstruction.cpp $(LDFLAGS) -lgomp
 
+# Comprehensive Co3Ne+Poisson test - validates manifold properties, volume, and performance
+test_co3ne_poisson_comprehensive: $(TEST_DIR)/test_co3ne_poisson_comprehensive.cpp GTE/Mathematics/HybridReconstruction.h GTE/Mathematics/PoissonWrapper.h GTE/Mathematics/Co3Ne.h GTE/Mathematics/ConvexHull3.h GTE/Mathematics/ETManifoldMesh.h
+	$(CXX) $(CXXFLAGS) $(POISSON_INC) $(POISSON_FLAGS) -o test_co3ne_poisson_comprehensive $(TEST_DIR)/test_co3ne_poisson_comprehensive.cpp GTE/Mathematics/BallPivotReconstruction.cpp $(LDFLAGS) -lgomp
+
 

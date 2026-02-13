@@ -1,0 +1,9 @@
+Co3Ne+Poisson Comprehensive Test
+Input: r768.xyz
+Loaded 86156 points from r768.xyz
+
+Computing convex hull volume...
+Convex hull volume: 2.158e+07
+
+=== Testing: Poisson Only ===
+HybridReconstruction: Using Poisson only
