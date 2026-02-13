@@ -44,10 +44,10 @@ namespace gte
             // Hybrid merging strategy
             enum class MergeStrategy
             {
-                PoissonOnly,        // Use only Poisson (single component, smooth)
-                Co3NeOnly,          // Use only Co3Ne (multiple components, detailed)
-                QualityBased,       // Select triangles based on quality metrics
-                Co3NeWithPoissonGaps // Use Co3Ne, fill gaps with Poisson
+                PoissonOnly,        // Use only Poisson (single component, smooth, manifold)
+                Co3NeOnly,          // Use only Co3Ne (multiple components, detailed, may have gaps)
+                QualityBased,       // Select best mesh based on quality metrics
+                Co3NeWithPoissonGaps // Use Co3Ne if manifold, else Poisson (WIP: true gap filling not yet implemented)
             };
             
             MergeStrategy mergeStrategy;
@@ -282,13 +282,15 @@ namespace gte
                 return true;
             }
             
-            // Run Poisson to get connectivity
-            std::vector<Vector3<Real>> poissonVertices;
-            std::vector<std::array<int32_t, 3>> poissonTriangles;
+            // If gaps exist, use Poisson (guaranteed manifold) as base
+            // NOTE: True gap filling would require identifying which Poisson triangles
+            // fill the gaps and merging carefully. For now, we use a simpler approach:
+            // Use Poisson for manifold guarantee, but prefer Co3Ne when no gaps.
             
             if (params.verbose)
             {
-                std::cout << "  Running Poisson for gap filling..." << std::endl;
+                std::cout << "  Gaps detected - using Poisson for manifold guarantee" << std::endl;
+                std::cout << "  Running Poisson..." << std::endl;
             }
             
             std::vector<Vector3<Real>> normals;
@@ -298,7 +300,7 @@ namespace gte
                 return false;
             }
             
-            if (!PoissonWrapper<Real>::Reconstruct(points, normals, poissonVertices, poissonTriangles, params.poissonParams))
+            if (!PoissonWrapper<Real>::Reconstruct(points, normals, outVertices, outTriangles, params.poissonParams))
             {
                 std::cerr << "Poisson reconstruction failed" << std::endl;
                 return false;
@@ -306,24 +308,15 @@ namespace gte
             
             if (params.verbose)
             {
-                std::cout << "  Poisson: " << poissonTriangles.size() << " triangles" << std::endl;
-                std::cout << "  Merging meshes..." << std::endl;
+                std::cout << "  Poisson: " << outTriangles.size() << " triangles (manifold guaranteed)" << std::endl;
             }
             
-            // Merge: Keep Co3Ne triangles, add Poisson triangles that fill gaps
-            if (!MergeMeshes(co3neVertices, co3neTriangles, poissonVertices, poissonTriangles,
-                            outVertices, outTriangles, params))
-            {
-                std::cerr << "Mesh merging failed" << std::endl;
-                // Fall back to Poisson only (guaranteed single component)
-                outVertices = poissonVertices;
-                outTriangles = poissonTriangles;
-            }
-            
-            if (params.verbose)
-            {
-                std::cout << "  Final: " << outTriangles.size() << " triangles" << std::endl;
-            }
+            // TODO: Implement true gap filling by:
+            // 1. Identifying which Poisson triangles are in gap regions
+            // 2. Keeping Co3Ne triangles for non-gap regions
+            // 3. Using Poisson triangles only for gaps
+            // 4. Ensuring proper connectivity at boundaries
+            // This is complex and requires spatial queries and careful merging.
             
             return true;
         }
