@@ -40,6 +40,11 @@ tests/data/cvt_rvd_sites.obj
 tests/data/remesh_*.obj
 tests/data/co3ne_*.obj
 
+# Hybrid test outputs
+hybrid_*.obj
+comprehensive_*.obj
+full_test_output.txt
+
 # Backup files
 *.obj.bak
 
