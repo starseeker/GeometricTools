@@ -25,6 +25,7 @@
 #include <GTE/Mathematics/MeshHoleFilling.h>
 #include <GTE/Mathematics/MeshRepair.h>
 #include <GTE/Mathematics/MeshValidation.h>
+#include <GTE/Mathematics/BallPivotReconstruction.h>
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -251,12 +252,19 @@ namespace gte
             }
             
             // Step 5: Ball pivot stitching (if enabled)
-            if (params.enableBallPivot)
+            if (params.enableBallPivot && patches.size() > 1)
             {
-                // TODO: Implement ball pivot stitching
-                if (params.verbose)
+                size_t trianglesBefore = triangles.size();
+                
+                // Process patch pairs for welding
+                BallPivotWeldPatches(vertices, triangles, patches, patchPairs, params);
+                
+                size_t trianglesAfter = triangles.size();
+                
+                if (params.verbose && trianglesAfter > trianglesBefore)
                 {
-                    std::cout << "Ball pivot stitching not yet implemented\n";
+                    std::cout << "Ball pivot welding added " << (trianglesAfter - trianglesBefore) 
+                              << " triangles\n";
                 }
             }
             
@@ -633,6 +641,436 @@ namespace gte
                 [](PatchPair const& a, PatchPair const& b) {
                     return a.minDistance < b.minDistance;
                 });
+        }
+        
+        // Ball pivot welding of patches
+        static void BallPivotWeldPatches(
+            std::vector<Vector3<Real>>& vertices,
+            std::vector<std::array<int32_t, 3>>& triangles,
+            std::vector<Patch> const& patches,
+            std::vector<PatchPair> const& patchPairs,
+            Parameters const& params)
+        {
+            if (patchPairs.empty() || patches.empty())
+            {
+                return;
+            }
+            
+            // Process patch pairs in order of proximity
+            // We'll weld the closest pairs first
+            size_t pairsToProcess = std::min(static_cast<size_t>(10), patchPairs.size());
+            
+            for (size_t pairIdx = 0; pairIdx < pairsToProcess; ++pairIdx)
+            {
+                auto const& pair = patchPairs[pairIdx];
+                
+                if (params.verbose)
+                {
+                    std::cout << "  Attempting to weld patches " << pair.patch1Index 
+                              << " and " << pair.patch2Index 
+                              << " (min dist = " << pair.minDistance << ")\n";
+                }
+                
+                // Step 1: Identify outer boundary triangles in both patches
+                std::set<size_t> outerTriangles1, outerTriangles2;
+                IdentifyOuterBoundaryTriangles(vertices, triangles, 
+                    patches[pair.patch1Index], outerTriangles1);
+                IdentifyOuterBoundaryTriangles(vertices, triangles, 
+                    patches[pair.patch2Index], outerTriangles2);
+                
+                if (params.verbose && (!outerTriangles1.empty() || !outerTriangles2.empty()))
+                {
+                    std::cout << "    Found " << outerTriangles1.size() << " outer triangles in patch " 
+                              << pair.patch1Index << ", " 
+                              << outerTriangles2.size() << " in patch " << pair.patch2Index << "\n";
+                }
+                
+                // Step 2: Remove outer triangles to create clean boundaries
+                std::set<size_t> allOuterTriangles = outerTriangles1;
+                allOuterTriangles.insert(outerTriangles2.begin(), outerTriangles2.end());
+                
+                size_t removedCount = 0;
+                if (!allOuterTriangles.empty())
+                {
+                    removedCount = RemoveTrianglesByIndex(triangles, allOuterTriangles);
+                    
+                    if (params.verbose && removedCount > 0)
+                    {
+                        std::cout << "    Removed " << removedCount << " outer triangles\n";
+                    }
+                }
+                
+                // Step 3: Extract boundary points and normals from both patches
+                std::vector<Vector3<Real>> boundaryPoints;
+                std::vector<Vector3<Real>> boundaryNormals;
+                ExtractPatchBoundaryPoints(vertices, triangles, 
+                    patches[pair.patch1Index], patches[pair.patch2Index],
+                    boundaryPoints, boundaryNormals);
+                
+                if (boundaryPoints.empty())
+                {
+                    if (params.verbose)
+                    {
+                        std::cout << "    No boundary points found for welding\n";
+                    }
+                    continue;
+                }
+                
+                // Step 4: Compute appropriate ball radius based on gap size
+                Real ballRadius = EstimateBallRadiusForGap(boundaryPoints, pair.minDistance);
+                
+                if (params.verbose)
+                {
+                    std::cout << "    Using ball radius: " << ballRadius 
+                              << " for " << boundaryPoints.size() << " boundary points\n";
+                }
+                
+                // Step 5: Run Ball Pivot on boundary region
+                typename BallPivotReconstruction<Real>::Parameters bpParams;
+                bpParams.radii = {ballRadius};
+                bpParams.verbose = false;  // Keep it quiet to avoid clutter
+                
+                std::vector<Vector3<Real>> weldVertices;
+                std::vector<std::array<int32_t, 3>> weldTriangles;
+                
+                bool success = BallPivotReconstruction<Real>::Reconstruct(
+                    boundaryPoints, boundaryNormals, weldVertices, weldTriangles, bpParams);
+                
+                if (!success || weldTriangles.empty())
+                {
+                    if (params.verbose)
+                    {
+                        std::cout << "    Ball pivot failed to generate welding triangles\n";
+                    }
+                    continue;
+                }
+                
+                // Step 6: Merge welding triangles into main mesh
+                size_t addedTriangles = MergeWeldingTriangles(
+                    vertices, triangles, boundaryPoints, weldTriangles);
+                
+                if (params.verbose && addedTriangles > 0)
+                {
+                    std::cout << "    Added " << addedTriangles << " welding triangles\n";
+                }
+            }
+        }
+        
+        // Identify outer boundary triangles in a patch
+        // These are triangles on the boundary that face away from the patch interior
+        static void IdentifyOuterBoundaryTriangles(
+            std::vector<Vector3<Real>> const& vertices,
+            std::vector<std::array<int32_t, 3>> const& triangles,
+            Patch const& patch,
+            std::set<size_t>& outerTriangles)
+        {
+            outerTriangles.clear();
+            
+            if (patch.isClosed)
+            {
+                return;  // No boundary triangles in closed patches
+            }
+            
+            // Build set of boundary edges for fast lookup
+            std::set<std::pair<int32_t, int32_t>> boundaryEdgeSet;
+            for (auto const& edge : patch.boundaryEdges)
+            {
+                boundaryEdgeSet.insert(std::make_pair(
+                    std::min(edge.first, edge.second),
+                    std::max(edge.first, edge.second)));
+            }
+            
+            // For each triangle in patch, check if it has boundary edges
+            for (auto triIdx : patch.triangleIndices)
+            {
+                auto const& tri = triangles[triIdx];
+                
+                // Count how many boundary edges this triangle has
+                int boundaryEdgeCount = 0;
+                for (int i = 0; i < 3; ++i)
+                {
+                    int32_t v0 = tri[i];
+                    int32_t v1 = tri[(i + 1) % 3];
+                    auto edge = std::make_pair(std::min(v0, v1), std::max(v0, v1));
+                    
+                    if (boundaryEdgeSet.find(edge) != boundaryEdgeSet.end())
+                    {
+                        boundaryEdgeCount++;
+                    }
+                }
+                
+                // Triangles with 2+ boundary edges are considered "outer"
+                // These are on the fringe and can be safely removed
+                if (boundaryEdgeCount >= 2)
+                {
+                    outerTriangles.insert(triIdx);
+                }
+            }
+        }
+        
+        // Remove triangles by their indices
+        static size_t RemoveTrianglesByIndex(
+            std::vector<std::array<int32_t, 3>>& triangles,
+            std::set<size_t> const& indicesToRemove)
+        {
+            if (indicesToRemove.empty())
+            {
+                return 0;
+            }
+            
+            // Sort indices in reverse order for safe removal
+            std::vector<size_t> sortedIndices(indicesToRemove.begin(), indicesToRemove.end());
+            std::sort(sortedIndices.rbegin(), sortedIndices.rend());
+            
+            for (auto idx : sortedIndices)
+            {
+                if (idx < triangles.size())
+                {
+                    triangles.erase(triangles.begin() + idx);
+                }
+            }
+            
+            return sortedIndices.size();
+        }
+        
+        // Extract boundary points from patch pair for welding
+        static void ExtractPatchBoundaryPoints(
+            std::vector<Vector3<Real>> const& vertices,
+            std::vector<std::array<int32_t, 3>> const& triangles,
+            Patch const& patch1,
+            Patch const& patch2,
+            std::vector<Vector3<Real>>& boundaryPoints,
+            std::vector<Vector3<Real>>& boundaryNormals)
+        {
+            boundaryPoints.clear();
+            boundaryNormals.clear();
+            
+            // Collect vertices from boundary edges of both patches
+            std::set<int32_t> boundaryVertexSet;
+            
+            // Add from patch 1
+            for (auto const& edge : patch1.boundaryEdges)
+            {
+                boundaryVertexSet.insert(edge.first);
+                boundaryVertexSet.insert(edge.second);
+            }
+            
+            // Add from patch 2
+            for (auto const& edge : patch2.boundaryEdges)
+            {
+                boundaryVertexSet.insert(edge.first);
+                boundaryVertexSet.insert(edge.second);
+            }
+            
+            // Convert to vectors
+            std::vector<int32_t> boundaryVertices(boundaryVertexSet.begin(), boundaryVertexSet.end());
+            
+            boundaryPoints.reserve(boundaryVertices.size());
+            boundaryNormals.reserve(boundaryVertices.size());
+            
+            // For each boundary vertex, get position and estimate normal
+            for (auto vIdx : boundaryVertices)
+            {
+                boundaryPoints.push_back(vertices[vIdx]);
+                
+                // Estimate normal by averaging adjacent triangle normals
+                Vector3<Real> avgNormal = Vector3<Real>::Zero();
+                int normalCount = 0;
+                
+                // Check both patches for triangles using this vertex
+                for (auto triIdx : patch1.triangleIndices)
+                {
+                    auto const& tri = triangles[triIdx];
+                    if (tri[0] == vIdx || tri[1] == vIdx || tri[2] == vIdx)
+                    {
+                        Vector3<Real> e1 = vertices[tri[1]] - vertices[tri[0]];
+                        Vector3<Real> e2 = vertices[tri[2]] - vertices[tri[0]];
+                        Vector3<Real> n = Cross(e1, e2);
+                        Real len = Length(n);
+                        if (len > static_cast<Real>(0))
+                        {
+                            avgNormal += n / len;
+                            normalCount++;
+                        }
+                    }
+                }
+                
+                for (auto triIdx : patch2.triangleIndices)
+                {
+                    auto const& tri = triangles[triIdx];
+                    if (tri[0] == vIdx || tri[1] == vIdx || tri[2] == vIdx)
+                    {
+                        Vector3<Real> e1 = vertices[tri[1]] - vertices[tri[0]];
+                        Vector3<Real> e2 = vertices[tri[2]] - vertices[tri[0]];
+                        Vector3<Real> n = Cross(e1, e2);
+                        Real len = Length(n);
+                        if (len > static_cast<Real>(0))
+                        {
+                            avgNormal += n / len;
+                            normalCount++;
+                        }
+                    }
+                }
+                
+                if (normalCount > 0)
+                {
+                    avgNormal /= static_cast<Real>(normalCount);
+                    Real avgLen = Length(avgNormal);
+                    if (avgLen > static_cast<Real>(0))
+                    {
+                        avgNormal /= avgLen;
+                    }
+                }
+                else
+                {
+                    // Default normal if no triangles found
+                    avgNormal = Vector3<Real>::Unit(2);  // Z-axis
+                }
+                
+                boundaryNormals.push_back(avgNormal);
+            }
+        }
+        
+        // Estimate appropriate ball radius for a gap
+        static Real EstimateBallRadiusForGap(
+            std::vector<Vector3<Real>> const& boundaryPoints,
+            Real minDistance)
+        {
+            if (boundaryPoints.size() < 2)
+            {
+                // Use minimum distance or a small default
+                return std::max(minDistance * static_cast<Real>(1.5), static_cast<Real>(0.1));
+            }
+            
+            // Compute average nearest neighbor distance in boundary points
+            Real avgSpacing = static_cast<Real>(0);
+            size_t count = 0;
+            
+            size_t samplesToUse = std::min(static_cast<size_t>(50), boundaryPoints.size());
+            size_t step = std::max<size_t>(1, boundaryPoints.size() / samplesToUse);
+            
+            for (size_t i = 0; i < boundaryPoints.size(); i += step)
+            {
+                Real minDist = std::numeric_limits<Real>::max();
+                
+                for (size_t j = 0; j < boundaryPoints.size(); ++j)
+                {
+                    if (i == j) continue;
+                    
+                    Real dist = Length(boundaryPoints[j] - boundaryPoints[i]);
+                    if (dist > static_cast<Real>(0) && dist < minDist)
+                    {
+                        minDist = dist;
+                    }
+                }
+                
+                if (minDist < std::numeric_limits<Real>::max())
+                {
+                    avgSpacing += minDist;
+                    count++;
+                }
+            }
+            
+            if (count > 0)
+            {
+                avgSpacing /= static_cast<Real>(count);
+            }
+            else
+            {
+                // Fallback: compute bounding box diagonal
+                if (!boundaryPoints.empty())
+                {
+                    Vector3<Real> minPt = boundaryPoints[0];
+                    Vector3<Real> maxPt = boundaryPoints[0];
+                    
+                    for (auto const& p : boundaryPoints)
+                    {
+                        for (int i = 0; i < 3; ++i)
+                        {
+                            minPt[i] = std::min(minPt[i], p[i]);
+                            maxPt[i] = std::max(maxPt[i], p[i]);
+                        }
+                    }
+                    
+                    Real diagonal = Length(maxPt - minPt);
+                    avgSpacing = diagonal / static_cast<Real>(10);  // Use 1/10 of diagonal
+                }
+            }
+            
+            // Use reasonable radius: between avgSpacing and 2x avgSpacing
+            // But limit it to be reasonable relative to point cloud
+            Real radius = avgSpacing * static_cast<Real>(1.5);
+            
+            // Don't let radius be too small or too large
+            Real minRadius = avgSpacing * static_cast<Real>(0.8);
+            Real maxRadius = avgSpacing * static_cast<Real>(3.0);
+            
+            radius = std::max(minRadius, std::min(maxRadius, radius));
+            
+            // Make sure we at least cover the gap
+            if (minDistance > static_cast<Real>(0))
+            {
+                radius = std::max(radius, minDistance);
+            }
+            
+            return radius;
+        }
+        
+        // Merge welding triangles into the main mesh
+        static size_t MergeWeldingTriangles(
+            std::vector<Vector3<Real>>& vertices,
+            std::vector<std::array<int32_t, 3>>& triangles,
+            std::vector<Vector3<Real>> const& weldPoints,
+            std::vector<std::array<int32_t, 3>> const& weldTriangles)
+        {
+            if (weldTriangles.empty())
+            {
+                return 0;
+            }
+            
+            // Build a map from weld point coordinates to existing vertex indices
+            // Use a simple tolerance-based matching
+            std::map<int32_t, int32_t> weldToMainIndex;  // weldIndex -> mainIndex
+            Real tolerance = static_cast<Real>(1e-6);
+            
+            for (size_t wIdx = 0; wIdx < weldPoints.size(); ++wIdx)
+            {
+                bool found = false;
+                
+                // Try to find matching vertex in main mesh
+                for (size_t vIdx = 0; vIdx < vertices.size(); ++vIdx)
+                {
+                    Real dist = Length(vertices[vIdx] - weldPoints[wIdx]);
+                    if (dist < tolerance)
+                    {
+                        weldToMainIndex[static_cast<int32_t>(wIdx)] = static_cast<int32_t>(vIdx);
+                        found = true;
+                        break;
+                    }
+                }
+                
+                // If not found, add as new vertex
+                if (!found)
+                {
+                    weldToMainIndex[static_cast<int32_t>(wIdx)] = static_cast<int32_t>(vertices.size());
+                    vertices.push_back(weldPoints[wIdx]);
+                }
+            }
+            
+            // Add welding triangles with remapped indices
+            size_t addedCount = 0;
+            for (auto const& tri : weldTriangles)
+            {
+                std::array<int32_t, 3> newTri;
+                newTri[0] = weldToMainIndex[tri[0]];
+                newTri[1] = weldToMainIndex[tri[1]];
+                newTri[2] = weldToMainIndex[tri[2]];
+                
+                triangles.push_back(newTri);
+                addedCount++;
+            }
+            
+            return addedCount;
         }
         
         // Validate that mesh is manifold

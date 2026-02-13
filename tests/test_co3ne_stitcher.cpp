@@ -210,6 +210,84 @@ void TestNonManifoldRemoval()
     }
 }
 
+// Test ball pivot welding
+void TestBallPivotWelding()
+{
+    std::cout << "\n=== Test: Ball Pivot Welding ===\n";
+    
+    // Load point cloud
+    std::vector<Vector3<double>> points = LoadXYZ("r768.xyz");
+    
+    if (points.empty())
+    {
+        std::cout << "Failed to load r768.xyz - skipping test\n";
+        return;
+    }
+    
+    // Use 1000 points for testing
+    if (points.size() > 1000)
+    {
+        points.resize(1000);
+    }
+    
+    std::cout << "Loaded " << points.size() << " points\n";
+    
+    // Run Co3Ne reconstruction with relaxed mode
+    Co3Ne<double>::Parameters co3neParams;
+    co3neParams.kNeighbors = 20;
+    co3neParams.relaxedManifoldExtraction = true;
+    co3neParams.orientNormals = true;
+    
+    std::vector<Vector3<double>> vertices;
+    std::vector<std::array<int32_t, 3>> triangles;
+    
+    std::cout << "Running Co3Ne reconstruction...\n";
+    bool success = Co3Ne<double>::Reconstruct(points, vertices, triangles, co3neParams);
+    
+    std::cout << "Co3Ne reconstruction: " << (success ? "SUCCESS" : "FAILED") << "\n";
+    std::cout << "Generated " << triangles.size() << " triangles\n";
+    
+    if (!success || triangles.empty())
+    {
+        std::cout << "Skipping Ball Pivot test (no triangles generated)\n";
+        return;
+    }
+    
+    // Save pre-welding mesh
+    SaveOBJ("co3ne_before_welding.obj", vertices, triangles);
+    
+    // Apply stitching with Ball Pivot enabled
+    Co3NeManifoldStitcher<double>::Parameters stitchParams;
+    stitchParams.verbose = true;
+    stitchParams.enableHoleFilling = true;
+    stitchParams.removeNonManifoldEdges = true;
+    stitchParams.enableBallPivot = true;  // Enable Ball Pivot welding!
+    
+    std::cout << "\nApplying stitching with Ball Pivot welding...\n";
+    size_t trianglesBefore = triangles.size();
+    
+    bool isManifold = Co3NeManifoldStitcher<double>::StitchPatches(
+        vertices, triangles, stitchParams);
+    
+    size_t trianglesAfter = triangles.size();
+    
+    std::cout << "\nStitching result: " << (isManifold ? "MANIFOLD" : "NON-MANIFOLD") << "\n";
+    std::cout << "Triangle count: " << trianglesBefore << " -> " << trianglesAfter 
+              << " (added " << (trianglesAfter - trianglesBefore) << ")\n";
+    
+    // Save post-welding mesh
+    SaveOBJ("co3ne_after_welding.obj", vertices, triangles);
+    
+    if (trianglesAfter > trianglesBefore)
+    {
+        std::cout << "✓ Ball Pivot successfully added welding triangles\n";
+    }
+    else
+    {
+        std::cout << "ℹ Ball Pivot did not add triangles (patches may already be well-connected)\n";
+    }
+}
+
 int main(int argc, char* argv[])
 {
     std::cout << "Co3Ne Manifold Stitcher Test Suite\n";
@@ -218,6 +296,7 @@ int main(int argc, char* argv[])
     // Run tests
     TestBasicStitching();
     TestNonManifoldRemoval();
+    TestBallPivotWelding();  // New ball pivot welding test
     
     // Test with real data if available
     if (argc > 1)
