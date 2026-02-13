@@ -142,4 +142,10 @@ test_topology: $(TEST_DIR)/test_topology_bridging.cpp GTE/Mathematics/Co3NeManif
 test_large: $(TEST_DIR)/test_large_input.cpp GTE/Mathematics/Co3NeManifoldStitcher.h GTE/Mathematics/Co3Ne.h
 	$(CXX) $(CXXFLAGS) -o test_large $(TEST_DIR)/test_large_input.cpp GTE/Mathematics/BallPivotReconstruction.cpp $(LDFLAGS)
 
+# Hybrid Co3Ne + Poisson reconstruction test (requires PoissonRecon submodule)
+POISSON_INC = -I./PoissonRecon/Src
+POISSON_FLAGS = -fopenmp -Wno-deprecated -pthread
+test_hybrid: $(TEST_DIR)/test_hybrid_reconstruction.cpp GTE/Mathematics/HybridReconstruction.h GTE/Mathematics/PoissonWrapper.h GTE/Mathematics/Co3Ne.h
+	$(CXX) $(CXXFLAGS) $(POISSON_INC) $(POISSON_FLAGS) -o test_hybrid $(TEST_DIR)/test_hybrid_reconstruction.cpp GTE/Mathematics/BallPivotReconstruction.cpp $(LDFLAGS) -lgomp
+
 
