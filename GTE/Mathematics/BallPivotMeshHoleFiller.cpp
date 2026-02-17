@@ -8,6 +8,7 @@
 // Implementation of BallPivotMeshHoleFiller
 
 #include <GTE/Mathematics/BallPivotMeshHoleFiller.h>
+#include <GTE/Mathematics/LSCMParameterization.h>
 #include <detria.hpp>
 #include <iostream>
 #include <queue>
@@ -1926,7 +1927,12 @@ namespace gte
             return false;  // No Steiner points to use
         }
         
-        // Step 1: Compute best-fit plane for the hole
+        // Try two approaches: planar projection first, UV unwrapping if that fails
+        bool useLSCM = false;
+        std::vector<detria::PointD> points2D;
+        std::vector<int32_t> indexMap;
+        
+        // Step 1: Try planar projection first (faster)
         Vector3<Real> centroid{static_cast<Real>(0), static_cast<Real>(0), static_cast<Real>(0)};
         for (int32_t vi : hole.vertexIndices)
         {
@@ -1961,8 +1967,7 @@ namespace gte
         
         avgNormal = avgNormal / avgNormalLen;
         
-        // Step 2: Create local 2D coordinate system
-        // Use avgNormal as Z, compute perpendicular X and Y
+        // Step 2: Create local 2D coordinate system for planar projection
         Vector3<Real> zAxis = avgNormal;
         Vector3<Real> xAxis, yAxis;
         
@@ -1989,10 +1994,7 @@ namespace gte
         }
         yAxis = yAxis / yLen;
         
-        // Step 3: Project all points to 2D
-        std::vector<detria::PointD> points2D;
-        std::vector<int32_t> indexMap;  // Maps 2D index -> 3D vertex index
-        
+        // Step 3: Project all points to 2D using planar projection
         // Add boundary vertices
         for (int32_t vi : hole.vertexIndices)
         {
@@ -2011,6 +2013,94 @@ namespace gte
             double y = static_cast<double>(Dot(p, yAxis));
             points2D.push_back({x, y});
             indexMap.push_back(vi);
+        }
+        
+        // Check for overlaps in 2D projection (simplified check)
+        bool hasOverlaps = false;
+        Real minDist2D = std::numeric_limits<Real>::max();
+        for (size_t i = 0; i < points2D.size(); ++i)
+        {
+            for (size_t j = i + 1; j < points2D.size(); ++j)
+            {
+                Real dx = static_cast<Real>(points2D[i].x - points2D[j].x);
+                Real dy = static_cast<Real>(points2D[i].y - points2D[j].y);
+                Real dist = std::sqrt(dx * dx + dy * dy);
+                minDist2D = std::min(minDist2D, dist);
+                
+                // If points are too close in 2D but not in 3D, we have overlaps
+                Vector3<Real> p1 = vertices[indexMap[i]];
+                Vector3<Real> p2 = vertices[indexMap[j]];
+                Real dist3D = Length(p2 - p1);
+                
+                if (dist < hole.avgEdgeLength * static_cast<Real>(0.1) &&
+                    dist3D > hole.avgEdgeLength * static_cast<Real>(0.5))
+                {
+                    hasOverlaps = true;
+                    break;
+                }
+            }
+            if (hasOverlaps) break;
+        }
+        
+        // If overlaps detected, try UV unwrapping (LSCM)
+        if (hasOverlaps && hole.vertexIndices.size() > 3)
+        {
+            if (params.verbose)
+            {
+                std::cout << "      Detected overlaps in planar projection, trying UV unwrapping (LSCM)...\n";
+            }
+            
+            // Use LSCM for UV unwrapping
+            std::vector<Vector2<Real>> uvCoords;
+            bool lscmSuccess = LSCMParameterization<Real>::Parameterize(
+                vertices, hole.vertexIndices, steinerVertexIndices,
+                {}, // No triangles for boundary-only case
+                uvCoords, params.verbose);
+            
+            if (lscmSuccess)
+            {
+                // Replace 2D points with UV coordinates
+                points2D.clear();
+                indexMap.clear();
+                
+                // Scale UV coordinates to reasonable range for detria
+                Real scale = hole.avgEdgeLength * static_cast<Real>(10);
+                
+                for (int32_t vi : hole.vertexIndices)
+                {
+                    if (uvCoords[vi][0] >= static_cast<Real>(0))
+                    {
+                        points2D.push_back({
+                            static_cast<double>(uvCoords[vi][0] * scale),
+                            static_cast<double>(uvCoords[vi][1] * scale)
+                        });
+                        indexMap.push_back(vi);
+                    }
+                }
+                
+                for (int32_t vi : steinerVertexIndices)
+                {
+                    if (uvCoords[vi][0] >= static_cast<Real>(0))
+                    {
+                        points2D.push_back({
+                            static_cast<double>(uvCoords[vi][0] * scale),
+                            static_cast<double>(uvCoords[vi][1] * scale)
+                        });
+                        indexMap.push_back(vi);
+                    }
+                }
+                
+                useLSCM = true;
+                
+                if (params.verbose)
+                {
+                    std::cout << "      UV unwrapping successful, using LSCM coordinates\n";
+                }
+            }
+            else if (params.verbose)
+            {
+                std::cout << "      UV unwrapping failed, continuing with planar projection\n";
+            }
         }
         
         // Step 4: Set up detria triangulation
