@@ -1783,16 +1783,34 @@ namespace gte
             return -1;
         }
         
-        // Main component = largest by vertex count
-        int32_t mainIdx = 0;
-        size_t maxVertices = componentInfos[0].vertices.size();
+        // Priority 1 fix: Main component = largest OPEN component by vertex count
+        // We want the actual mesh we're trying to close, not a closed component
+        // that was created during hole filling
+        int32_t mainIdx = -1;
+        size_t maxVertices = 0;
         
-        for (size_t i = 1; i < componentInfos.size(); ++i)
+        // First, try to find largest OPEN component
+        for (size_t i = 0; i < componentInfos.size(); ++i)
         {
-            if (componentInfos[i].vertices.size() > maxVertices)
+            if (!componentInfos[i].isClosed && componentInfos[i].vertices.size() > maxVertices)
             {
                 maxVertices = componentInfos[i].vertices.size();
                 mainIdx = static_cast<int32_t>(i);
+            }
+        }
+        
+        // If no open components found, fall back to largest overall
+        if (mainIdx == -1)
+        {
+            mainIdx = 0;
+            maxVertices = componentInfos[0].vertices.size();
+            for (size_t i = 1; i < componentInfos.size(); ++i)
+            {
+                if (componentInfos[i].vertices.size() > maxVertices)
+                {
+                    maxVertices = componentInfos[i].vertices.size();
+                    mainIdx = static_cast<int32_t>(i);
+                }
             }
         }
         
