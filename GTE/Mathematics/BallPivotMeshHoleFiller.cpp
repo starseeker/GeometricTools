@@ -1062,6 +1062,48 @@ namespace gte
         int32_t iteration = 0;
         size_t initialTriangleCount = triangles.size();
         
+        // Step 0: Reject small closed components if enabled
+        std::set<int32_t> incorporatedVertices;
+        if (params.rejectSmallComponents)
+        {
+            auto components = DetectConnectedComponents(triangles);
+            if (components.size() > 1)
+            {
+                auto componentInfos = AnalyzeComponents(vertices, triangles, components);
+                int32_t mainComponentIdx = IdentifyMainComponent(componentInfos);
+                
+                if (params.verbose)
+                {
+                    std::cout << "\nStep 0: Small Component Rejection\n";
+                    std::cout << "  Found " << components.size() << " components\n";
+                    std::cout << "  Main component: " << mainComponentIdx 
+                              << " (" << componentInfos[mainComponentIdx].vertices.size() << " vertices)\n";
+                }
+                
+                // Remove small closed components
+                incorporatedVertices = RemoveSmallClosedComponents(
+                    triangles, componentInfos, mainComponentIdx, params.smallComponentThreshold);
+                
+                if (!incorporatedVertices.empty())
+                {
+                    if (params.verbose)
+                    {
+                        std::cout << "  Removed small closed components\n";
+                        std::cout << "  Triangles removed: " << (initialTriangleCount - triangles.size()) << "\n";
+                        std::cout << "  Vertices available for incorporation: " << incorporatedVertices.size() << "\n";
+                    }
+                    anyProgress = true;
+                    
+                    // Re-detect components after removal
+                    components = DetectConnectedComponents(triangles);
+                    if (params.verbose)
+                    {
+                        std::cout << "  Components after removal: " << components.size() << "\n";
+                    }
+                }
+            }
+        }
+        
         // Calculate average edge length for adaptive thresholds
         auto calculateAvgEdgeLength = [&]() -> Real
         {
@@ -1349,6 +1391,199 @@ namespace gte
         }
         
         return anyProgress;
+    }
+    
+    // Component analysis and refinement methods
+    
+    template <typename Real>
+    std::vector<typename BallPivotMeshHoleFiller<Real>::ComponentInfo>
+    BallPivotMeshHoleFiller<Real>::AnalyzeComponents(
+        std::vector<Vector3<Real>> const& vertices,
+        std::vector<std::array<int32_t, 3>> const& triangles,
+        std::vector<std::set<int32_t>> const& components)
+    {
+        std::vector<ComponentInfo> infos;
+        
+        // Build edge topology
+        std::map<std::pair<int32_t, int32_t>, int32_t> edgeCount;
+        for (auto const& tri : triangles)
+        {
+            for (int i = 0; i < 3; ++i)
+            {
+                int32_t v0 = tri[i];
+                int32_t v1 = tri[(i + 1) % 3];
+                auto edge = std::make_pair(std::min(v0, v1), std::max(v0, v1));
+                edgeCount[edge]++;
+            }
+        }
+        
+        // Find which triangles belong to each component
+        for (size_t compIdx = 0; compIdx < components.size(); ++compIdx)
+        {
+            ComponentInfo info;
+            info.componentIndex = static_cast<int32_t>(compIdx);
+            info.vertices = components[compIdx];
+            info.boundaryEdgeCount = 0;
+            
+            // Find triangles in this component
+            for (size_t triIdx = 0; triIdx < triangles.size(); ++triIdx)
+            {
+                auto const& tri = triangles[triIdx];
+                bool inComponent = true;
+                for (int i = 0; i < 3; ++i)
+                {
+                    if (!info.vertices.count(tri[i]))
+                    {
+                        inComponent = false;
+                        break;
+                    }
+                }
+                if (inComponent)
+                {
+                    info.triangleIndices.push_back(static_cast<int32_t>(triIdx));
+                }
+            }
+            
+            // Count boundary edges
+            for (auto const& ec : edgeCount)
+            {
+                if (ec.second == 1)  // Boundary edge
+                {
+                    if (info.vertices.count(ec.first.first) && info.vertices.count(ec.first.second))
+                    {
+                        info.boundaryEdgeCount++;
+                    }
+                }
+            }
+            
+            info.isClosed = (info.boundaryEdgeCount == 0);
+            infos.push_back(info);
+        }
+        
+        return infos;
+    }
+    
+    template <typename Real>
+    int32_t BallPivotMeshHoleFiller<Real>::IdentifyMainComponent(
+        std::vector<ComponentInfo> const& componentInfos)
+    {
+        if (componentInfos.empty())
+        {
+            return -1;
+        }
+        
+        // Main component = largest by vertex count
+        int32_t mainIdx = 0;
+        size_t maxVertices = componentInfos[0].vertices.size();
+        
+        for (size_t i = 1; i < componentInfos.size(); ++i)
+        {
+            if (componentInfos[i].vertices.size() > maxVertices)
+            {
+                maxVertices = componentInfos[i].vertices.size();
+                mainIdx = static_cast<int32_t>(i);
+            }
+        }
+        
+        return mainIdx;
+    }
+    
+    template <typename Real>
+    std::set<int32_t> BallPivotMeshHoleFiller<Real>::RemoveSmallClosedComponents(
+        std::vector<std::array<int32_t, 3>>& triangles,
+        std::vector<ComponentInfo> const& componentInfos,
+        int32_t mainComponentIndex,
+        int32_t sizeThreshold)
+    {
+        std::set<int32_t> removedVertices;
+        std::vector<int32_t> trianglesToRemove;
+        
+        for (auto const& info : componentInfos)
+        {
+            // Skip main component
+            if (info.componentIndex == mainComponentIndex)
+            {
+                continue;
+            }
+            
+            // Check if component is small and closed
+            if (info.isClosed && static_cast<int32_t>(info.vertices.size()) <= sizeThreshold)
+            {
+                // Mark triangles for removal
+                for (int32_t triIdx : info.triangleIndices)
+                {
+                    trianglesToRemove.push_back(triIdx);
+                }
+                
+                // Save vertices for incorporation
+                for (int32_t v : info.vertices)
+                {
+                    removedVertices.insert(v);
+                }
+            }
+        }
+        
+        // Remove marked triangles
+        if (!trianglesToRemove.empty())
+        {
+            RemoveTriangles(triangles, trianglesToRemove);
+        }
+        
+        return removedVertices;
+    }
+    
+    template <typename Real>
+    bool BallPivotMeshHoleFiller<Real>::IsVertexNormalCompatible(
+        Vector3<Real> const& vertexPos,
+        Vector3<Real> const& vertexNormal,
+        BoundaryLoop const& hole,
+        std::vector<Vector3<Real>> const& vertices,
+        Real normalThreshold)
+    {
+        if (hole.vertexIndices.size() < 3)
+        {
+            return false;  // Can't compute hole normal
+        }
+        
+        // Compute best-fit plane for hole boundary
+        // Use centroid and average normal
+        Vector3<Real> centroid{static_cast<Real>(0), static_cast<Real>(0), static_cast<Real>(0)};
+        for (int32_t vi : hole.vertexIndices)
+        {
+            centroid = centroid + vertices[vi];
+        }
+        centroid = centroid / static_cast<Real>(hole.vertexIndices.size());
+        
+        // Compute average normal from consecutive edge cross products
+        Vector3<Real> avgNormal{static_cast<Real>(0), static_cast<Real>(0), static_cast<Real>(0)};
+        for (size_t i = 0; i < hole.vertexIndices.size(); ++i)
+        {
+            int32_t v0 = hole.vertexIndices[i];
+            int32_t v1 = hole.vertexIndices[(i + 1) % hole.vertexIndices.size()];
+            int32_t v2 = hole.vertexIndices[(i + 2) % hole.vertexIndices.size()];
+            
+            Vector3<Real> edge1 = vertices[v1] - vertices[v0];
+            Vector3<Real> edge2 = vertices[v2] - vertices[v1];
+            Vector3<Real> normal = Cross(edge1, edge2);
+            
+            Real len = Length(normal);
+            if (len > static_cast<Real>(1e-10))
+            {
+                avgNormal = avgNormal + (normal / len);
+            }
+        }
+        
+        Real avgNormalLen = Length(avgNormal);
+        if (avgNormalLen < static_cast<Real>(1e-10))
+        {
+            return false;  // Degenerate hole
+        }
+        
+        avgNormal = avgNormal / avgNormalLen;
+        
+        // Check if vertex normal aligns with hole normal
+        Real dot = Dot(vertexNormal, avgNormal);
+        return dot >= normalThreshold;
     }
     
     // Explicit instantiations

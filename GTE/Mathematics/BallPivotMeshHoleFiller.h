@@ -65,6 +65,8 @@ namespace gte
             bool removeEdgeTrianglesOnFailure;  // Remove edge triangles and retry (default: false, deprecated)
             Real edgeTriangleThreshold;         // Edge ratio threshold for "edge triangle" (default: 0.5)
             bool allowNonManifoldEdges;         // Allow creating non-manifold edges if needed (default: false)
+            bool rejectSmallComponents;         // Remove small closed components and incorporate vertices (default: true)
+            int32_t smallComponentThreshold;    // Max vertices for "small" component (default: 20)
             bool verbose;                       // Enable diagnostic output (default: false)
             
             Parameters()
@@ -77,6 +79,8 @@ namespace gte
                 , removeEdgeTrianglesOnFailure(false)  // Disabled - validation prevents non-manifold now
                 , edgeTriangleThreshold(static_cast<Real>(0.5))
                 , allowNonManifoldEdges(false)  // Conservative by default
+                , rejectSmallComponents(true)   // Enabled by default per problem statement
+                , smallComponentThreshold(20)   // Configurable threshold
                 , verbose(false)
             {
             }
@@ -260,6 +264,41 @@ namespace gte
             std::vector<Vector3<Real>> const& vertices,
             std::pair<int32_t, int32_t> const& edge1,
             std::pair<int32_t, int32_t> const& edge2);
+        
+        // Component analysis and refinement methods
+        struct ComponentInfo
+        {
+            int32_t componentIndex;
+            std::set<int32_t> vertices;
+            std::vector<int32_t> triangleIndices;
+            int32_t boundaryEdgeCount;
+            bool isClosed;
+        };
+        
+        // Analyze all components (size, boundaries, etc.)
+        static std::vector<ComponentInfo> AnalyzeComponents(
+            std::vector<Vector3<Real>> const& vertices,
+            std::vector<std::array<int32_t, 3>> const& triangles,
+            std::vector<std::set<int32_t>> const& components);
+        
+        // Identify main component (largest by vertex count)
+        static int32_t IdentifyMainComponent(
+            std::vector<ComponentInfo> const& componentInfos);
+        
+        // Remove small closed components and return their vertex indices
+        static std::set<int32_t> RemoveSmallClosedComponents(
+            std::vector<std::array<int32_t, 3>>& triangles,
+            std::vector<ComponentInfo> const& componentInfos,
+            int32_t mainComponentIndex,
+            int32_t sizeThreshold);
+        
+        // Check if vertex normal is compatible with hole (for incorporation)
+        static bool IsVertexNormalCompatible(
+            Vector3<Real> const& vertexPos,
+            Vector3<Real> const& vertexNormal,
+            BoundaryLoop const& hole,
+            std::vector<Vector3<Real>> const& vertices,
+            Real normalThreshold);
     };
 }
 
