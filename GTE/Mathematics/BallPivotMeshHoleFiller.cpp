@@ -143,11 +143,110 @@ namespace gte
             return false;  // Cannot fill a hole with fewer than 3 vertices
         }
         
+        // Step 1: Remove conflicting triangles around hole (per problem statement)
+        auto conflictingTriangles = DetectConflictingTriangles(vertices, triangles, hole);
+        if (!conflictingTriangles.empty())
+        {
+            if (params.verbose)
+            {
+                std::cout << "      Removing " << conflictingTriangles.size() 
+                          << " conflicting triangles before filling\n";
+            }
+            
+            // Remove conflicting triangles
+            std::vector<std::array<int32_t, 3>> newTriangles;
+            std::set<int32_t> toRemoveSet(conflictingTriangles.begin(), conflictingTriangles.end());
+            
+            for (size_t i = 0; i < triangles.size(); ++i)
+            {
+                if (toRemoveSet.find(static_cast<int32_t>(i)) == toRemoveSet.end())
+                {
+                    newTriangles.push_back(triangles[i]);
+                }
+            }
+            
+            triangles = newTriangles;
+            
+            // Re-detect hole after removal (boundary may have changed)
+            auto newHoles = DetectBoundaryLoops(vertices, triangles);
+            if (newHoles.empty())
+            {
+                if (params.verbose)
+                {
+                    std::cout << "      Warning: No holes after removing conflicting triangles\n";
+                }
+                return false;
+            }
+            
+            // Find the hole closest to our original hole
+            BoundaryLoop const* updatedHole = &newHoles[0];
+            Real minDist = std::numeric_limits<Real>::max();
+            
+            for (auto const& nh : newHoles)
+            {
+                // Check if this hole shares vertices with original
+                int sharedVertices = 0;
+                for (int32_t vi : nh.vertexIndices)
+                {
+                    for (int32_t ovi : hole.vertexIndices)
+                    {
+                        if (vi == ovi)
+                        {
+                            ++sharedVertices;
+                            break;
+                        }
+                    }
+                }
+                
+                if (sharedVertices > 0)
+                {
+                    updatedHole = &nh;
+                    break;
+                }
+            }
+            
+            // Continue with updated hole
+            return FillHoleInternal(vertices, triangles, *updatedHole, params);
+        }
+        
+        // Step 2: Fill hole (no conflicts)
+        return FillHoleInternal(vertices, triangles, hole, params);
+    }
+    
+    // Internal method that does actual filling (after conflict removal)
+    template <typename Real>
+    bool BallPivotMeshHoleFiller<Real>::FillHoleInternal(
+        std::vector<Vector3<Real>>& vertices,
+        std::vector<std::array<int32_t, 3>>& triangles,
+        BoundaryLoop const& hole,
+        Parameters const& params)
+    {
         // If hole is just 3 vertices, directly add a triangle
         if (hole.vertexIndices.size() == 3)
         {
             triangles.push_back({hole.vertexIndices[0], hole.vertexIndices[1], hole.vertexIndices[2]});
             return true;
+        }
+        
+        // Per problem statement: "use detria triangulation more"
+        // Try detria FIRST (without Steiner points), fallback to ear clipping
+        if (params.verbose)
+        {
+            std::cout << "      Trying detria triangulation (without Steiner points)...\n";
+        }
+        
+        std::vector<int32_t> emptySteiners;  // No Steiner points for now
+        bool detriaSuccess = FillHoleWithSteinerPoints(vertices, triangles, hole, emptySteiners, params);
+        
+        if (detriaSuccess)
+        {
+            return true;
+        }
+        
+        // Fallback: Try ball pivot with progressive radii
+        if (params.verbose)
+        {
+            std::cout << "      Detria failed, trying ball pivot with progressive radii...\n";
         }
         
         // Determine base radius from hole edge lengths
@@ -182,7 +281,7 @@ namespace gte
             }
         }
         
-        return false;  // All radii failed
+        return false;  // All methods failed
     }
     
     template <typename Real>
@@ -1141,6 +1240,66 @@ namespace gte
             }
         }
         
+        // Step 0.5: Non-manifold edge repair (FIRST PRIORITY per problem statement)
+        if (params.verbose)
+        {
+            std::cout << "\nStep 0.5: Non-Manifold Edge Repair\n";
+        }
+        
+        auto nonManifoldEdges = DetectNonManifoldEdges(triangles);
+        if (!nonManifoldEdges.empty())
+        {
+            if (params.verbose)
+            {
+                std::cout << "  Found " << nonManifoldEdges.size() << " non-manifold edge(s)\n";
+            }
+            
+            for (auto const& edge : nonManifoldEdges)
+            {
+                bool repaired = LocalRemeshNonManifoldRegion(vertices, triangles, edge, params);
+                if (repaired)
+                {
+                    anyProgress = true;
+                    
+                    // Re-detect after each repair as topology changes
+                    auto remaining = DetectNonManifoldEdges(triangles);
+                    if (params.verbose)
+                    {
+                        std::cout << "  Non-manifold edges remaining: " << remaining.size() << "\n";
+                    }
+                    
+                    // Update for next iteration
+                    nonManifoldEdges = remaining;
+                    if (nonManifoldEdges.empty())
+                    {
+                        break;  // All fixed!
+                    }
+                }
+            }
+            
+            // Final check
+            nonManifoldEdges = DetectNonManifoldEdges(triangles);
+            if (nonManifoldEdges.empty())
+            {
+                if (params.verbose)
+                {
+                    std::cout << "  All non-manifold edges successfully repaired!\n";
+                }
+            }
+            else
+            {
+                if (params.verbose)
+                {
+                    std::cout << "  Warning: " << nonManifoldEdges.size() 
+                              << " non-manifold edge(s) remain after repair\n";
+                }
+            }
+        }
+        else if (params.verbose)
+        {
+            std::cout << "  No non-manifold edges found\n";
+        }
+        
         // Calculate average edge length for adaptive thresholds
         auto calculateAvgEdgeLength = [&]() -> Real
         {
@@ -1910,6 +2069,316 @@ namespace gte
         }
         
         return trianglesAdded > 0;
+    }
+    
+    // Non-manifold edge detection and repair
+    template <typename Real>
+    std::vector<std::pair<int32_t, int32_t>> BallPivotMeshHoleFiller<Real>::DetectNonManifoldEdges(
+        std::vector<std::array<int32_t, 3>> const& triangles)
+    {
+        // Build edge-to-triangle count map
+        std::map<std::pair<int32_t, int32_t>, int32_t> edgeCount;
+        
+        for (auto const& tri : triangles)
+        {
+            for (int i = 0; i < 3; ++i)
+            {
+                int32_t v0 = tri[i];
+                int32_t v1 = tri[(i + 1) % 3];
+                auto edge = std::make_pair(std::min(v0, v1), std::max(v0, v1));
+                edgeCount[edge]++;
+            }
+        }
+        
+        // Find edges with 3+ triangles
+        std::vector<std::pair<int32_t, int32_t>> nonManifoldEdges;
+        for (auto const& ec : edgeCount)
+        {
+            if (ec.second >= 3)
+            {
+                nonManifoldEdges.push_back(ec.first);
+            }
+        }
+        
+        return nonManifoldEdges;
+    }
+    
+    template <typename Real>
+    bool BallPivotMeshHoleFiller<Real>::LocalRemeshNonManifoldRegion(
+        std::vector<Vector3<Real>>& vertices,
+        std::vector<std::array<int32_t, 3>>& triangles,
+        std::pair<int32_t, int32_t> const& nonManifoldEdge,
+        Parameters const& params)
+    {
+        if (params.verbose)
+        {
+            std::cout << "    Remeshing non-manifold edge (" << nonManifoldEdge.first 
+                      << ", " << nonManifoldEdge.second << ")\n";
+        }
+        
+        // Step 1: Find all triangles sharing this edge
+        std::vector<int32_t> trianglesToRemove;
+        std::set<int32_t> regionVertices;
+        
+        for (size_t i = 0; i < triangles.size(); ++i)
+        {
+            auto const& tri = triangles[i];
+            bool hasEdge = false;
+            
+            for (int j = 0; j < 3; ++j)
+            {
+                int32_t v0 = tri[j];
+                int32_t v1 = tri[(j + 1) % 3];
+                auto edge = std::make_pair(std::min(v0, v1), std::max(v0, v1));
+                
+                if (edge == nonManifoldEdge)
+                {
+                    hasEdge = true;
+                    break;
+                }
+            }
+            
+            if (hasEdge)
+            {
+                trianglesToRemove.push_back(static_cast<int32_t>(i));
+                regionVertices.insert(tri[0]);
+                regionVertices.insert(tri[1]);
+                regionVertices.insert(tri[2]);
+            }
+        }
+        
+        if (trianglesToRemove.empty())
+        {
+            return false;  // Edge no longer exists
+        }
+        
+        if (params.verbose)
+        {
+            std::cout << "      Removing " << trianglesToRemove.size() << " triangles\n";
+            std::cout << "      Region has " << regionVertices.size() << " vertices\n";
+        }
+        
+        // Step 2: Remove the conflicting triangles
+        std::vector<std::array<int32_t, 3>> newTriangles;
+        for (size_t i = 0; i < triangles.size(); ++i)
+        {
+            bool shouldRemove = false;
+            for (int32_t idx : trianglesToRemove)
+            {
+                if (static_cast<int32_t>(i) == idx)
+                {
+                    shouldRemove = true;
+                    break;
+                }
+            }
+            
+            if (!shouldRemove)
+            {
+                newTriangles.push_back(triangles[i]);
+            }
+        }
+        
+        triangles = newTriangles;
+        
+        // Step 3: Detect the boundary loop created by removal
+        auto holes = DetectBoundaryLoops(vertices, triangles);
+        
+        if (holes.empty())
+        {
+            if (params.verbose)
+            {
+                std::cout << "      No hole created (triangles isolated)\n";
+            }
+            return true;  // Removal successful, no hole to fill
+        }
+        
+        // Find the hole that contains our edge vertices
+        BoundaryLoop* targetHole = nullptr;
+        for (auto& hole : holes)
+        {
+            bool hasV0 = false;
+            bool hasV1 = false;
+            for (int32_t vi : hole.vertexIndices)
+            {
+                if (vi == nonManifoldEdge.first) hasV0 = true;
+                if (vi == nonManifoldEdge.second) hasV1 = true;
+            }
+            if (hasV0 || hasV1)
+            {
+                targetHole = &hole;
+                break;
+            }
+        }
+        
+        if (!targetHole)
+        {
+            if (params.verbose)
+            {
+                std::cout << "      Could not find hole containing edge vertices\n";
+            }
+            return false;
+        }
+        
+        if (params.verbose)
+        {
+            std::cout << "      Hole has " << targetHole->vertexIndices.size() << " vertices\n";
+        }
+        
+        // Step 4: Retriangulate using detria
+        // Collect all vertices in region (including any nearby ones for Steiner points)
+        std::vector<int32_t> steinerVertices;
+        Real searchRadius = targetHole->avgEdgeLength * static_cast<Real>(2.0);
+        Vector3<Real> holeCentroid{static_cast<Real>(0), static_cast<Real>(0), static_cast<Real>(0)};
+        
+        for (int32_t vi : targetHole->vertexIndices)
+        {
+            holeCentroid = holeCentroid + vertices[vi];
+        }
+        holeCentroid = holeCentroid / static_cast<Real>(targetHole->vertexIndices.size());
+        
+        for (int32_t vi : regionVertices)
+        {
+            // Check if vertex is not in boundary
+            bool inBoundary = false;
+            for (int32_t bvi : targetHole->vertexIndices)
+            {
+                if (vi == bvi)
+                {
+                    inBoundary = true;
+                    break;
+                }
+            }
+            
+            if (!inBoundary)
+            {
+                Real dist = Length(vertices[vi] - holeCentroid);
+                if (dist < searchRadius)
+                {
+                    steinerVertices.push_back(vi);
+                }
+            }
+        }
+        
+        if (params.verbose && !steinerVertices.empty())
+        {
+            std::cout << "      Using " << steinerVertices.size() << " Steiner vertices\n";
+        }
+        
+        // Try to fill with detria (with or without Steiner points)
+        bool filled = false;
+        if (!steinerVertices.empty())
+        {
+            filled = FillHoleWithSteinerPoints(vertices, triangles, *targetHole, steinerVertices, params);
+        }
+        
+        if (!filled)
+        {
+            // Fallback to ear clipping
+            filled = FillHole(vertices, triangles, *targetHole, params);
+        }
+        
+        if (params.verbose)
+        {
+            if (filled)
+            {
+                std::cout << "      Successfully retriangulated region\n";
+            }
+            else
+            {
+                std::cout << "      Failed to retriangulate region\n";
+            }
+        }
+        
+        return filled;
+    }
+    
+    template <typename Real>
+    std::vector<int32_t> BallPivotMeshHoleFiller<Real>::DetectConflictingTriangles(
+        std::vector<Vector3<Real>> const& vertices,
+        std::vector<std::array<int32_t, 3>> const& triangles,
+        BoundaryLoop const& hole)
+    {
+        std::vector<int32_t> conflicting;
+        
+        // Compute hole plane and bounds
+        Vector3<Real> holeCentroid{static_cast<Real>(0), static_cast<Real>(0), static_cast<Real>(0)};
+        for (int32_t vi : hole.vertexIndices)
+        {
+            holeCentroid = holeCentroid + vertices[vi];
+        }
+        holeCentroid = holeCentroid / static_cast<Real>(hole.vertexIndices.size());
+        
+        // Compute hole normal (average of edge normals)
+        Vector3<Real> holeNormal{static_cast<Real>(0), static_cast<Real>(0), static_cast<Real>(0)};
+        for (size_t i = 0; i < hole.vertexIndices.size(); ++i)
+        {
+            int32_t v0 = hole.vertexIndices[i];
+            int32_t v1 = hole.vertexIndices[(i + 1) % hole.vertexIndices.size()];
+            Vector3<Real> edge = vertices[v1] - vertices[v0];
+            Vector3<Real> toCenter = holeCentroid - vertices[v0];
+            Vector3<Real> normal = Cross(edge, toCenter);
+            holeNormal = holeNormal + normal;
+        }
+        
+        Real holeNormalLen = Length(holeNormal);
+        if (holeNormalLen > static_cast<Real>(0))
+        {
+            holeNormal = holeNormal / holeNormalLen;
+        }
+        
+        // Check each triangle for conflicts
+        std::set<int32_t> holeVertexSet(hole.vertexIndices.begin(), hole.vertexIndices.end());
+        Real searchRadius = hole.avgEdgeLength * static_cast<Real>(3.0);
+        
+        for (size_t i = 0; i < triangles.size(); ++i)
+        {
+            auto const& tri = triangles[i];
+            
+            // Count how many vertices are in hole boundary
+            int boundaryVertices = 0;
+            for (int j = 0; j < 3; ++j)
+            {
+                if (holeVertexSet.count(tri[j]))
+                {
+                    ++boundaryVertices;
+                }
+            }
+            
+            // Triangle is conflicting if:
+            // 1. It has 1-2 vertices on boundary (not 0 or 3)
+            // 2. Its centroid is near the hole
+            // 3. Its normal conflicts with hole normal
+            
+            if (boundaryVertices > 0 && boundaryVertices < 3)
+            {
+                Vector3<Real> triCentroid = (vertices[tri[0]] + vertices[tri[1]] + vertices[tri[2]]) 
+                                           / static_cast<Real>(3.0);
+                Real dist = Length(triCentroid - holeCentroid);
+                
+                if (dist < searchRadius)
+                {
+                    // Check normal conflict
+                    Vector3<Real> triNormal = Cross(
+                        vertices[tri[1]] - vertices[tri[0]],
+                        vertices[tri[2]] - vertices[tri[0]]);
+                    Real triNormalLen = Length(triNormal);
+                    
+                    if (triNormalLen > static_cast<Real>(0))
+                    {
+                        triNormal = triNormal / triNormalLen;
+                        Real dot = Dot(triNormal, holeNormal);
+                        
+                        // Conflicting if normals are very different (< 30 degrees = cos 0.866)
+                        if (dot < static_cast<Real>(0.5))
+                        {
+                            conflicting.push_back(static_cast<int32_t>(i));
+                        }
+                    }
+                }
+            }
+        }
+        
+        return conflicting;
     }
     
     // Explicit instantiations

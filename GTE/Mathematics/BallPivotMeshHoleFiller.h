@@ -197,6 +197,13 @@ namespace gte
             std::vector<VertexInfo> const& vertexInfo,
             std::vector<Vector3<Real>> const& vertices);
         
+        // Internal hole filling (after conflict removal)
+        static bool FillHoleInternal(
+            std::vector<Vector3<Real>>& vertices,
+            std::vector<std::array<int32_t, 3>>& triangles,
+            BoundaryLoop const& hole,
+            Parameters const& params);
+        
         // Fill a hole using ball pivoting with a specific radius
         static bool FillHoleWithRadius(
             std::vector<Vector3<Real>>& vertices,
@@ -307,6 +314,24 @@ namespace gte
             BoundaryLoop const& hole,
             std::vector<Vector3<Real>> const& vertices,
             Real normalThreshold);
+        
+        // Non-manifold edge repair methods
+        // Detect edges with 3+ triangles sharing them
+        static std::vector<std::pair<int32_t, int32_t>> DetectNonManifoldEdges(
+            std::vector<std::array<int32_t, 3>> const& triangles);
+        
+        // Locally remesh a region around a non-manifold edge
+        static bool LocalRemeshNonManifoldRegion(
+            std::vector<Vector3<Real>>& vertices,
+            std::vector<std::array<int32_t, 3>>& triangles,
+            std::pair<int32_t, int32_t> const& nonManifoldEdge,
+            Parameters const& params);
+        
+        // Detect and remove conflicting triangles around a hole
+        static std::vector<int32_t> DetectConflictingTriangles(
+            std::vector<Vector3<Real>> const& vertices,
+            std::vector<std::array<int32_t, 3>> const& triangles,
+            BoundaryLoop const& hole);
     };
 }
 
