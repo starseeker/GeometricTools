@@ -1157,9 +1157,49 @@ namespace gte
             size_t holesFilled = 0;
             size_t holeTrianglesBefore = triangles.size();
             
+            // Try to fill holes, using incorporated vertices for failed holes
             for (auto const& hole : holes)
             {
-                if (FillHole(vertices, triangles, hole, params))
+                bool filled = FillHole(vertices, triangles, hole, params);
+                
+                // If hole failed and we have incorporated vertices, try using them
+                if (!filled && !incorporatedVertices.empty())
+                {
+                    // Find incorporated vertices near this hole
+                    std::vector<int32_t> nearbyVertices;
+                    Real searchRadius = hole.avgEdgeLength * static_cast<Real>(3.0);
+                    
+                    // Compute hole centroid
+                    Vector3<Real> holeCentroid{static_cast<Real>(0), static_cast<Real>(0), static_cast<Real>(0)};
+                    for (int32_t vi : hole.vertexIndices)
+                    {
+                        holeCentroid = holeCentroid + vertices[vi];
+                    }
+                    holeCentroid = holeCentroid / static_cast<Real>(hole.vertexIndices.size());
+                    
+                    // Find nearby incorporated vertices
+                    for (int32_t vi : incorporatedVertices)
+                    {
+                        Real dist = Length(vertices[vi] - holeCentroid);
+                        if (dist < searchRadius)
+                        {
+                            // Check normal compatibility
+                            // For now, we don't have vertex normals, so we skip this check
+                            // In a full implementation, this would use IsVertexNormalCompatible()
+                            nearbyVertices.push_back(vi);
+                        }
+                    }
+                    
+                    if (!nearbyVertices.empty() && params.verbose)
+                    {
+                        std::cout << "      Found " << nearbyVertices.size() 
+                                  << " nearby incorporated vertices for hole (feature not fully implemented)\n";
+                    }
+                    // TODO: Use nearbyVertices in triangulation
+                    // This requires implementing Constrained Delaunay or similar
+                }
+                
+                if (filled)
                 {
                     ++holesFilled;
                     progressThisIteration = true;
