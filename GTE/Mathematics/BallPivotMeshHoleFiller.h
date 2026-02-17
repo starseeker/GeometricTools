@@ -282,6 +282,12 @@ namespace gte
             std::pair<int32_t, int32_t> const& edge1,
             std::pair<int32_t, int32_t> const& edge2);
         
+        // Force bridge remaining components (finds closest edges regardless of distance)
+        static bool ForceBridgeRemainingComponents(
+            std::vector<Vector3<Real>>& vertices,
+            std::vector<std::array<int32_t, 3>>& triangles,
+            Parameters const& params);
+        
         // Component analysis and refinement methods
         struct ComponentInfo
         {

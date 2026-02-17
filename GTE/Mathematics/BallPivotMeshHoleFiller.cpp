@@ -1199,6 +1199,139 @@ namespace gte
     }
     
     template <typename Real>
+    bool BallPivotMeshHoleFiller<Real>::ForceBridgeRemainingComponents(
+        std::vector<Vector3<Real>>& vertices,
+        std::vector<std::array<int32_t, 3>>& triangles,
+        Parameters const& params)
+    {
+        // Detect current components
+        auto components = DetectConnectedComponents(triangles);
+        
+        if (components.size() <= 1)
+        {
+            if (params.verbose)
+            {
+                std::cout << "  Already single component, no forced bridging needed\n";
+            }
+            return false;  // Already single component
+        }
+        
+        if (params.verbose)
+        {
+            std::cout << "\n[Forced Component Bridging]\n";
+            std::cout << "  Current components: " << components.size() << "\n";
+            std::cout << "  Finding closest boundary edges between components...\n";
+        }
+        
+        // Find boundary edges for each component
+        std::map<std::pair<int32_t, int32_t>, int32_t> edgeCount;
+        for (auto const& tri : triangles)
+        {
+            for (int i = 0; i < 3; ++i)
+            {
+                int32_t v0 = tri[i];
+                int32_t v1 = tri[(i + 1) % 3];
+                auto edge = std::make_pair(std::min(v0, v1), std::max(v0, v1));
+                edgeCount[edge]++;
+            }
+        }
+        
+        std::vector<std::vector<std::pair<int32_t, int32_t>>> componentBoundaries(components.size());
+        
+        for (auto const& ec : edgeCount)
+        {
+            if (ec.second == 1)  // Boundary edge
+            {
+                // Find which component this edge belongs to
+                for (size_t i = 0; i < components.size(); ++i)
+                {
+                    if (components[i].count(ec.first.first) && components[i].count(ec.first.second))
+                    {
+                        componentBoundaries[i].push_back(ec.first);
+                        break;
+                    }
+                }
+            }
+        }
+        
+        // Find the closest boundary edge pair between any two components
+        Real minDistance = std::numeric_limits<Real>::max();
+        size_t closestCompI = 0, closestCompJ = 1;
+        std::pair<int32_t, int32_t> closestEdge1, closestEdge2;
+        bool foundPair = false;
+        
+        for (size_t i = 0; i < components.size(); ++i)
+        {
+            if (componentBoundaries[i].empty()) continue;  // Skip closed components
+            
+            for (size_t j = i + 1; j < components.size(); ++j)
+            {
+                if (componentBoundaries[j].empty()) continue;  // Skip closed components
+                
+                for (auto const& edge1 : componentBoundaries[i])
+                {
+                    Vector3<Real> mid1 = (vertices[edge1.first] + vertices[edge1.second]) / static_cast<Real>(2);
+                    
+                    for (auto const& edge2 : componentBoundaries[j])
+                    {
+                        Vector3<Real> mid2 = (vertices[edge2.first] + vertices[edge2.second]) / static_cast<Real>(2);
+                        
+                        Real dist = Length(mid2 - mid1);
+                        if (dist < minDistance)
+                        {
+                            minDistance = dist;
+                            closestCompI = i;
+                            closestCompJ = j;
+                            closestEdge1 = edge1;
+                            closestEdge2 = edge2;
+                            foundPair = true;
+                        }
+                    }
+                }
+            }
+        }
+        
+        if (!foundPair)
+        {
+            if (params.verbose)
+            {
+                std::cout << "  No boundary edge pairs found (all components may be closed)\n";
+            }
+            return false;
+        }
+        
+        if (params.verbose)
+        {
+            std::cout << "  Closest edge pair: Component " << closestCompI << " and " << closestCompJ 
+                      << ", distance = " << minDistance << "\n";
+            std::cout << "  Attempting to bridge...\n";
+        }
+        
+        // Create virtual boundary loop and fill it
+        auto virtualLoop = CreateVirtualBoundaryLoop(vertices, closestEdge1, closestEdge2);
+        bool success = FillHole(vertices, triangles, virtualLoop, params);
+        
+        if (success)
+        {
+            if (params.verbose)
+            {
+                auto newComponents = DetectConnectedComponents(triangles);
+                std::cout << "  ✓ Successfully bridged! Components: " << components.size() 
+                          << " → " << newComponents.size() << "\n";
+            }
+            return true;
+        }
+        else
+        {
+            if (params.verbose)
+            {
+                std::cout << "  ✗ Failed to bridge components\n";
+            }
+            return false;
+        }
+    }
+    
+    template <typename Real>
     bool BallPivotMeshHoleFiller<Real>::FillAllHolesWithComponentBridging(
         std::vector<Vector3<Real>>& vertices,
         std::vector<std::array<int32_t, 3>>& triangles,
@@ -1672,6 +1805,50 @@ namespace gte
                     std::cout << "\nPost-processing: Removed " << additionalVertices.size() 
                              << " vertices from " << (finalComponentsPreCleanup.size() - DetectConnectedComponents(triangles).size())
                              << " closed components created during hole filling\n";
+                }
+            }
+        }
+        
+        // Step 8: Forced bridging - Try to bridge remaining open components after cleanup
+        auto postCleanupComponents = DetectConnectedComponents(triangles);
+        if (postCleanupComponents.size() > 1 && params.verbose)
+        {
+            std::cout << "\nStep 8: Attempting forced bridging after post-processing cleanup...\n";
+        }
+        
+        if (postCleanupComponents.size() > 1)
+        {
+            // Try forced bridging multiple times if needed
+            bool anyForcedBridges = false;
+            for (int forcedAttempt = 0; forcedAttempt < 10 && postCleanupComponents.size() > 1; ++forcedAttempt)
+            {
+                bool bridged = ForceBridgeRemainingComponents(vertices, triangles, params);
+                if (bridged)
+                {
+                    anyForcedBridges = true;
+                    postCleanupComponents = DetectConnectedComponents(triangles);
+                    anyProgress = true;
+                    
+                    if (postCleanupComponents.size() == 1)
+                    {
+                        if (params.verbose)
+                        {
+                            std::cout << "✓ Forced bridging achieved single component!\n";
+                        }
+                        break;
+                    }
+                }
+                else
+                {
+                    break;  // No more bridges possible
+                }
+            }
+            
+            if (anyForcedBridges && postCleanupComponents.size() > 1)
+            {
+                if (params.verbose)
+                {
+                    std::cout << "Forced bridging reduced components to " << postCleanupComponents.size() << "\n";
                 }
             }
         }
