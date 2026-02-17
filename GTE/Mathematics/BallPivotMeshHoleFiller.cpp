@@ -1858,21 +1858,27 @@ namespace gte
                     continue;  // Keep non-manifold components
                 }
                 
-                // Additional check: only remove if small OR if we have a very large main component
-                // This prevents removing large legitimate closed components
+                // Priority 1 fix: Remove ALL closed manifold components except main
+                // Per problem statement: we want a single manifold, so all closed
+                // components (no matter the size) should be removed.
+                // The sizeThreshold parameter is kept for backwards compatibility
+                // but is no longer used for closed component filtering.
+                // If a closed component is very large (>= main size), we keep it
+                // as it might be the actual main component we want.
                 if (static_cast<int32_t>(info.vertices.size()) > sizeThreshold)
                 {
-                    // Only remove if main component is significantly larger
+                    // Only keep closed components that are >= main component size
                     auto mainInfo = std::find_if(componentInfos.begin(), componentInfos.end(),
                         [mainComponentIndex](ComponentInfo const& ci) { return ci.componentIndex == mainComponentIndex; });
                     
                     if (mainInfo != componentInfos.end())
                     {
-                        // Only remove if this component is < 50% size of main
-                        if (info.vertices.size() >= mainInfo->vertices.size() / 2)
+                        // Keep if this component is >= main size (might be the actual main)
+                        if (info.vertices.size() >= mainInfo->vertices.size())
                         {
-                            continue;  // Keep large components similar in size to main
+                            continue;  // Keep components as large or larger than designated main
                         }
+                        // Otherwise fall through and remove it
                     }
                 }
             }
