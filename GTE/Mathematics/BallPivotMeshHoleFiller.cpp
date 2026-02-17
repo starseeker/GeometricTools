@@ -1443,6 +1443,28 @@ namespace gte
             }
         }
         
+        // Step 7: Post-processing - Remove closed components created during filling
+        if (params.rejectSmallComponents)
+        {
+            auto finalComponentsPreCleanup = DetectConnectedComponents(triangles);
+            if (finalComponentsPreCleanup.size() > 1)
+            {
+                auto finalComponentInfos = AnalyzeComponents(vertices, triangles, finalComponentsPreCleanup);
+                int32_t finalMainComponentIdx = IdentifyMainComponent(finalComponentInfos);
+                
+                // Remove newly-closed small components
+                auto additionalVertices = RemoveSmallClosedComponents(
+                    triangles, finalComponentInfos, finalMainComponentIdx, params.smallComponentThreshold);
+                
+                if (!additionalVertices.empty() && params.verbose)
+                {
+                    std::cout << "\nPost-processing: Removed " << additionalVertices.size() 
+                             << " vertices from " << (finalComponentsPreCleanup.size() - DetectConnectedComponents(triangles).size())
+                             << " closed components created during hole filling\n";
+                }
+            }
+        }
+        
         // Final summary
         if (params.verbose)
         {
@@ -1597,9 +1619,12 @@ namespace gte
                 continue;
             }
             
-            // Check if component is small, closed, AND manifold
+            // Check if component is closed AND manifold
             // Only reject "prematurely manifold" components
-            if (info.isClosed && static_cast<int32_t>(info.vertices.size()) <= sizeThreshold)
+            // NOTE: We now remove ALL closed manifold components except main,
+            // not just those <= sizeThreshold. The sizeThreshold is kept for
+            // backwards compatibility but is effectively bypassed for closed components.
+            if (info.isClosed)
             {
                 // Check if component is manifold (no edges with 3+ triangles)
                 bool isManifold = true;
@@ -1621,10 +1646,28 @@ namespace gte
                 {
                     continue;  // Keep non-manifold components
                 }
+                
+                // Additional check: only remove if small OR if we have a very large main component
+                // This prevents removing large legitimate closed components
+                if (static_cast<int32_t>(info.vertices.size()) > sizeThreshold)
+                {
+                    // Only remove if main component is significantly larger
+                    auto mainInfo = std::find_if(componentInfos.begin(), componentInfos.end(),
+                        [mainComponentIndex](ComponentInfo const& ci) { return ci.componentIndex == mainComponentIndex; });
+                    
+                    if (mainInfo != componentInfos.end())
+                    {
+                        // Only remove if this component is < 50% size of main
+                        if (info.vertices.size() >= mainInfo->vertices.size() / 2)
+                        {
+                            continue;  // Keep large components similar in size to main
+                        }
+                    }
+                }
             }
             else
             {
-                continue;  // Not small or not closed
+                continue;  // Not closed
             }
             
             // This component is small, closed, AND manifold - remove it
