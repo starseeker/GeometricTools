@@ -65,6 +65,7 @@ namespace gte
             bool removeEdgeTrianglesOnFailure;  // Remove edge triangles and retry (default: false, deprecated)
             Real edgeTriangleThreshold;         // Edge ratio threshold for "edge triangle" (default: 0.5)
             bool allowNonManifoldEdges;         // Allow creating non-manifold edges if needed (default: false)
+            bool removeConflictingTriangles;    // Remove conflicting triangles before filling (default: false)
             bool rejectSmallComponents;         // Remove small closed components and incorporate vertices (default: true)
             int32_t smallComponentThreshold;    // Max vertices for "small" component (default: 20)
             bool verbose;                       // Enable diagnostic output (default: false)
@@ -79,6 +80,7 @@ namespace gte
                 , removeEdgeTrianglesOnFailure(false)  // Disabled - validation prevents non-manifold now
                 , edgeTriangleThreshold(static_cast<Real>(0.5))
                 , allowNonManifoldEdges(false)  // Conservative by default
+                , removeConflictingTriangles(false)  // DISABLED by default - tests show it removes more than adds
                 , rejectSmallComponents(true)   // Enabled by default per problem statement
                 , smallComponentThreshold(20)   // Configurable threshold
                 , verbose(false)

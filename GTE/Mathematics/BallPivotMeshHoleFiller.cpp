@@ -144,59 +144,62 @@ namespace gte
             return false;  // Cannot fill a hole with fewer than 3 vertices
         }
         
-        // Step 1: Remove conflicting triangles around hole (per problem statement)
-        auto conflictingTriangles = DetectConflictingTriangles(vertices, triangles, hole);
-        if (!conflictingTriangles.empty())
+        // Step 1: Remove conflicting triangles around hole (if enabled)
+        // NOTE: Tests show this often removes more than it adds - disabled by default
+        if (params.removeConflictingTriangles)
         {
-            if (params.verbose)
-            {
-                std::cout << "      Removing " << conflictingTriangles.size() 
-                          << " conflicting triangles before filling\n";
-            }
-            
-            // Remove conflicting triangles
-            std::vector<std::array<int32_t, 3>> newTriangles;
-            std::set<int32_t> toRemoveSet(conflictingTriangles.begin(), conflictingTriangles.end());
-            
-            for (size_t i = 0; i < triangles.size(); ++i)
-            {
-                if (toRemoveSet.find(static_cast<int32_t>(i)) == toRemoveSet.end())
-                {
-                    newTriangles.push_back(triangles[i]);
-                }
-            }
-            
-            triangles = newTriangles;
-            
-            // Re-detect hole after removal (boundary may have changed)
-            auto newHoles = DetectBoundaryLoops(vertices, triangles);
-            if (newHoles.empty())
+            auto conflictingTriangles = DetectConflictingTriangles(vertices, triangles, hole);
+            if (!conflictingTriangles.empty())
             {
                 if (params.verbose)
                 {
-                    std::cout << "      Warning: No holes after removing conflicting triangles\n";
+                    std::cout << "      Removing " << conflictingTriangles.size() 
+                              << " conflicting triangles before filling\n";
                 }
-                return false;
-            }
-            
-            // Find the hole closest to our original hole
-            BoundaryLoop const* updatedHole = &newHoles[0];
-            
-            for (auto const& nh : newHoles)
-            {
-                // Check if this hole shares vertices with original
-                int sharedVertices = 0;
-                for (int32_t vi : nh.vertexIndices)
+                
+                // Remove conflicting triangles
+                std::vector<std::array<int32_t, 3>> newTriangles;
+                std::set<int32_t> toRemoveSet(conflictingTriangles.begin(), conflictingTriangles.end());
+                
+                for (size_t i = 0; i < triangles.size(); ++i)
                 {
-                    for (int32_t ovi : hole.vertexIndices)
+                    if (toRemoveSet.find(static_cast<int32_t>(i)) == toRemoveSet.end())
                     {
-                        if (vi == ovi)
-                        {
-                            ++sharedVertices;
-                            break;
-                        }
+                        newTriangles.push_back(triangles[i]);
                     }
                 }
+                
+                triangles = newTriangles;
+                
+                // Re-detect hole after removal (boundary may have changed)
+                auto newHoles = DetectBoundaryLoops(vertices, triangles);
+                if (newHoles.empty())
+                {
+                    if (params.verbose)
+                    {
+                        std::cout << "      Warning: No holes after removing conflicting triangles\n";
+                    }
+                    return false;
+                }
+                
+                // Find the hole closest to our original hole
+                BoundaryLoop const* updatedHole = &newHoles[0];
+                
+                for (auto const& nh : newHoles)
+                {
+                    // Check if this hole shares vertices with original
+                    int sharedVertices = 0;
+                    for (int32_t vi : nh.vertexIndices)
+                    {
+                        for (int32_t ovi : hole.vertexIndices)
+                        {
+                            if (vi == ovi)
+                            {
+                                ++sharedVertices;
+                                break;
+                            }
+                        }
+                    }
                 
                 if (sharedVertices > 0)
                 {
@@ -207,9 +210,11 @@ namespace gte
             
             // Continue with updated hole
             return FillHoleInternal(vertices, triangles, *updatedHole, params);
-        }
+            }  // End if (!conflictingTriangles.empty())
+        }  // End if (params.removeConflictingTriangles)
         
-        // Step 2: Fill hole (no conflicts)
+        // Step 2: Fill hole (with or without conflicts, depending on parameter)
+        // If removeConflictingTriangles is disabled, we skip removal and just fill
         return FillHoleInternal(vertices, triangles, hole, params);
     }
     
