@@ -176,4 +176,4 @@ test_comprehensive_manifold_analysis: $(TEST_DIR)/test_comprehensive_manifold_an
 
 # UV unwrapping assessment test
 test_uv_unwrapping_assessment: $(TEST_DIR)/test_uv_unwrapping_assessment.cpp GTE/Mathematics/BallPivotMeshHoleFiller.h GTE/Mathematics/BallPivotMeshHoleFiller.cpp GTE/Mathematics/LSCMParameterization.h GTE/Mathematics/Co3Ne.h
-$(CXX) $(CXXFLAGS) -o test_uv_unwrapping_assessment $(TEST_DIR)/test_uv_unwrapping_assessment.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp GTE/Mathematics/BallPivotReconstruction.cpp $(LDFLAGS)
+	$(CXX) $(CXXFLAGS) -o test_uv_unwrapping_assessment $(TEST_DIR)/test_uv_unwrapping_assessment.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp GTE/Mathematics/BallPivotReconstruction.cpp $(LDFLAGS)
