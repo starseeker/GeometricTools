@@ -181,6 +181,7 @@ namespace gte
             
             // Find the hole closest to our original hole
             BoundaryLoop const* updatedHole = &newHoles[0];
+            Real minDist = std::numeric_limits<Real>::max();
             
             for (auto const& nh : newHoles)
             {
@@ -228,72 +229,25 @@ namespace gte
             return true;
         }
         
-        // Per problem statement: Escalating hole filling strategy
-        // 1. Try GTE Hole Filling first (if no Steiner points available)
-        // 2. If Steiner points exist or GTE fails:
-        //    - Try planar projection + detria (if not self-intersecting)
-        //    - Try UV unwrapping + detria (if self-intersecting)
-        
-        // Check if we have any incorporated vertices (Steiner points) near this hole
-        std::vector<int32_t> nearbySteiners;
-        // For now, we don't have Steiner points in this context, so skip to GTE hole filling
-        
-        // Step 1: Try GTE Hole Filling (simple ear clipping approach) if no Steiner points
-        if (nearbySteiners.empty())
-        {
-            if (params.verbose)
-            {
-                std::cout << "      Trying GTE hole filling (ear clipping)...\n";
-            }
-            
-            // Use simple ear clipping with validation
-            bool earClipSuccess = FillHoleWithRadius(vertices, triangles, hole, 
-                                                      hole.avgEdgeLength, params);
-            if (earClipSuccess)
-            {
-                if (params.verbose)
-                {
-                    std::cout << "      SUCCESS: GTE hole filling worked\n";
-                }
-                return true;
-            }
-            
-            if (params.verbose)
-            {
-                std::cout << "      GTE hole filling failed, trying advanced methods...\n";
-            }
-        }
-        
-        // Step 2: Try planar projection + detria (check for self-intersection first)
+        // Per problem statement: "use detria triangulation more"
+        // Try detria FIRST (without Steiner points), fallback to ear clipping
         if (params.verbose)
         {
-            std::cout << "      Trying planar projection + detria...\n";
+            std::cout << "      Trying detria triangulation (without Steiner points)...\n";
         }
         
-        std::vector<int32_t> emptySteiners;  // No Steiner points for this attempt
+        std::vector<int32_t> emptySteiners;  // No Steiner points for now
         bool detriaSuccess = FillHoleWithSteinerPoints(vertices, triangles, hole, emptySteiners, params);
         
         if (detriaSuccess)
         {
-            if (params.verbose)
-            {
-                std::cout << "      SUCCESS: Planar projection + detria worked\n";
-            }
             return true;
         }
         
+        // Fallback: Try ball pivot with progressive radii
         if (params.verbose)
         {
-            std::cout << "      Planar projection + detria failed (self-intersection or other issue)\n";
-        }
-        
-        // Step 3: The FillHoleWithSteinerPoints method already tries UV unwrapping
-        // when self-intersection is detected, so if we got here, all methods failed
-        
-        // Final fallback: Try ball pivot with progressive radii
-        if (params.verbose)
-        {
-            std::cout << "      Final fallback: trying ball pivot with progressive radii...\n";
+            std::cout << "      Detria failed, trying ball pivot with progressive radii...\n";
         }
         
         // Determine base radius from hole edge lengths
@@ -1968,9 +1922,10 @@ namespace gte
             return false;  // Can't triangulate
         }
         
-        // Per problem statement: Check for self-intersection and use appropriate method
-        // - If no Steiner points: Just try planar projection
-        // - If planar projection has self-intersection: Use UV unwrapping (LSCM)
+        if (steinerVertexIndices.empty())
+        {
+            return false;  // No Steiner points to use
+        }
         
         // Try two approaches: planar projection first, UV unwrapping if that fails
         bool useLSCM = false;
@@ -2088,13 +2043,11 @@ namespace gte
         }
         
         // If overlaps detected, try UV unwrapping (LSCM)
-        // Per problem statement: "if the curve is self intersecting" use UV unwrapping
         if (hasOverlaps && hole.vertexIndices.size() > 3)
         {
             if (params.verbose)
             {
-                std::cout << "      SELF-INTERSECTION detected in planar projection!\n";
-                std::cout << "      Trying UV unwrapping (LSCM) per problem statement...\n";
+                std::cout << "      Detected overlaps in planar projection, trying UV unwrapping (LSCM)...\n";
             }
             
             // Use LSCM for UV unwrapping
@@ -2465,6 +2418,7 @@ namespace gte
         
         // Check each triangle for conflicts
         std::set<int32_t> holeVertexSet(hole.vertexIndices.begin(), hole.vertexIndices.end());
+        Real searchRadius = hole.avgEdgeLength * static_cast<Real>(3.0);
         
         for (size_t i = 0; i < triangles.size(); ++i)
         {
@@ -2480,29 +2434,18 @@ namespace gte
                 }
             }
             
-            // Per problem statement: Be MORE CONSERVATIVE about triangle removal
             // Triangle is conflicting if:
-            // 1. It has EXACTLY 2 vertices on boundary (forms an edge triangle)
-            // 2. Its centroid is VERY near the hole (within 1x avg edge length, not 3x)
-            // 3. Its normal STRONGLY conflicts with hole normal (opposite direction)
-            // 
-            // Changed from: boundaryVertices > 0 && boundaryVertices < 3
-            // To: boundaryVertices == 2 (more conservative)
-            // Changed from: searchRadius = 3.0 * avgEdgeLength
-            // To: searchRadius = 1.0 * avgEdgeLength (more conservative)
-            // Changed from: dot < 0.5 (< 60 degrees)
-            // To: dot < 0.0 (opposite direction, more conservative)
+            // 1. It has 1-2 vertices on boundary (not 0 or 3)
+            // 2. Its centroid is near the hole
+            // 3. Its normal conflicts with hole normal
             
-            if (boundaryVertices == 2)  // ONLY edge triangles with 2 boundary vertices
+            if (boundaryVertices > 0 && boundaryVertices < 3)
             {
                 Vector3<Real> triCentroid = (vertices[tri[0]] + vertices[tri[1]] + vertices[tri[2]]) 
                                            / static_cast<Real>(3.0);
                 Real dist = Length(triCentroid - holeCentroid);
                 
-                // Much more conservative distance check (1x instead of 3x)
-                Real conservativeSearchRadius = hole.avgEdgeLength * static_cast<Real>(1.0);
-                
-                if (dist < conservativeSearchRadius)
+                if (dist < searchRadius)
                 {
                     // Check normal conflict
                     Vector3<Real> triNormal = Cross(
@@ -2515,9 +2458,8 @@ namespace gte
                         triNormal = triNormal / triNormalLen;
                         Real dot = Dot(triNormal, holeNormal);
                         
-                        // Only conflicting if normals are opposite (< 0 degrees = cos 0.0)
-                        // Much more conservative than before (was < 0.5 = 60 degrees)
-                        if (dot < static_cast<Real>(0.0))
+                        // Conflicting if normals are very different (< 30 degrees = cos 0.866)
+                        if (dot < static_cast<Real>(0.5))
                         {
                             conflicting.push_back(static_cast<int32_t>(i));
                         }
