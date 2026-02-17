@@ -136,6 +136,14 @@ namespace gte
             std::vector<std::array<int32_t, 3>> const& triangles,
             EdgeMetric metric);
         
+        // Fill a hole with Steiner points using detria triangulation  
+        static bool FillHoleWithSteinerPoints(
+            std::vector<Vector3<Real>>& vertices,
+            std::vector<std::array<int32_t, 3>>& triangles,
+            BoundaryLoop const& hole,
+            std::vector<int32_t> const& steinerVertexIndices,
+            Parameters const& params);
+        
     private:
         // Edge structure for topology tracking
         struct Edge

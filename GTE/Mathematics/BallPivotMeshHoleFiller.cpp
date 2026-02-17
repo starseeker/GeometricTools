@@ -3,11 +3,12 @@
 // Distributed under the Boost Software License, Version 1.0.
 // https://www.boost.org/LICENSE_1_0.txt
 // https://www.geometrictools.com/License/Boost/LICENSE_1_0.txt
-// File Version: 8.0.2026.02.13
+// File Version: 8.0.2026.02.17
 //
 // Implementation of BallPivotMeshHoleFiller
 
 #include <GTE/Mathematics/BallPivotMeshHoleFiller.h>
+#include <detria.hpp>
 #include <iostream>
 #include <queue>
 #include <unordered_map>
@@ -1074,13 +1075,45 @@ namespace gte
                 
                 if (params.verbose)
                 {
-                    std::cout << "\nStep 0: Small Component Rejection\n";
+                    std::cout << "\nStep 0: Small Component Rejection (Manifold Components Only)\n";
                     std::cout << "  Found " << components.size() << " components\n";
                     std::cout << "  Main component: " << mainComponentIdx 
                               << " (" << componentInfos[mainComponentIdx].vertices.size() << " vertices)\n";
+                    
+                    // Show manifold status of components
+                    std::map<std::pair<int32_t, int32_t>, int32_t> edgeCount;
+                    for (auto const& tri : triangles)
+                    {
+                        for (int i = 0; i < 3; ++i)
+                        {
+                            int32_t v0 = tri[i];
+                            int32_t v1 = tri[(i + 1) % 3];
+                            auto edge = std::make_pair(std::min(v0, v1), std::max(v0, v1));
+                            edgeCount[edge]++;
+                        }
+                    }
+                    
+                    for (auto const& info : componentInfos)
+                    {
+                        int32_t nonManifoldEdges = 0;
+                        for (auto const& ec : edgeCount)
+                        {
+                            if (ec.second >= 3 && info.vertices.count(ec.first.first) && info.vertices.count(ec.first.second))
+                            {
+                                nonManifoldEdges++;
+                            }
+                        }
+                        
+                        std::cout << "    Component " << info.componentIndex << ": " 
+                                  << info.vertices.size() << " vertices, "
+                                  << (info.isClosed ? "CLOSED" : "OPEN") << ", "
+                                  << (nonManifoldEdges == 0 ? "MANIFOLD" : "NON-MANIFOLD")
+                                  << (nonManifoldEdges > 0 ? " (" + std::to_string(nonManifoldEdges) + " edges)" : "")
+                                  << "\n";
+                    }
                 }
                 
-                // Remove small closed components
+                // Remove small manifold closed components
                 incorporatedVertices = RemoveSmallClosedComponents(
                     triangles, componentInfos, mainComponentIdx, params.smallComponentThreshold);
                 
@@ -1088,7 +1121,7 @@ namespace gte
                 {
                     if (params.verbose)
                     {
-                        std::cout << "  Removed small closed components\n";
+                        std::cout << "  Removed small MANIFOLD closed components\n";
                         std::cout << "  Triangles removed: " << (initialTriangleCount - triangles.size()) << "\n";
                         std::cout << "  Vertices available for incorporation: " << incorporatedVertices.size() << "\n";
                     }
@@ -1100,6 +1133,10 @@ namespace gte
                     {
                         std::cout << "  Components after removal: " << components.size() << "\n";
                     }
+                }
+                else if (params.verbose)
+                {
+                    std::cout << "  No small manifold components to remove\n";
                 }
             }
         }
@@ -1162,7 +1199,7 @@ namespace gte
             {
                 bool filled = FillHole(vertices, triangles, hole, params);
                 
-                // If hole failed and we have incorporated vertices, try using them
+                // If hole failed and we have incorporated vertices, try using them with detria
                 if (!filled && !incorporatedVertices.empty())
                 {
                     // Find incorporated vertices near this hole
@@ -1183,20 +1220,21 @@ namespace gte
                         Real dist = Length(vertices[vi] - holeCentroid);
                         if (dist < searchRadius)
                         {
-                            // Check normal compatibility
-                            // For now, we don't have vertex normals, so we skip this check
-                            // In a full implementation, this would use IsVertexNormalCompatible()
                             nearbyVertices.push_back(vi);
                         }
                     }
                     
-                    if (!nearbyVertices.empty() && params.verbose)
+                    if (!nearbyVertices.empty())
                     {
-                        std::cout << "      Found " << nearbyVertices.size() 
-                                  << " nearby incorporated vertices for hole (feature not fully implemented)\n";
+                        if (params.verbose)
+                        {
+                            std::cout << "      Trying detria with " << nearbyVertices.size() 
+                                      << " Steiner points...\n";
+                        }
+                        
+                        // Try triangulation with Steiner points using detria
+                        filled = FillHoleWithSteinerPoints(vertices, triangles, hole, nearbyVertices, params);
                     }
-                    // TODO: Use nearbyVertices in triangulation
-                    // This requires implementing Constrained Delaunay or similar
                 }
                 
                 if (filled)
@@ -1538,6 +1576,19 @@ namespace gte
         std::set<int32_t> removedVertices;
         std::vector<int32_t> trianglesToRemove;
         
+        // Build edge topology to check for non-manifold edges
+        std::map<std::pair<int32_t, int32_t>, int32_t> edgeCount;
+        for (auto const& tri : triangles)
+        {
+            for (int i = 0; i < 3; ++i)
+            {
+                int32_t v0 = tri[i];
+                int32_t v1 = tri[(i + 1) % 3];
+                auto edge = std::make_pair(std::min(v0, v1), std::max(v0, v1));
+                edgeCount[edge]++;
+            }
+        }
+        
         for (auto const& info : componentInfos)
         {
             // Skip main component
@@ -1546,8 +1597,37 @@ namespace gte
                 continue;
             }
             
-            // Check if component is small and closed
+            // Check if component is small, closed, AND manifold
+            // Only reject "prematurely manifold" components
             if (info.isClosed && static_cast<int32_t>(info.vertices.size()) <= sizeThreshold)
+            {
+                // Check if component is manifold (no edges with 3+ triangles)
+                bool isManifold = true;
+                for (auto const& ec : edgeCount)
+                {
+                    if (ec.second >= 3)  // Non-manifold edge
+                    {
+                        // Check if this edge belongs to this component
+                        if (info.vertices.count(ec.first.first) && info.vertices.count(ec.first.second))
+                        {
+                            isManifold = false;
+                            break;
+                        }
+                    }
+                }
+                
+                // Only remove if manifold (prematurely manifold component)
+                if (!isManifold)
+                {
+                    continue;  // Keep non-manifold components
+                }
+            }
+            else
+            {
+                continue;  // Not small or not closed
+            }
+            
+            // This component is small, closed, AND manifold - remove it
             {
                 // Mark triangles for removal
                 for (int32_t triIdx : info.triangleIndices)
@@ -1624,6 +1704,169 @@ namespace gte
         // Check if vertex normal aligns with hole normal
         Real dot = Dot(vertexNormal, avgNormal);
         return dot >= normalThreshold;
+    }
+    
+    template <typename Real>
+    bool BallPivotMeshHoleFiller<Real>::FillHoleWithSteinerPoints(
+        std::vector<Vector3<Real>>& vertices,
+        std::vector<std::array<int32_t, 3>>& triangles,
+        BoundaryLoop const& hole,
+        std::vector<int32_t> const& steinerVertexIndices,
+        Parameters const& params)
+    {
+        if (hole.vertexIndices.size() < 3)
+        {
+            return false;  // Can't triangulate
+        }
+        
+        if (steinerVertexIndices.empty())
+        {
+            return false;  // No Steiner points to use
+        }
+        
+        // Step 1: Compute best-fit plane for the hole
+        Vector3<Real> centroid{static_cast<Real>(0), static_cast<Real>(0), static_cast<Real>(0)};
+        for (int32_t vi : hole.vertexIndices)
+        {
+            centroid = centroid + vertices[vi];
+        }
+        centroid = centroid / static_cast<Real>(hole.vertexIndices.size());
+        
+        // Compute average normal from consecutive edge cross products
+        Vector3<Real> avgNormal{static_cast<Real>(0), static_cast<Real>(0), static_cast<Real>(0)};
+        for (size_t i = 0; i < hole.vertexIndices.size(); ++i)
+        {
+            int32_t v0 = hole.vertexIndices[i];
+            int32_t v1 = hole.vertexIndices[(i + 1) % hole.vertexIndices.size()];
+            int32_t v2 = hole.vertexIndices[(i + 2) % hole.vertexIndices.size()];
+            
+            Vector3<Real> edge1 = vertices[v1] - vertices[v0];
+            Vector3<Real> edge2 = vertices[v2] - vertices[v1];
+            Vector3<Real> normal = Cross(edge1, edge2);
+            
+            Real len = Length(normal);
+            if (len > static_cast<Real>(1e-10))
+            {
+                avgNormal = avgNormal + (normal / len);
+            }
+        }
+        
+        Real avgNormalLen = Length(avgNormal);
+        if (avgNormalLen < static_cast<Real>(1e-10))
+        {
+            return false;  // Degenerate hole
+        }
+        
+        avgNormal = avgNormal / avgNormalLen;
+        
+        // Step 2: Create local 2D coordinate system
+        // Use avgNormal as Z, compute perpendicular X and Y
+        Vector3<Real> zAxis = avgNormal;
+        Vector3<Real> xAxis, yAxis;
+        
+        // Find a vector not parallel to zAxis
+        Vector3<Real> arbitrary{static_cast<Real>(1), static_cast<Real>(0), static_cast<Real>(0)};
+        if (std::abs(Dot(arbitrary, zAxis)) > static_cast<Real>(0.9))
+        {
+            arbitrary = Vector3<Real>{static_cast<Real>(0), static_cast<Real>(1), static_cast<Real>(0)};
+        }
+        
+        xAxis = Cross(arbitrary, zAxis);
+        Real xLen = Length(xAxis);
+        if (xLen < static_cast<Real>(1e-10))
+        {
+            return false;
+        }
+        xAxis = xAxis / xLen;
+        
+        yAxis = Cross(zAxis, xAxis);
+        Real yLen = Length(yAxis);
+        if (yLen < static_cast<Real>(1e-10))
+        {
+            return false;
+        }
+        yAxis = yAxis / yLen;
+        
+        // Step 3: Project all points to 2D
+        std::vector<detria::PointD> points2D;
+        std::vector<int32_t> indexMap;  // Maps 2D index -> 3D vertex index
+        
+        // Add boundary vertices
+        for (int32_t vi : hole.vertexIndices)
+        {
+            Vector3<Real> p = vertices[vi] - centroid;
+            double x = static_cast<double>(Dot(p, xAxis));
+            double y = static_cast<double>(Dot(p, yAxis));
+            points2D.push_back({x, y});
+            indexMap.push_back(vi);
+        }
+        
+        // Add Steiner vertices
+        for (int32_t vi : steinerVertexIndices)
+        {
+            Vector3<Real> p = vertices[vi] - centroid;
+            double x = static_cast<double>(Dot(p, xAxis));
+            double y = static_cast<double>(Dot(p, yAxis));
+            points2D.push_back({x, y});
+            indexMap.push_back(vi);
+        }
+        
+        // Step 4: Set up detria triangulation
+        detria::Triangulation tri;
+        tri.setPoints(points2D);
+        
+        // Add boundary as outline (constrained edges)
+        std::vector<uint32_t> outline;
+        for (size_t i = 0; i < hole.vertexIndices.size(); ++i)
+        {
+            outline.push_back(static_cast<uint32_t>(i));
+        }
+        tri.addOutline(outline);
+        
+        // Step 5: Triangulate (Delaunay with constraints)
+        bool success = tri.triangulate(true);
+        if (!success)
+        {
+            if (params.verbose)
+            {
+                std::cout << "      Detria triangulation failed\n";
+            }
+            return false;
+        }
+        
+        // Step 6: Extract triangles and add to mesh
+        size_t trianglesAdded = 0;
+        bool cwTriangles = true;  // Clock-wise
+        
+        tri.forEachTriangle([&](detria::Triangle<uint32_t> triangle)
+        {
+            // Map 2D indices back to 3D vertex indices
+            int32_t v0 = indexMap[triangle.x];
+            int32_t v1 = indexMap[triangle.y];
+            int32_t v2 = indexMap[triangle.z];
+            
+            // Check triangle orientation matches hole normal
+            Vector3<Real> edge1 = vertices[v1] - vertices[v0];
+            Vector3<Real> edge2 = vertices[v2] - vertices[v0];
+            Vector3<Real> triNormal = Cross(edge1, edge2);
+            
+            // Flip if necessary to match hole normal
+            if (Dot(triNormal, avgNormal) < static_cast<Real>(0))
+            {
+                std::swap(v1, v2);
+            }
+            
+            triangles.push_back({v0, v1, v2});
+            trianglesAdded++;
+        }, cwTriangles);
+        
+        if (params.verbose)
+        {
+            std::cout << "      Detria added " << trianglesAdded << " triangles with " 
+                      << steinerVertexIndices.size() << " Steiner points\n";
+        }
+        
+        return trianglesAdded > 0;
     }
     
     // Explicit instantiations
