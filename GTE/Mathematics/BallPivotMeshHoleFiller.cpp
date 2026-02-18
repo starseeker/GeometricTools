@@ -1756,6 +1756,20 @@ namespace gte
                 // Boundaries will be detected again in Step 1
             }
             
+            // Step 0.8: Fix self-intersecting boundaries by expansion
+            // This handles cases where same vertex appears multiple times in boundary loop
+            bool boundaryExpanded = FixSelfIntersectingBoundary(vertices, triangles, params);
+            if (boundaryExpanded)
+            {
+                progressThisIteration = true;
+                anyProgress = true;
+                
+                if (params.verbose)
+                {
+                    std::cout << "  Boundaries expanded, will be reconstructed in Step 1\n";
+                }
+            }
+            
             // Step 1: Fill regular holes within components
             auto holes = DetectBoundaryLoops(vertices, triangles);
             
@@ -4024,6 +4038,215 @@ namespace gte
         }
         
         return trianglesModified;
+    }
+    
+    // ===== Boundary Expansion for Self-Intersecting Loops =====
+    
+    // Detect if boundary loop has same vertex appearing multiple times
+    template <typename Real>
+    typename BallPivotMeshHoleFiller<Real>::SelfIntersectionInfo 
+    BallPivotMeshHoleFiller<Real>::DetectSelfIntersectingBoundary(
+        std::vector<int32_t> const& boundaryLoop,
+        Parameters const& params)
+    {
+        SelfIntersectionInfo info;
+        info.found = false;
+        
+        if (boundaryLoop.size() < 3)
+        {
+            return info;
+        }
+        
+        // Check for duplicate vertices in the loop
+        for (size_t i = 0; i < boundaryLoop.size(); ++i)
+        {
+            for (size_t j = i + 1; j < boundaryLoop.size(); ++j)
+            {
+                if (boundaryLoop[i] == boundaryLoop[j])
+                {
+                    info.duplicateVertex = boundaryLoop[i];
+                    info.firstPosition = i;
+                    info.secondPosition = j;
+                    info.found = true;
+                    
+                    if (params.verbose)
+                    {
+                        std::cout << "  [Self-Intersection Detected]\n";
+                        std::cout << "    Vertex " << info.duplicateVertex 
+                                  << " appears at positions " << i 
+                                  << " and " << j << "\n";
+                    }
+                    
+                    return info;
+                }
+            }
+        }
+        
+        return info;
+    }
+    
+    // Find triangles that need to be removed to expand boundary
+    template <typename Real>
+    std::vector<int32_t> BallPivotMeshHoleFiller<Real>::FindTrianglesToRemove(
+        std::vector<Vector3<Real>> const& vertices,
+        std::vector<std::array<int32_t, 3>> const& triangles,
+        std::vector<int32_t> const& boundaryLoop,
+        SelfIntersectionInfo const& info,
+        Parameters const& params)
+    {
+        std::vector<int32_t> trianglesToRemove;
+        
+        if (!info.found)
+        {
+            return trianglesToRemove;
+        }
+        
+        int32_t dupVertex = info.duplicateVertex;
+        
+        // Find all triangles that contain the duplicate vertex
+        for (size_t t = 0; t < triangles.size(); ++t)
+        {
+            auto const& tri = triangles[t];
+            bool containsDup = (tri[0] == dupVertex || 
+                               tri[1] == dupVertex || 
+                               tri[2] == dupVertex);
+            
+            if (containsDup)
+            {
+                // Check if this triangle has at least one edge on the boundary
+                // by checking if two of its vertices are in the boundary loop
+                int boundaryVertCount = 0;
+                for (int i = 0; i < 3; ++i)
+                {
+                    for (auto bv : boundaryLoop)
+                    {
+                        if (tri[i] == bv)
+                        {
+                            boundaryVertCount++;
+                            break;
+                        }
+                    }
+                }
+                
+                // If triangle has 2 or 3 vertices on boundary, it's adjacent to boundary
+                if (boundaryVertCount >= 2)
+                {
+                    trianglesToRemove.push_back(static_cast<int32_t>(t));
+                    
+                    if (params.verbose)
+                    {
+                        std::cout << "    Triangle " << t 
+                                  << " [" << tri[0] << "," << tri[1] << "," << tri[2] 
+                                  << "] marked for removal\n";
+                    }
+                }
+            }
+        }
+        
+        if (params.verbose && trianglesToRemove.empty())
+        {
+            std::cout << "    WARNING: No triangles found to remove\n";
+        }
+        
+        return trianglesToRemove;
+    }
+    
+    // Expand boundary by removing triangles
+    template <typename Real>
+    bool BallPivotMeshHoleFiller<Real>::ExpandBoundaryByRemovingTriangles(
+        std::vector<std::array<int32_t, 3>>& triangles,
+        std::vector<int32_t> const& trianglesToRemove,
+        Parameters const& params)
+    {
+        if (trianglesToRemove.empty())
+        {
+            return false;
+        }
+        
+        // Remove triangles in reverse order to maintain indices
+        std::vector<int32_t> sorted = trianglesToRemove;
+        std::sort(sorted.begin(), sorted.end(), std::greater<int32_t>());
+        
+        for (auto idx : sorted)
+        {
+            if (idx >= 0 && idx < static_cast<int32_t>(triangles.size()))
+            {
+                triangles.erase(triangles.begin() + idx);
+            }
+        }
+        
+        if (params.verbose)
+        {
+            std::cout << "    Removed " << trianglesToRemove.size() 
+                      << " triangles to expand boundary\n";
+        }
+        
+        return true;
+    }
+    
+    // Fix self-intersecting boundary by expansion
+    template <typename Real>
+    bool BallPivotMeshHoleFiller<Real>::FixSelfIntersectingBoundary(
+        std::vector<Vector3<Real>>& vertices,
+        std::vector<std::array<int32_t, 3>>& triangles,
+        Parameters const& params)
+    {
+        if (params.verbose)
+        {
+            std::cout << "\n[Boundary Expansion for Self-Intersection]\n";
+        }
+        
+        // Find all boundary loops
+        auto boundaryLoops = FindBoundaryLoops(vertices, triangles);
+        
+        bool anyFixed = false;
+        int32_t originalTriangleCount = static_cast<int32_t>(triangles.size());
+        
+        for (auto const& loop : boundaryLoops)
+        {
+            // Check if this loop is self-intersecting
+            auto info = DetectSelfIntersectingBoundary(loop, params);
+            
+            if (info.found)
+            {
+                if (params.verbose)
+                {
+                    std::cout << "  Processing self-intersecting loop with " 
+                              << loop.size() << " edges\n";
+                }
+                
+                // Find triangles to remove
+                auto trianglesToRemove = FindTrianglesToRemove(
+                    vertices, triangles, loop, info, params);
+                
+                // Remove triangles to expand boundary
+                if (!trianglesToRemove.empty())
+                {
+                    bool success = ExpandBoundaryByRemovingTriangles(
+                        triangles, trianglesToRemove, params);
+                    
+                    if (success)
+                    {
+                        anyFixed = true;
+                        
+                        if (params.verbose)
+                        {
+                            std::cout << "  ✓ Boundary expanded successfully\n";
+                        }
+                    }
+                }
+            }
+        }
+        
+        if (anyFixed && params.verbose)
+        {
+            int32_t newTriangleCount = static_cast<int32_t>(triangles.size());
+            std::cout << "  Triangle count: " << originalTriangleCount 
+                      << " → " << newTriangleCount << "\n";
+            std::cout << "  Boundary will be reconstructed and expanded\n";
+        }
+        
+        return anyFixed;
     }
 
     // Explicit instantiations

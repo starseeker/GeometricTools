@@ -436,6 +436,40 @@ namespace gte
             std::vector<detria::PointD> const& points2D,
             std::vector<std::array<uint32_t, 2>> const& edges,
             Parameters const& params);
+        
+        // Boundary Expansion for Self-Intersecting Loops
+        
+        struct SelfIntersectionInfo {
+            int32_t duplicateVertex = -1;
+            size_t firstPosition = 0;
+            size_t secondPosition = 0;
+            bool found = false;
+        };
+        
+        // Detect if boundary loop has same vertex appearing multiple times
+        static SelfIntersectionInfo DetectSelfIntersectingBoundary(
+            std::vector<int32_t> const& boundaryLoop,
+            Parameters const& params);
+        
+        // Find triangles that need to be removed to expand boundary
+        static std::vector<int32_t> FindTrianglesToRemove(
+            std::vector<Vector3<Real>> const& vertices,
+            std::vector<std::array<int32_t, 3>> const& triangles,
+            std::vector<int32_t> const& boundaryLoop,
+            SelfIntersectionInfo const& info,
+            Parameters const& params);
+        
+        // Expand boundary by removing triangles
+        static bool ExpandBoundaryByRemovingTriangles(
+            std::vector<std::array<int32_t, 3>>& triangles,
+            std::vector<int32_t> const& trianglesToRemove,
+            Parameters const& params);
+        
+        // Fix self-intersecting boundary by expansion
+        static bool FixSelfIntersectingBoundary(
+            std::vector<Vector3<Real>>& vertices,
+            std::vector<std::array<int32_t, 3>>& triangles,
+            Parameters const& params);
     };
 }
 
