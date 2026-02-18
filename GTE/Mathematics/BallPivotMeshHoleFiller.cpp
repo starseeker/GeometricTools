@@ -2562,7 +2562,93 @@ namespace gte
             {
                 std::cout << "      Detria triangulation failed\n";
             }
-            return false;
+            
+            // Per problem statement: Try UV unwrapping (LSCM) as fallback when detria fails
+            // This is specifically for otherwise unfillable holes
+            if (!useLSCM && hole.vertexIndices.size() > 3)
+            {
+                if (params.verbose)
+                {
+                    std::cout << "      Attempting UV unwrapping (LSCM) as fallback per problem statement...\n";
+                }
+                
+                // Use LSCM for UV unwrapping
+                std::vector<Vector2<Real>> uvCoords;
+                bool lscmSuccess = LSCMParameterization<Real>::Parameterize(
+                    vertices, hole.vertexIndices, steinerVertexIndices,
+                    {}, // No triangles for boundary-only case
+                    uvCoords, params.verbose);
+                
+                if (lscmSuccess)
+                {
+                    // Replace 2D points with UV coordinates
+                    points2D.clear();
+                    indexMap.clear();
+                    
+                    // Scale UV coordinates to reasonable range for detria
+                    Real scale = hole.avgEdgeLength * static_cast<Real>(10);
+                    
+                    for (int32_t vi : hole.vertexIndices)
+                    {
+                        if (uvCoords[vi][0] >= static_cast<Real>(0))
+                        {
+                            points2D.push_back({
+                                static_cast<double>(uvCoords[vi][0] * scale),
+                                static_cast<double>(uvCoords[vi][1] * scale)
+                            });
+                            indexMap.push_back(vi);
+                        }
+                    }
+                    
+                    for (int32_t vi : steinerVertexIndices)
+                    {
+                        if (uvCoords[vi][0] >= static_cast<Real>(0))
+                        {
+                            points2D.push_back({
+                                static_cast<double>(uvCoords[vi][0] * scale),
+                                static_cast<double>(uvCoords[vi][1] * scale)
+                            });
+                            indexMap.push_back(vi);
+                        }
+                    }
+                    
+                    if (params.verbose)
+                    {
+                        std::cout << "      LSCM parameterization successful, retrying detria with UV coordinates...\n";
+                    }
+                    
+                    // Retry detria with UV coordinates
+                    detria::Triangulation uvTri;
+                    uvTri.setPoints(points2D);
+                    uvTri.addOutline(outline);
+                    success = uvTri.triangulate(true);
+                    
+                    if (success)
+                    {
+                        // Use the UV triangulation
+                        tri = uvTri;
+                        useLSCM = true;
+                        
+                        if (params.verbose)
+                        {
+                            std::cout << "      ✓ SUCCESS with UV unwrapping + detria!\n";
+                        }
+                    }
+                    else if (params.verbose)
+                    {
+                        std::cout << "      Detria still failed even with UV coordinates\n";
+                    }
+                }
+                else if (params.verbose)
+                {
+                    std::cout << "      LSCM parameterization failed\n";
+                }
+            }
+            
+            if (!success)
+            {
+                return false;
+            }
         }
         
         // Step 6: Extract triangles and add to mesh
