@@ -184,6 +184,31 @@ namespace gte
             DegeneracyInfo const& degeneracy,
             Parameters const& params);
         
+        // Duplicate vertex detection and merging structures
+        struct DuplicateVertexPair
+        {
+            int32_t keepIndex;      // Index to keep (lower index)
+            int32_t removeIndex;    // Index to merge/remove (higher index)
+            Real distance;          // Distance between duplicates
+            
+            DuplicateVertexPair(int32_t keep, int32_t remove, Real dist)
+                : keepIndex(keep), removeIndex(remove), distance(dist)
+            {}
+        };
+        
+        // Detect duplicate vertices in a boundary loop
+        static std::vector<DuplicateVertexPair> DetectDuplicateVerticesInBoundary(
+            std::vector<Vector3<Real>> const& vertices,
+            std::vector<int32_t> const& boundaryIndices,
+            Real threshold,
+            Parameters const& params);
+        
+        // Merge duplicate vertices in the mesh by updating triangle indices
+        static int32_t MergeDuplicateVerticesInMesh(
+            std::vector<std::array<int32_t, 3>>& triangles,
+            std::vector<DuplicateVertexPair> const& duplicates,
+            Parameters const& params);
+        
     private:
         // Edge structure for topology tracking
         struct Edge

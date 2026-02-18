@@ -1710,6 +1710,52 @@ namespace gte
                 std::cout << "Base edge length: " << baseEdgeLength << "\n";
             }
             
+            // Step 0.75: Duplicate vertex detection and merging
+            // This must be done BEFORE hole filling to fix invalid boundaries
+            auto currentBoundaryLoops = DetectBoundaryLoops(vertices, triangles);
+            bool hasDuplicates = false;
+            
+            for (auto const& loop : currentBoundaryLoops)
+            {
+                Real threshold = static_cast<Real>(1e-6);  // Epsilon for duplicate detection
+                auto duplicates = DetectDuplicateVerticesInBoundary(
+                    vertices, loop.vertexIndices, threshold, params);
+                
+                if (!duplicates.empty())
+                {
+                    hasDuplicates = true;
+                    
+                    if (params.verbose)
+                    {
+                        std::cout << "\n[Duplicate Vertex Detection]\n";
+                        std::cout << "  Found " << duplicates.size() 
+                                  << " duplicate vertex pair(s) in boundary loop\n";
+                    }
+                    
+                    // Merge duplicates in mesh (updates all triangle references)
+                    int32_t modified = MergeDuplicateVerticesInMesh(triangles, duplicates, params);
+                    
+                    if (params.verbose)
+                    {
+                        std::cout << "  Updated " << modified << " triangle references\n";
+                        std::cout << "  Boundary will be automatically reconstructed\n";
+                    }
+                    
+                    progressThisIteration = true;
+                    anyProgress = true;
+                }
+            }
+            
+            // If we merged duplicates, reconstruct boundary loops
+            if (hasDuplicates)
+            {
+                if (params.verbose)
+                {
+                    std::cout << "  Reconstructing boundaries after merge...\n";
+                }
+                // Boundaries will be detected again in Step 1
+            }
+            
             // Step 1: Fill regular holes within components
             auto holes = DetectBoundaryLoops(vertices, triangles);
             
@@ -3850,6 +3896,134 @@ namespace gte
             file.close();
             std::cout << "  Data saved to /tmp/detria_failure_data.txt\n";
         }
+    }
+    
+    // Detect duplicate vertices in boundary loop
+    template <typename Real>
+    std::vector<typename BallPivotMeshHoleFiller<Real>::DuplicateVertexPair>
+    BallPivotMeshHoleFiller<Real>::DetectDuplicateVerticesInBoundary(
+        std::vector<Vector3<Real>> const& vertices,
+        std::vector<int32_t> const& boundaryIndices,
+        Real threshold,
+        Parameters const& params)
+    {
+        std::vector<DuplicateVertexPair> duplicates;
+        std::set<int32_t> processedVertices;  // Track which vertices we've already found duplicates for
+        
+        // Compare all pairs of boundary vertices
+        for (size_t i = 0; i < boundaryIndices.size(); ++i)
+        {
+            int32_t idx1 = boundaryIndices[i];
+            
+            // Skip if we've already processed this vertex
+            if (processedVertices.count(idx1) > 0)
+            {
+                continue;
+            }
+            
+            for (size_t j = i + 1; j < boundaryIndices.size(); ++j)
+            {
+                int32_t idx2 = boundaryIndices[j];
+                
+                // Skip if same vertex index (vertex appears multiple times in boundary)
+                if (idx1 == idx2)
+                {
+                    if (params.verbose)
+                    {
+                        std::cout << "    WARNING: Vertex " << idx1 
+                                  << " appears multiple times in boundary loop!\n";
+                        std::cout << "    This indicates the boundary is malformed.\n";
+                    }
+                    continue;
+                }
+                
+                // Skip if already processed
+                if (processedVertices.count(idx2) > 0)
+                {
+                    continue;
+                }
+                
+                // Calculate distance between vertices
+                Vector3<Real> diff = vertices[idx1] - vertices[idx2];
+                Real dist = Length(diff);
+                
+                if (dist < threshold)
+                {
+                    // Found duplicate - keep lower index, merge higher
+                    int32_t keepIdx = std::min(idx1, idx2);
+                    int32_t removeIdx = std::max(idx1, idx2);
+                    duplicates.push_back(DuplicateVertexPair(keepIdx, removeIdx, dist));
+                    
+                    // Mark both as processed so we don't create multiple pairs
+                    processedVertices.insert(keepIdx);
+                    processedVertices.insert(removeIdx);
+                    
+                    if (params.verbose)
+                    {
+                        std::cout << "    Duplicate found: V" << keepIdx 
+                                  << " and V" << removeIdx 
+                                  << " (distance: " << dist << ")\n";
+                    }
+                }
+            }
+        }
+        
+        return duplicates;
+    }
+    
+    // Merge duplicate vertices by updating all triangle references
+    template <typename Real>
+    int32_t BallPivotMeshHoleFiller<Real>::MergeDuplicateVerticesInMesh(
+        std::vector<std::array<int32_t, 3>>& triangles,
+        std::vector<DuplicateVertexPair> const& duplicates,
+        Parameters const& params)
+    {
+        int32_t trianglesModified = 0;
+        
+        // Update all triangle references
+        for (auto const& dup : duplicates)
+        {
+            for (auto& tri : triangles)
+            {
+                bool modified = false;
+                for (int i = 0; i < 3; ++i)
+                {
+                    if (tri[i] == dup.removeIndex)
+                    {
+                        tri[i] = dup.keepIndex;
+                        modified = true;
+                    }
+                }
+                if (modified)
+                {
+                    trianglesModified++;
+                }
+            }
+            
+            if (params.verbose)
+            {
+                std::cout << "    Merged V" << dup.removeIndex 
+                          << " into V" << dup.keepIndex << "\n";
+            }
+        }
+        
+        // Remove degenerate triangles (where all 3 vertices are the same)
+        auto it = std::remove_if(triangles.begin(), triangles.end(),
+            [](std::array<int32_t, 3> const& tri) {
+                return tri[0] == tri[1] || tri[1] == tri[2] || tri[0] == tri[2];
+            });
+        
+        int32_t removedCount = static_cast<int32_t>(std::distance(it, triangles.end()));
+        if (removedCount > 0)
+        {
+            triangles.erase(it, triangles.end());
+            if (params.verbose)
+            {
+                std::cout << "    Removed " << removedCount << " degenerate triangles\n";
+            }
+        }
+        
+        return trianglesModified;
     }
 
     // Explicit instantiations
