@@ -1792,6 +1792,306 @@ namespace gte
             return true;
         }
         
+        // ======================================================================
+        // COMPONENT-AWARE PROGRESSIVE MERGING
+        // ======================================================================
+        
+        // Structure to represent a connected component
+        struct MeshComponent
+        {
+            std::vector<size_t> triangleIndices;  // Indices of triangles in this component
+            std::vector<std::pair<int32_t, int32_t>> boundaryEdges;  // Boundary edges
+            std::set<int32_t> vertices;  // All vertices in component
+            Vector3<Real> centroid;  // Component centroid
+            Real boundingRadius;  // Bounding sphere radius
+            
+            MeshComponent() 
+                : centroid{static_cast<Real>(0), static_cast<Real>(0), static_cast<Real>(0)}
+                , boundingRadius(static_cast<Real>(0))
+            {}
+            
+            size_t Size() const { return triangleIndices.size(); }
+        };
+        
+        // Extract connected components from mesh
+        static void ExtractComponents(
+            std::vector<Vector3<Real>> const& vertices,
+            std::vector<std::array<int32_t, 3>> const& triangles,
+            std::vector<MeshComponent>& components)
+        {
+            components.clear();
+            
+            if (triangles.empty())
+            {
+                return;
+            }
+            
+            // Build edge-to-triangles adjacency
+            std::map<std::pair<int32_t, int32_t>, std::vector<size_t>> edgeToTriangles;
+            for (size_t triIdx = 0; triIdx < triangles.size(); ++triIdx)
+            {
+                auto const& tri = triangles[triIdx];
+                for (int i = 0; i < 3; ++i)
+                {
+                    auto edge = std::make_pair(
+                        std::min(tri[i], tri[(i + 1) % 3]),
+                        std::max(tri[i], tri[(i + 1) % 3]));
+                    edgeToTriangles[edge].push_back(triIdx);
+                }
+            }
+            
+            // BFS to find connected components
+            std::set<size_t> visited;
+            
+            for (size_t startIdx = 0; startIdx < triangles.size(); ++startIdx)
+            {
+                if (visited.count(startIdx) > 0)
+                {
+                    continue;
+                }
+                
+                // Start new component
+                MeshComponent component;
+                std::vector<size_t> queue;
+                queue.push_back(startIdx);
+                visited.insert(startIdx);
+                component.triangleIndices.push_back(startIdx);
+                
+                // Add vertices from first triangle
+                for (int i = 0; i < 3; ++i)
+                {
+                    component.vertices.insert(triangles[startIdx][i]);
+                }
+                
+                // BFS to find all connected triangles
+                size_t queuePos = 0;
+                while (queuePos < queue.size())
+                {
+                    size_t currentIdx = queue[queuePos++];
+                    auto const& currentTri = triangles[currentIdx];
+                    
+                    // Check all edges of current triangle
+                    for (int i = 0; i < 3; ++i)
+                    {
+                        auto edge = std::make_pair(
+                            std::min(currentTri[i], currentTri[(i + 1) % 3]),
+                            std::max(currentTri[i], currentTri[(i + 1) % 3]));
+                        
+                        auto it = edgeToTriangles.find(edge);
+                        if (it != edgeToTriangles.end())
+                        {
+                            for (size_t neighborIdx : it->second)
+                            {
+                                if (visited.count(neighborIdx) == 0)
+                                {
+                                    visited.insert(neighborIdx);
+                                    queue.push_back(neighborIdx);
+                                    component.triangleIndices.push_back(neighborIdx);
+                                    
+                                    // Add vertices from this triangle
+                                    for (int j = 0; j < 3; ++j)
+                                    {
+                                        component.vertices.insert(triangles[neighborIdx][j]);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Extract boundary edges for this component
+                std::map<std::pair<int32_t, int32_t>, size_t> edgeCounts;
+                for (size_t triIdx : component.triangleIndices)
+                {
+                    auto const& tri = triangles[triIdx];
+                    for (int i = 0; i < 3; ++i)
+                    {
+                        auto edge = std::make_pair(
+                            std::min(tri[i], tri[(i + 1) % 3]),
+                            std::max(tri[i], tri[(i + 1) % 3]));
+                        edgeCounts[edge]++;
+                    }
+                }
+                
+                for (auto const& ec : edgeCounts)
+                {
+                    if (ec.second == 1)  // Boundary edge
+                    {
+                        component.boundaryEdges.push_back(ec.first);
+                    }
+                }
+                
+                // Compute centroid and bounding radius
+                component.centroid = Vector3<Real>{
+                    static_cast<Real>(0),
+                    static_cast<Real>(0),
+                    static_cast<Real>(0)
+                };
+                
+                for (int32_t vIdx : component.vertices)
+                {
+                    component.centroid += vertices[vIdx];
+                }
+                
+                if (!component.vertices.empty())
+                {
+                    component.centroid /= static_cast<Real>(component.vertices.size());
+                }
+                
+                // Compute bounding radius
+                component.boundingRadius = static_cast<Real>(0);
+                for (int32_t vIdx : component.vertices)
+                {
+                    Real dist = Length(vertices[vIdx] - component.centroid);
+                    component.boundingRadius = std::max(component.boundingRadius, dist);
+                }
+                
+                components.push_back(component);
+            }
+        }
+        
+        // Compute minimum distance between two components' boundary edges
+        static Real ComputeComponentDistance(
+            std::vector<Vector3<Real>> const& vertices,
+            MeshComponent const& comp1,
+            MeshComponent const& comp2,
+            std::pair<int32_t, int32_t>& closestEdge1,
+            std::pair<int32_t, int32_t>& closestEdge2)
+        {
+            Real minDistance = std::numeric_limits<Real>::max();
+            
+            // Early rejection using bounding spheres
+            Real centerDist = Length(comp1.centroid - comp2.centroid);
+            if (centerDist > comp1.boundingRadius + comp2.boundingRadius + minDistance)
+            {
+                return minDistance;
+            }
+            
+            // Find closest pair of boundary edges
+            for (auto const& edge1 : comp1.boundaryEdges)
+            {
+                Vector3<Real> e1_mid = (vertices[edge1.first] + vertices[edge1.second]) * static_cast<Real>(0.5);
+                
+                for (auto const& edge2 : comp2.boundaryEdges)
+                {
+                    Vector3<Real> e2_mid = (vertices[edge2.first] + vertices[edge2.second]) * static_cast<Real>(0.5);
+                    
+                    // Compute minimum distance between edge endpoints
+                    Real dist = std::min({
+                        Length(vertices[edge1.first] - vertices[edge2.first]),
+                        Length(vertices[edge1.first] - vertices[edge2.second]),
+                        Length(vertices[edge1.second] - vertices[edge2.first]),
+                        Length(vertices[edge1.second] - vertices[edge2.second])
+                    });
+                    
+                    if (dist < minDistance)
+                    {
+                        minDistance = dist;
+                        closestEdge1 = edge1;
+                        closestEdge2 = edge2;
+                    }
+                }
+            }
+            
+            return minDistance;
+        }
+        
+        // Progressive component merging: largest component bridges to closest component iteratively
+        static size_t ProgressiveComponentMerging(
+            std::vector<Vector3<Real>> const& vertices,
+            std::vector<std::array<int32_t, 3>>& triangles,
+            Real threshold,
+            bool verbose = false)
+        {
+            size_t totalBridges = 0;
+            
+            while (true)
+            {
+                // Extract current components
+                std::vector<MeshComponent> components;
+                ExtractComponents(vertices, triangles, components);
+                
+                if (components.size() <= 1)
+                {
+                    if (verbose)
+                    {
+                        std::cout << "Single component achieved!\n";
+                    }
+                    break;
+                }
+                
+                // Sort components by size (largest first)
+                std::sort(components.begin(), components.end(),
+                    [](MeshComponent const& a, MeshComponent const& b) {
+                        return a.Size() > b.Size();
+                    });
+                
+                if (verbose)
+                {
+                    std::cout << "Found " << components.size() << " components. Largest has " 
+                              << components[0].Size() << " triangles, " 
+                              << components[0].boundaryEdges.size() << " boundary edges\n";
+                }
+                
+                // Find closest component to the largest
+                Real minDist = std::numeric_limits<Real>::max();
+                size_t closestCompIdx = 1;
+                std::pair<int32_t, int32_t> bestEdge1, bestEdge2;
+                
+                for (size_t i = 1; i < components.size(); ++i)
+                {
+                    std::pair<int32_t, int32_t> edge1, edge2;
+                    Real dist = ComputeComponentDistance(vertices, components[0], components[i], edge1, edge2);
+                    
+                    if (dist < minDist)
+                    {
+                        minDist = dist;
+                        closestCompIdx = i;
+                        bestEdge1 = edge1;
+                        bestEdge2 = edge2;
+                    }
+                }
+                
+                // Check if closest component is within threshold
+                if (minDist >= threshold)
+                {
+                    if (verbose)
+                    {
+                        std::cout << "Closest component at distance " << minDist 
+                                  << " exceeds threshold " << threshold << ". Stopping.\n";
+                    }
+                    break;
+                }
+                
+                if (verbose)
+                {
+                    std::cout << "Bridging largest component to component " << closestCompIdx 
+                              << " at distance " << minDist << "\n";
+                }
+                
+                // Bridge the two components
+                if (BridgeBoundaryEdges(vertices, triangles, bestEdge1, bestEdge2, true))
+                {
+                    totalBridges++;
+                    
+                    if (verbose)
+                    {
+                        std::cout << "  Bridge created successfully\n";
+                    }
+                }
+                else
+                {
+                    if (verbose)
+                    {
+                        std::cout << "  Bridge failed validation. Stopping.\n";
+                    }
+                    break;
+                }
+            }
+            
+            return totalBridges;
+        }
+        
         // Optimized topology-aware component bridging with iterative multi-pass strategy
         static void TopologyAwareComponentBridging(
             std::vector<Vector3<Real>>& vertices,
@@ -1831,8 +2131,8 @@ namespace gte
                               << (currentThreshold / avgEdgeLength) << "x avg edge length)\n";
                 }
                 
-                // Step 1: Bridge nearby boundary edges
-                size_t bridgesThisPass = BridgeBoundaryEdgesOptimized(
+                // Step 1: Progressive component merging (bridge largest to closest)
+                size_t bridgesThisPass = ProgressiveComponentMerging(
                     vertices, triangles, currentThreshold, params.verbose);
                 totalBridges += bridgesThisPass;
                 
