@@ -470,7 +470,34 @@ namespace gte
             std::vector<Vector3<Real>>& vertices,
             std::vector<std::array<int32_t, 3>>& triangles,
             Parameters const& params);
+        
+        // Closed Component Fusion
+        
+        struct ComponentPair {
+            int32_t comp1Index = -1;
+            int32_t comp2Index = -1;
+            int32_t vertex1 = -1;      // Closest vertex on comp1
+            int32_t vertex2 = -1;      // Closest vertex on comp2
+            int32_t triangle1 = -1;    // Triangle containing vertex1
+            int32_t triangle2 = -1;    // Triangle containing vertex2
+            Real distance = std::numeric_limits<Real>::max();
+        };
+        
+        // Find closest points between two closed components
+        static ComponentPair FindClosestComponentPair(
+            std::vector<Vector3<Real>> const& vertices,
+            std::vector<std::array<int32_t, 3>> const& triangles,
+            std::vector<ComponentInfo> const& componentInfos,
+            int32_t comp1Index,
+            int32_t comp2Index);
+        
+        // Fuse closed components by creating minimal connection
+        static bool FuseClosedComponents(
+            std::vector<Vector3<Real>>& vertices,
+            std::vector<std::array<int32_t, 3>>& triangles,
+            Parameters const& params);
     };
 }
+
 
 #endif // GTE_MATHEMATICS_BALL_PIVOT_MESH_HOLE_FILLER_H

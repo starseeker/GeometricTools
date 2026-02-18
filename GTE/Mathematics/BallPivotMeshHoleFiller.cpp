@@ -2052,9 +2052,35 @@ namespace gte
             }
         }
         
+        // Step 7.5: Closed Component Fusion - Connect closed components before forced bridging
+        // If all components are closed (no boundary edges), normal bridging won't work
+        // We need to create boundaries by removing triangles, then bridge
+        int32_t topologyComponentCount = CountTopologyComponents(triangles);
+        
+        if (topologyComponentCount > 1)
+        {
+            if (params.verbose)
+            {
+                std::cout << "\nStep 7.5: Checking for closed component fusion opportunity...\n";
+            }
+            
+            bool fused = FuseClosedComponents(vertices, triangles, params);
+            
+            if (fused)
+            {
+                anyProgress = true;
+                topologyComponentCount = CountTopologyComponents(triangles);
+                
+                if (params.verbose)
+                {
+                    std::cout << "  Components after fusion: " << topologyComponentCount << "\n";
+                }
+            }
+        }
+        
         // Step 8: Forced bridging - Try to bridge remaining open components after cleanup
         // Use topology-based component count (edge connectivity) for proper detection
-        int32_t topologyComponentCount = CountTopologyComponents(triangles);
+        topologyComponentCount = CountTopologyComponents(triangles);
         
         if (topologyComponentCount > 1 && params.verbose)
         {
@@ -4247,6 +4273,219 @@ namespace gte
         }
         
         return anyFixed;
+    }
+    
+    // ========================================================================
+    // Closed Component Fusion
+    // ========================================================================
+    
+    template <typename Real>
+    typename BallPivotMeshHoleFiller<Real>::ComponentPair
+    BallPivotMeshHoleFiller<Real>::FindClosestComponentPair(
+        std::vector<Vector3<Real>> const& vertices,
+        std::vector<std::array<int32_t, 3>> const& triangles,
+        std::vector<ComponentInfo> const& componentInfos,
+        int32_t comp1Index,
+        int32_t comp2Index)
+    {
+        ComponentPair result;
+        result.comp1Index = comp1Index;
+        result.comp2Index = comp2Index;
+        
+        auto const& comp1 = componentInfos[comp1Index];
+        auto const& comp2 = componentInfos[comp2Index];
+        
+        // Find closest vertex pair between components
+        Real minDist = std::numeric_limits<Real>::max();
+        
+        for (int32_t v1 : comp1.vertices)
+        {
+            for (int32_t v2 : comp2.vertices)
+            {
+                Real dist = Length(vertices[v1] - vertices[v2]);
+                if (dist < minDist)
+                {
+                    minDist = dist;
+                    result.vertex1 = v1;
+                    result.vertex2 = v2;
+                    result.distance = dist;
+                }
+            }
+        }
+        
+        // Find triangles containing these vertices
+        for (int32_t triIdx : comp1.triangleIndices)
+        {
+            auto const& tri = triangles[triIdx];
+            if (tri[0] == result.vertex1 || tri[1] == result.vertex1 || tri[2] == result.vertex1)
+            {
+                result.triangle1 = triIdx;
+                break;
+            }
+        }
+        
+        for (int32_t triIdx : comp2.triangleIndices)
+        {
+            auto const& tri = triangles[triIdx];
+            if (tri[0] == result.vertex2 || tri[1] == result.vertex2 || tri[2] == result.vertex2)
+            {
+                result.triangle2 = triIdx;
+                break;
+            }
+        }
+        
+        return result;
+    }
+    
+    template <typename Real>
+    bool BallPivotMeshHoleFiller<Real>::FuseClosedComponents(
+        std::vector<Vector3<Real>>& vertices,
+        std::vector<std::array<int32_t, 3>>& triangles,
+        Parameters const& params)
+    {
+        if (params.verbose)
+        {
+            std::cout << "\n[Closed Component Fusion]\n";
+        }
+        
+        // Detect components
+        auto components = DetectConnectedComponents(triangles);
+        
+        if (components.size() <= 1)
+        {
+            return false;  // Already single component
+        }
+        
+        // Analyze components
+        auto componentInfos = AnalyzeComponents(vertices, triangles, components);
+        
+        // Check if all are closed
+        bool allClosed = true;
+        int numClosed = 0;
+        for (auto const& info : componentInfos)
+        {
+            if (info.isClosed)
+            {
+                numClosed++;
+            }
+            else
+            {
+                allClosed = false;
+            }
+        }
+        
+        if (params.verbose)
+        {
+            std::cout << "  Total components: " << components.size() << "\n";
+            std::cout << "  Closed components: " << numClosed << "\n";
+        }
+        
+        // If not all closed, use normal forced bridging
+        if (!allClosed)
+        {
+            if (params.verbose)
+            {
+                std::cout << "  Not all components are closed, skipping fusion\n";
+            }
+            return false;
+        }
+        
+        if (params.verbose)
+        {
+            std::cout << "  All components are closed - applying fusion strategy\n";
+        }
+        
+        // Find largest two components to fuse
+        // (Typically we'd fuse all, but start with largest two)
+        int32_t largest1 = -1, largest2 = -1;
+        size_t size1 = 0, size2 = 0;
+        
+        for (size_t i = 0; i < componentInfos.size(); ++i)
+        {
+            size_t size = componentInfos[i].vertices.size();
+            if (size > size1)
+            {
+                size2 = size1;
+                largest2 = largest1;
+                size1 = size;
+                largest1 = static_cast<int32_t>(i);
+            }
+            else if (size > size2)
+            {
+                size2 = size;
+                largest2 = static_cast<int32_t>(i);
+            }
+        }
+        
+        if (largest1 < 0 || largest2 < 0)
+        {
+            return false;
+        }
+        
+        if (params.verbose)
+        {
+            std::cout << "  Fusing component " << largest1 << " (" 
+                      << componentInfos[largest1].vertices.size() << " vertices) "
+                      << "with component " << largest2 << " ("
+                      << componentInfos[largest2].vertices.size() << " vertices)\n";
+        }
+        
+        // Find closest points
+        auto pair = FindClosestComponentPair(
+            vertices, triangles, componentInfos, largest1, largest2);
+        
+        if (params.verbose)
+        {
+            std::cout << "  Closest distance: " << pair.distance << "\n";
+            std::cout << "  Closest vertices: " << pair.vertex1 
+                      << " and " << pair.vertex2 << "\n";
+        }
+        
+        // Strategy: Remove one triangle from each component at closest point
+        // This creates boundary edges that can be bridged
+        
+        std::vector<int32_t> trianglesToRemove;
+        if (pair.triangle1 >= 0)
+        {
+            trianglesToRemove.push_back(pair.triangle1);
+        }
+        if (pair.triangle2 >= 0)
+        {
+            trianglesToRemove.push_back(pair.triangle2);
+        }
+        
+        if (trianglesToRemove.empty())
+        {
+            if (params.verbose)
+            {
+                std::cout << "  Could not find triangles to remove\n";
+            }
+            return false;
+        }
+        
+        if (params.verbose)
+        {
+            std::cout << "  Removing " << trianglesToRemove.size() 
+                      << " triangles to create boundaries\n";
+        }
+        
+        // Remove triangles (in reverse order to preserve indices)
+        std::sort(trianglesToRemove.rbegin(), trianglesToRemove.rend());
+        for (int32_t idx : trianglesToRemove)
+        {
+            triangles.erase(triangles.begin() + idx);
+        }
+        
+        if (params.verbose)
+        {
+            std::cout << "  ✓ Triangles removed, boundaries created\n";
+            std::cout << "  Components now have boundary edges that can be bridged\n";
+        }
+        
+        // After removing triangles, the components will have boundary edges
+        // The normal forced bridging in Step 8 can now connect them
+        
+        return true;
     }
 
     // Explicit instantiations
