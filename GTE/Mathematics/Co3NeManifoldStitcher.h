@@ -1962,7 +1962,7 @@ namespace gte
             
             // Early rejection using bounding spheres
             Real centerDist = Length(comp1.centroid - comp2.centroid);
-            if (centerDist > comp1.boundingRadius + comp2.boundingRadius + minDistance)
+            if (centerDist > comp1.boundingRadius + comp2.boundingRadius)
             {
                 return minDistance;
             }
@@ -2022,7 +2022,7 @@ namespace gte
                         Length(vertices[edge1.second] - vertices[edge2.second])
                     });
                     
-                    if (dist < threshold)
+                    if (dist <= threshold)
                     {
                         candidates.push_back(std::make_tuple(dist, edge1, edge2));
                     }
