@@ -15,7 +15,7 @@ TARGETS = test_mesh_repair test_co3ne test_full_algorithms test_rvd \
           test_enhanced_manifold test_anisotropic_remesh test_delaunay6 test_cvt6d \
           test_delaunay_n test_delaunay_nn test_rvd_n test_cvt_n test_phase4_integration \
           test_anisotropic_end_to_end test_co3ne_stitcher test_ball_pivot_hole_filler \
-          test_ball_pivot_integration test_comprehensive_manifold_analysis
+          test_ball_pivot_integration test_comprehensive_manifold_analysis test_progressive_merging
 
 all: $(TARGETS)
 
@@ -176,3 +176,7 @@ test_uv_unwrapping_assessment: $(TEST_DIR)/test_uv_unwrapping_assessment.cpp GTE
 # Manifold Production Pipeline test - comprehensive pipeline with UV unwrapping
 test_manifold_production_pipeline: $(TEST_DIR)/test_manifold_production_pipeline.cpp GTE/Mathematics/ManifoldProductionPipeline.h GTE/Mathematics/BallPivotMeshHoleFiller.h GTE/Mathematics/BallPivotMeshHoleFiller.cpp GTE/Mathematics/LSCMParameterization.h GTE/Mathematics/Co3Ne.h
 	$(CXX) $(CXXFLAGS) -o test_manifold_production_pipeline $(TEST_DIR)/test_manifold_production_pipeline.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp GTE/Mathematics/BallPivotReconstruction.cpp $(LDFLAGS)
+
+# Progressive component merging test
+test_progressive_merging: $(TEST_DIR)/test_progressive_merging.cpp GTE/Mathematics/Co3NeManifoldStitcher.h GTE/Mathematics/BallPivotReconstruction.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp
+	$(CXX) $(CXXFLAGS) -o test_progressive_merging $(TEST_DIR)/test_progressive_merging.cpp GTE/Mathematics/BallPivotReconstruction.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp $(LDFLAGS)
