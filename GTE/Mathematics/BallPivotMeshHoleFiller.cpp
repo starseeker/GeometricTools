@@ -2676,9 +2676,11 @@ namespace gte
                 }
             }
             
+            // If we get here, detria failed (even with LSCM if attempted)
             return false;
+        }
         
-        // Step 6: Extract triangles and add to mesh
+        // Step 6: Extract triangles and add to mesh (detria succeeded)
         size_t trianglesAdded = 0;
         bool cwTriangles = true;  // Clock-wise
         
