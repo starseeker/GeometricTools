@@ -4197,7 +4197,7 @@ namespace gte
         }
         
         // Find all boundary loops
-        auto boundaryLoops = FindBoundaryLoops(vertices, triangles);
+        auto boundaryLoops = DetectBoundaryLoops(vertices, triangles);
         
         bool anyFixed = false;
         int32_t originalTriangleCount = static_cast<int32_t>(triangles.size());
@@ -4205,19 +4205,19 @@ namespace gte
         for (auto const& loop : boundaryLoops)
         {
             // Check if this loop is self-intersecting
-            auto info = DetectSelfIntersectingBoundary(loop, params);
+            auto info = DetectSelfIntersectingBoundary(loop.vertexIndices, params);
             
             if (info.found)
             {
                 if (params.verbose)
                 {
                     std::cout << "  Processing self-intersecting loop with " 
-                              << loop.size() << " edges\n";
+                              << loop.vertexIndices.size() << " edges\n";
                 }
                 
                 // Find triangles to remove
                 auto trianglesToRemove = FindTrianglesToRemove(
-                    vertices, triangles, loop, info, params);
+                    vertices, triangles, loop.vertexIndices, info, params);
                 
                 // Remove triangles to expand boundary
                 if (!trianglesToRemove.empty())
