@@ -2542,6 +2542,10 @@ namespace gte
             }
         }
         
+        // Step 3.5: Apply 2D perturbation to break collinearity in parametric space
+        // CRITICAL: Per problem statement, must perturb in 2D AFTER projection, not in 3D
+        PerturbCollinearPointsIn2D(points2D, hole.vertexIndices.size(), hole.avgEdgeLength, params);
+        
         // Step 4: Set up detria triangulation
         detria::Triangulation tri;
         tri.setPoints(points2D);
@@ -2562,6 +2566,15 @@ namespace gte
             {
                 std::cout << "      Detria triangulation failed\n";
             }
+            
+            // Diagnose why detria failed
+            std::vector<std::array<uint32_t, 2>> edges;
+            for (size_t i = 0; i < hole.vertexIndices.size(); ++i)
+            {
+                size_t next = (i + 1) % hole.vertexIndices.size();
+                edges.push_back({static_cast<uint32_t>(i), static_cast<uint32_t>(next)});
+            }
+            DiagnoseDetriaFailure(points2D, edges, params);
             
             // Per problem statement: Try UV unwrapping (LSCM) as fallback when detria fails
             // This is specifically for otherwise unfillable holes
@@ -2617,6 +2630,9 @@ namespace gte
                         std::cout << "      LSCM parameterization successful, retrying detria with UV coordinates...\n";
                     }
                     
+                    // Apply 2D perturbation to UV coordinates before triangulation
+                    PerturbCollinearPointsIn2D(points2D, hole.vertexIndices.size(), hole.avgEdgeLength, params);
+                    
                     // Retry detria with UV coordinates
                     detria::Triangulation uvTri;
                     uvTri.setPoints(points2D);
@@ -2665,9 +2681,21 @@ namespace gte
                         
                         return trianglesAdded > 0;
                     }
-                    else if (params.verbose)
+                    else 
                     {
-                        std::cout << "      Detria still failed even with UV coordinates\n";
+                        if (params.verbose)
+                        {
+                            std::cout << "      Detria still failed even with UV coordinates\n";
+                        }
+                        
+                        // Diagnose UV triangulation failure
+                        std::vector<std::array<uint32_t, 2>> uvEdges;
+                        for (size_t i = 0; i < hole.vertexIndices.size(); ++i)
+                        {
+                            size_t next = (i + 1) % hole.vertexIndices.size();
+                            uvEdges.push_back({static_cast<uint32_t>(i), static_cast<uint32_t>(next)});
+                        }
+                        DiagnoseDetriaFailure(points2D, uvEdges, params);
                     }
                 }
                 else if (params.verbose)
@@ -3489,6 +3517,341 @@ namespace gte
         return conflicting;
     }
     
+
+    // ====================================================================================
+    // 2D Perturbation and Diagnostics Methods
+    // ====================================================================================
+    
+    template <typename Real>
+    bool BallPivotMeshHoleFiller<Real>::DoLineSegmentsIntersect2D(
+        detria::PointD const& p1, detria::PointD const& p2,
+        detria::PointD const& p3, detria::PointD const& p4)
+    {
+        // Use cross product to check if segments intersect
+        // Segments p1-p2 and p3-p4 intersect if:
+        // 1. p1 and p2 are on opposite sides of line p3-p4
+        // 2. p3 and p4 are on opposite sides of line p1-p2
+        
+        auto crossProduct = [](detria::PointD const& a, detria::PointD const& b, detria::PointD const& c) {
+            // Cross product of vectors (b-a) and (c-a) in 2D (z component)
+            return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+        };
+        
+        double d1 = crossProduct(p3, p4, p1);
+        double d2 = crossProduct(p3, p4, p2);
+        double d3 = crossProduct(p1, p2, p3);
+        double d4 = crossProduct(p1, p2, p4);
+        
+        // Check if signs are opposite (segments cross)
+        if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
+            ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0)))
+        {
+            return true;
+        }
+        
+        // Check for collinear cases (touching)
+        double epsilon = 1e-10;
+        if (std::abs(d1) < epsilon && std::abs(d2) < epsilon &&
+            std::abs(d3) < epsilon && std::abs(d4) < epsilon)
+        {
+            // Collinear - check overlap
+            // Could be more precise but for our purposes, assume no intersection
+            return false;
+        }
+        
+        return false;
+    }
+    
+    template <typename Real>
+    bool BallPivotMeshHoleFiller<Real>::CheckSelfIntersection2D(
+        std::vector<detria::PointD> const& points2D,
+        std::vector<std::array<uint32_t, 2>> const& edges)
+    {
+        // Check all pairs of non-adjacent edges for intersection
+        for (size_t i = 0; i < edges.size(); ++i)
+        {
+            for (size_t j = i + 2; j < edges.size(); ++j)
+            {
+                // Skip adjacent edges (they share a vertex)
+                if (i == 0 && j == edges.size() - 1)
+                {
+                    continue;  // First and last edge are adjacent
+                }
+                
+                auto const& edge1 = edges[i];
+                auto const& edge2 = edges[j];
+                
+                // Check if these edges share a vertex
+                if (edge1[0] == edge2[0] || edge1[0] == edge2[1] ||
+                    edge1[1] == edge2[0] || edge1[1] == edge2[1])
+                {
+                    continue;  // Adjacent edges, skip
+                }
+                
+                // Check intersection
+                if (DoLineSegmentsIntersect2D(
+                    points2D[edge1[0]], points2D[edge1[1]],
+                    points2D[edge2[0]], points2D[edge2[1]]))
+                {
+                    return true;  // Self-intersection found
+                }
+            }
+        }
+        
+        return false;  // No self-intersection
+    }
+    
+    template <typename Real>
+    void BallPivotMeshHoleFiller<Real>::PerturbCollinearPointsIn2D(
+        std::vector<detria::PointD>& points2D,
+        size_t numBoundaryVertices,
+        Real avgEdgeLength,
+        Parameters const& params)
+    {
+        if (numBoundaryVertices < 3 || points2D.size() < numBoundaryVertices)
+        {
+            return;  // Not enough points
+        }
+        
+        if (params.verbose)
+        {
+            std::cout << "\n[2D Perturbation Preprocessing]\n";
+        }
+        
+        // Build edge list for boundary
+        std::vector<std::array<uint32_t, 2>> edges;
+        for (size_t i = 0; i < numBoundaryVertices; ++i)
+        {
+            size_t next = (i + 1) % numBoundaryVertices;
+            edges.push_back({static_cast<uint32_t>(i), static_cast<uint32_t>(next)});
+        }
+        
+        // Detect collinear points in 2D
+        std::vector<size_t> collinearIndices;
+        Real threshold = static_cast<Real>(avgEdgeLength * 0.001);  // 0.1% of avg edge length
+        
+        for (size_t i = 0; i < numBoundaryVertices; ++i)
+        {
+            size_t prev = (i + numBoundaryVertices - 1) % numBoundaryVertices;
+            size_t next = (i + 1) % numBoundaryVertices;
+            
+            detria::PointD const& p0 = points2D[prev];
+            detria::PointD const& p1 = points2D[i];
+            detria::PointD const& p2 = points2D[next];
+            
+            // Calculate 2D cross product (z component)
+            double edge1_x = p1.x - p0.x;
+            double edge1_y = p1.y - p0.y;
+            double edge2_x = p2.x - p1.x;
+            double edge2_y = p2.y - p1.y;
+            
+            double cross = edge1_x * edge2_y - edge1_y * edge2_x;
+            
+            if (std::abs(cross) < static_cast<double>(threshold))
+            {
+                collinearIndices.push_back(i);
+            }
+        }
+        
+        if (params.verbose)
+        {
+            std::cout << "  Detected " << collinearIndices.size() 
+                      << " collinear points in 2D\n";
+        }
+        
+        // Apply perturbation to collinear points
+        int perturbedCount = 0;
+        Real perturbationScale = static_cast<Real>(0.01);  // 1% of avg edge length
+        Real offset = avgEdgeLength * perturbationScale;
+        
+        for (size_t idx : collinearIndices)
+        {
+            size_t prev = (idx + numBoundaryVertices - 1) % numBoundaryVertices;
+            size_t next = (idx + 1) % numBoundaryVertices;
+            
+            detria::PointD const& p0 = points2D[prev];
+            detria::PointD const& p2 = points2D[next];
+            
+            // Calculate perpendicular direction in 2D
+            double dir_x = p2.x - p0.x;
+            double dir_y = p2.y - p0.y;
+            double len = std::sqrt(dir_x * dir_x + dir_y * dir_y);
+            
+            if (len < 1e-10)
+            {
+                continue;  // Degenerate case
+            }
+            
+            // Normalize direction
+            dir_x /= len;
+            dir_y /= len;
+            
+            // Perpendicular in 2D: rotate 90 degrees
+            double perp_x = -dir_y;
+            double perp_y = dir_x;
+            
+            // Try positive direction first
+            auto testPoints = points2D;
+            testPoints[idx].x += perp_x * static_cast<double>(offset);
+            testPoints[idx].y += perp_y * static_cast<double>(offset);
+            
+            if (!CheckSelfIntersection2D(testPoints, edges))
+            {
+                points2D[idx] = testPoints[idx];
+                perturbedCount++;
+                
+                if (params.verbose)
+                {
+                    std::cout << "    Perturbed vertex " << idx 
+                              << " in +perpendicular direction\n";
+                }
+                continue;
+            }
+            
+            // Try negative direction
+            testPoints = points2D;
+            testPoints[idx].x -= perp_x * static_cast<double>(offset);
+            testPoints[idx].y -= perp_y * static_cast<double>(offset);
+            
+            if (!CheckSelfIntersection2D(testPoints, edges))
+            {
+                points2D[idx] = testPoints[idx];
+                perturbedCount++;
+                
+                if (params.verbose)
+                {
+                    std::cout << "    Perturbed vertex " << idx 
+                              << " in -perpendicular direction\n";
+                }
+            }
+            else if (params.verbose)
+            {
+                std::cout << "    Could not safely perturb vertex " << idx 
+                          << " (both directions cause self-intersection)\n";
+            }
+        }
+        
+        if (params.verbose)
+        {
+            std::cout << "  Successfully perturbed " << perturbedCount 
+                      << " out of " << collinearIndices.size() << " collinear points\n";
+        }
+    }
+    
+    template <typename Real>
+    void BallPivotMeshHoleFiller<Real>::DiagnoseDetriaFailure(
+        std::vector<detria::PointD> const& points2D,
+        std::vector<std::array<uint32_t, 2>> const& edges,
+        Parameters const& params)
+    {
+        if (!params.verbose)
+        {
+            return;
+        }
+        
+        std::cout << "\n[Detria Failure Diagnostic]\n";
+        std::cout << "  Vertices: " << points2D.size() << "\n";
+        std::cout << "  Edges: " << edges.size() << "\n";
+        
+        // Print all vertices
+        std::cout << "\n  Vertex coordinates:\n";
+        for (size_t i = 0; i < points2D.size(); ++i)
+        {
+            std::cout << "    V" << i << ": (" 
+                      << points2D[i].x << ", " 
+                      << points2D[i].y << ")\n";
+        }
+        
+        // Print all edges
+        std::cout << "\n  Edge connectivity:\n";
+        for (size_t i = 0; i < edges.size(); ++i)
+        {
+            std::cout << "    E" << i << ": " 
+                      << edges[i][0] << " -> " 
+                      << edges[i][1] << "\n";
+        }
+        
+        // Calculate signed area (winding order)
+        double signedArea = 0.0;
+        for (auto const& edge : edges)
+        {
+            auto const& p1 = points2D[edge[0]];
+            auto const& p2 = points2D[edge[1]];
+            signedArea += (p2.x - p1.x) * (p2.y + p1.y);
+        }
+        signedArea /= 2.0;
+        
+        std::cout << "\n  Signed area: " << signedArea;
+        if (signedArea > 0)
+        {
+            std::cout << " (CW - clockwise)\n";
+        }
+        else if (signedArea < 0)
+        {
+            std::cout << " (CCW - counter-clockwise)\n";
+        }
+        else
+        {
+            std::cout << " (ZERO - degenerate!)\n";
+        }
+        
+        // Check for self-intersections
+        bool hasSelfIntersection = CheckSelfIntersection2D(points2D, edges);
+        std::cout << "  Self-intersecting: " 
+                  << (hasSelfIntersection ? "YES" : "NO") << "\n";
+        
+        // Check edge lengths
+        double minEdgeLen = std::numeric_limits<double>::max();
+        double maxEdgeLen = 0.0;
+        for (auto const& edge : edges)
+        {
+            double dx = points2D[edge[1]].x - points2D[edge[0]].x;
+            double dy = points2D[edge[1]].y - points2D[edge[0]].y;
+            double len = std::sqrt(dx * dx + dy * dy);
+            minEdgeLen = std::min(minEdgeLen, len);
+            maxEdgeLen = std::max(maxEdgeLen, len);
+        }
+        std::cout << "  Edge lengths: " 
+                  << minEdgeLen << " to " << maxEdgeLen << "\n";
+        
+        // Check for duplicate vertices
+        int duplicates = 0;
+        for (size_t i = 0; i < points2D.size(); ++i)
+        {
+            for (size_t j = i+1; j < points2D.size(); ++j)
+            {
+                double dx = points2D[i].x - points2D[j].x;
+                double dy = points2D[i].y - points2D[j].y;
+                if (std::sqrt(dx * dx + dy * dy) < 1e-6)
+                {
+                    duplicates++;
+                }
+            }
+        }
+        std::cout << "  Duplicate vertices: " << duplicates << "\n";
+        
+        // Save to file for external analysis
+        std::ofstream file("/tmp/detria_failure_data.txt");
+        if (file.is_open())
+        {
+            file << "# Detria failure data\n";
+            file << "# Vertices:\n";
+            for (size_t i = 0; i < points2D.size(); ++i)
+            {
+                file << "v " << points2D[i].x << " " 
+                     << points2D[i].y << " 0\n";
+            }
+            file << "# Edges:\n";
+            for (auto const& edge : edges)
+            {
+                file << "l " << (edge[0]+1) << " " 
+                     << (edge[1]+1) << "\n";
+            }
+            file.close();
+            std::cout << "  Data saved to /tmp/detria_failure_data.txt\n";
+        }
+    }
+
     // Explicit instantiations
     template class BallPivotMeshHoleFiller<float>;
     template class BallPivotMeshHoleFiller<double>;

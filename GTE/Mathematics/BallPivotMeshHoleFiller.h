@@ -30,10 +30,12 @@
 
 #include <GTE/Mathematics/Vector3.h>
 #include <GTE/Mathematics/NearestNeighborQuery.h>
+#include <detria.hpp>
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <fstream>
 #include <limits>
 #include <list>
 #include <map>
@@ -384,6 +386,31 @@ namespace gte
             std::vector<Vector3<Real>> const& vertices,
             std::vector<std::array<int32_t, 3>> const& triangles,
             BoundaryLoop const& hole);
+        
+        // 2D Perturbation and Diagnostics Methods
+        
+        // Check if a 2D polygon self-intersects
+        static bool CheckSelfIntersection2D(
+            std::vector<detria::PointD> const& points2D,
+            std::vector<std::array<uint32_t, 2>> const& edges);
+        
+        // Check if two line segments intersect in 2D
+        static bool DoLineSegmentsIntersect2D(
+            detria::PointD const& p1, detria::PointD const& p2,
+            detria::PointD const& p3, detria::PointD const& p4);
+        
+        // Perturb collinear points in 2D parametric space
+        static void PerturbCollinearPointsIn2D(
+            std::vector<detria::PointD>& points2D,
+            size_t numBoundaryVertices,
+            Real avgEdgeLength,
+            Parameters const& params);
+        
+        // Diagnose why detria triangulation failed
+        static void DiagnoseDetriaFailure(
+            std::vector<detria::PointD> const& points2D,
+            std::vector<std::array<uint32_t, 2>> const& edges,
+            Parameters const& params);
     };
 }
 
