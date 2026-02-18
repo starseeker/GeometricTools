@@ -264,8 +264,12 @@ namespace gte
             std::vector<std::array<int32_t, 3>>& triangles,
             std::vector<int32_t> const& indicesToRemove);
         
-        // Detect connected components in the mesh
+        // Detect connected components in the mesh (vertex-based, conservative)
         static std::vector<std::set<int32_t>> DetectConnectedComponents(
+            std::vector<std::array<int32_t, 3>> const& triangles);
+        
+        // Count topology components (edge-based, proper manifold definition)
+        static int32_t CountTopologyComponents(
             std::vector<std::array<int32_t, 3>> const& triangles);
         
         // Find close boundary edges between different components

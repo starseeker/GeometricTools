@@ -1043,11 +1043,71 @@ namespace gte
     std::vector<std::set<int32_t>> BallPivotMeshHoleFiller<Real>::DetectConnectedComponents(
         std::vector<std::array<int32_t, 3>> const& triangles)
     {
-        // Build edge-based adjacency for proper component detection
-        // Two triangles are in the same component if they share an EDGE, not just a vertex
+        // Build vertex-based adjacency from triangles
+        // This is used for most pipeline operations and is more conservative
+        std::map<int32_t, std::set<int32_t>> adjacency;
+        for (auto const& tri : triangles)
+        {
+            for (int i = 0; i < 3; ++i)
+            {
+                adjacency[tri[i]].insert(tri[(i + 1) % 3]);
+                adjacency[tri[i]].insert(tri[(i + 2) % 3]);
+            }
+        }
         
-        // First, map each triangle to its edges
-        std::map<int32_t, std::set<std::pair<int32_t, int32_t>>> triangleEdges;
+        // DFS to find components
+        std::vector<std::set<int32_t>> components;
+        std::set<int32_t> visited;
+        
+        for (auto const& adj : adjacency)
+        {
+            int32_t start = adj.first;
+            if (visited.count(start))
+                continue;
+            
+            std::set<int32_t> component;
+            std::vector<int32_t> stack = {start};
+            
+            while (!stack.empty())
+            {
+                int32_t v = stack.back();
+                stack.pop_back();
+                
+                if (visited.count(v))
+                    continue;
+                
+                visited.insert(v);
+                component.insert(v);
+                
+                for (int32_t neighbor : adjacency[v])
+                {
+                    if (!visited.count(neighbor))
+                    {
+                        stack.push_back(neighbor);
+                    }
+                }
+            }
+            
+            if (!component.empty())
+            {
+                components.push_back(component);
+            }
+        }
+        
+        return components;
+    }
+    
+    template <typename Real>
+    int32_t BallPivotMeshHoleFiller<Real>::CountTopologyComponents(
+        std::vector<std::array<int32_t, 3>> const& triangles)
+    {
+        // Count components based on EDGE connectivity (proper topology definition)
+        // Two triangles are in the same component if they share an EDGE
+        
+        if (triangles.empty())
+            return 0;
+        
+        // Build triangle-to-triangle adjacency via shared edges
         std::map<std::pair<int32_t, int32_t>, std::set<int32_t>> edgeToTriangles;
         
         for (size_t triIdx = 0; triIdx < triangles.size(); ++triIdx)
@@ -1058,16 +1118,15 @@ namespace gte
                 int32_t v0 = tri[i];
                 int32_t v1 = tri[(i + 1) % 3];
                 auto edge = std::make_pair(std::min(v0, v1), std::max(v0, v1));
-                triangleEdges[triIdx].insert(edge);
                 edgeToTriangles[edge].insert(triIdx);
             }
         }
         
-        // Build triangle-to-triangle adjacency (triangles that share an edge)
+        // Build triangle adjacency
         std::map<int32_t, std::set<int32_t>> triangleAdjacency;
         for (auto const& [edge, tris] : edgeToTriangles)
         {
-            if (tris.size() >= 2)  // Edge shared by 2+ triangles
+            if (tris.size() >= 2)
             {
                 std::vector<int32_t> triList(tris.begin(), tris.end());
                 for (size_t i = 0; i < triList.size(); ++i)
@@ -1081,17 +1140,17 @@ namespace gte
             }
         }
         
-        // DFS on triangles to find components
-        std::vector<std::set<int32_t>> components;
+        // DFS on triangles to count components
         std::set<int32_t> visitedTriangles;
+        int32_t componentCount = 0;
         
         for (size_t triIdx = 0; triIdx < triangles.size(); ++triIdx)
         {
             if (visitedTriangles.count(triIdx))
                 continue;
             
-            // Start a new component with this triangle
-            std::set<int32_t> componentVertices;
+            // Found a new component
+            componentCount++;
             std::vector<int32_t> stack = {static_cast<int32_t>(triIdx)};
             
             while (!stack.empty())
@@ -1104,13 +1163,7 @@ namespace gte
                 
                 visitedTriangles.insert(currentTri);
                 
-                // Add all vertices from this triangle to component
-                for (int i = 0; i < 3; ++i)
-                {
-                    componentVertices.insert(triangles[currentTri][i]);
-                }
-                
-                // Add adjacent triangles (those sharing an edge) to stack
+                // Add adjacent triangles to stack
                 if (triangleAdjacency.count(currentTri))
                 {
                     for (int32_t adjacentTri : triangleAdjacency[currentTri])
@@ -1122,14 +1175,9 @@ namespace gte
                     }
                 }
             }
-            
-            if (!componentVertices.empty())
-            {
-                components.push_back(componentVertices);
-            }
         }
         
-        return components;
+        return componentCount;
     }
     
     template <typename Real>
@@ -1240,10 +1288,10 @@ namespace gte
         std::vector<std::array<int32_t, 3>>& triangles,
         Parameters const& params)
     {
-        // Detect current components
-        auto components = DetectConnectedComponents(triangles);
+        // Use topology-based component detection (edge connectivity)
+        int32_t topologyComponentCount = CountTopologyComponents(triangles);
         
-        if (components.size() <= 1)
+        if (topologyComponentCount <= 1)
         {
             if (params.verbose)
             {
@@ -1255,9 +1303,13 @@ namespace gte
         if (params.verbose)
         {
             std::cout << "\n[Forced Component Bridging]\n";
-            std::cout << "  Current components: " << components.size() << "\n";
+            std::cout << "  Current components (topology): " << topologyComponentCount << "\n";
             std::cout << "  Finding closest boundary edges between components...\n";
         }
+        
+        // For boundary edge detection, we still need vertex sets per component
+        // Use vertex-based detection for this purpose
+        auto components = DetectConnectedComponents(triangles);
         
         // Find boundary edges for each component
         std::map<std::pair<int32_t, int32_t>, int32_t> edgeCount;
@@ -1846,26 +1898,29 @@ namespace gte
         }
         
         // Step 8: Forced bridging - Try to bridge remaining open components after cleanup
-        auto postCleanupComponents = DetectConnectedComponents(triangles);
-        if (postCleanupComponents.size() > 1 && params.verbose)
+        // Use topology-based component count (edge connectivity) for proper detection
+        int32_t topologyComponentCount = CountTopologyComponents(triangles);
+        
+        if (topologyComponentCount > 1 && params.verbose)
         {
             std::cout << "\nStep 8: Attempting forced bridging after post-processing cleanup...\n";
+            std::cout << "  Topology analysis shows " << topologyComponentCount << " components\n";
         }
         
-        if (postCleanupComponents.size() > 1)
+        if (topologyComponentCount > 1)
         {
             // Try forced bridging multiple times if needed
             bool anyForcedBridges = false;
-            for (int forcedAttempt = 0; forcedAttempt < 10 && postCleanupComponents.size() > 1; ++forcedAttempt)
+            for (int forcedAttempt = 0; forcedAttempt < 10 && topologyComponentCount > 1; ++forcedAttempt)
             {
                 bool bridged = ForceBridgeRemainingComponents(vertices, triangles, params);
                 if (bridged)
                 {
                     anyForcedBridges = true;
-                    postCleanupComponents = DetectConnectedComponents(triangles);
+                    topologyComponentCount = CountTopologyComponents(triangles);
                     anyProgress = true;
                     
-                    if (postCleanupComponents.size() == 1)
+                    if (topologyComponentCount == 1)
                     {
                         if (params.verbose)
                         {
@@ -1880,11 +1935,11 @@ namespace gte
                 }
             }
             
-            if (anyForcedBridges && postCleanupComponents.size() > 1)
+            if (anyForcedBridges && topologyComponentCount > 1)
             {
                 if (params.verbose)
                 {
-                    std::cout << "Forced bridging reduced components to " << postCleanupComponents.size() << "\n";
+                    std::cout << "Forced bridging reduced components to " << topologyComponentCount << "\n";
                 }
             }
         }
