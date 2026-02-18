@@ -29,6 +29,7 @@ This repository includes GTE-style implementations of advanced mesh processing a
 - [UNIMPLEMENTED.md](UNIMPLEMENTED.md) - Remaining features
 - [README_DEVELOPMENT.md](README_DEVELOPMENT.md) - Developer guide
 - [GTE_MESH_PROCESSING_README.md](GTE_MESH_PROCESSING_README.md) - Quick start guide
+- [docs/MANIFOLD_CLOSURE_SUMMARY.md](docs/MANIFOLD_CLOSURE_SUMMARY.md) - Co3Ne manifold closure implementation
 - [tests/README.md](tests/README.md) - Test suite documentation
 
 **Quick Start:**
