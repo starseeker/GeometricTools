@@ -26,6 +26,7 @@
 #include <GTE/Mathematics/MeshRepair.h>
 #include <GTE/Mathematics/MeshValidation.h>
 #include <GTE/Mathematics/BallPivotReconstruction.h>
+#include <GTE/Mathematics/BallPivotMeshHoleFiller.h>
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -100,6 +101,13 @@ namespace gte
             std::vector<Real> ballRadii;  // Multiple radii to try
             size_t minNeighborsForPivot;
             
+            // Ball pivot mesh hole filler parameters
+            bool enableBallPivotHoleFiller;  // Use new adaptive hole filler
+            typename BallPivotMeshHoleFiller<Real>::EdgeMetric edgeMetric;
+            std::vector<Real> radiusScales;  // Scaling factors for adaptive radius
+            int32_t maxHoleFillerIterations;
+            bool removeEdgeTrianglesOnFailure;
+            
             // UV parameterization parameters
             bool enableUVMerging;
             Real uvMergingThreshold;
@@ -122,6 +130,13 @@ namespace gte
                 , holeFillingMethod(MeshHoleFilling<Real>::TriangulationMethod::CDT)
                 , enableBallPivot(false)  // Disabled by default (not yet implemented)
                 , minNeighborsForPivot(10)
+                , enableBallPivotHoleFiller(true)  // Enabled by default (new implementation)
+                , edgeMetric(BallPivotMeshHoleFiller<Real>::EdgeMetric::Average)
+                , radiusScales({static_cast<Real>(1.0), static_cast<Real>(1.5), 
+                               static_cast<Real>(2.0), static_cast<Real>(3.0), 
+                               static_cast<Real>(5.0)})
+                , maxHoleFillerIterations(10)
+                , removeEdgeTrianglesOnFailure(true)
                 , enableUVMerging(false)  // Disabled by default (not yet implemented)
                 , uvMergingThreshold(static_cast<Real>(0.1))
                 , enableIterativeBridging(true)  // Enabled by default
@@ -295,7 +310,37 @@ namespace gte
                 }
             }
             
-            // Step 6: Final hole filling (conservative, not aggressive)
+            // Step 6: Ball Pivot Mesh Hole Filler (adaptive, iterative)
+            if (params.enableBallPivotHoleFiller)
+            {
+                if (params.verbose)
+                {
+                    std::cout << "[Stitcher] Step 6: Ball Pivot Mesh Hole Filler (adaptive)\n";
+                }
+                
+                // Configure hole filler parameters
+                typename BallPivotMeshHoleFiller<Real>::Parameters holeFillerParams;
+                holeFillerParams.edgeMetric = params.edgeMetric;
+                holeFillerParams.radiusScales = params.radiusScales;
+                holeFillerParams.maxIterations = params.maxHoleFillerIterations;
+                holeFillerParams.removeEdgeTrianglesOnFailure = params.removeEdgeTrianglesOnFailure;
+                holeFillerParams.verbose = params.verbose;
+                
+                size_t trianglesBefore = triangles.size();
+                bool holeFilled = BallPivotMeshHoleFiller<Real>::FillAllHoles(
+                    vertices, triangles, holeFillerParams);
+                size_t trianglesAfter = triangles.size();
+                
+                if (params.verbose)
+                {
+                    std::cout << "  Ball pivot hole filler: " 
+                              << (holeFilled ? "SUCCESS" : "NO CHANGES") 
+                              << ", added " << (trianglesAfter - trianglesBefore) 
+                              << " triangles\n";
+                }
+            }
+            
+            // Step 7: Final hole filling (conservative, not aggressive)
             if (params.enableHoleFilling)
             {
                 // Fill remaining holes conservatively
