@@ -272,6 +272,10 @@ namespace gte
         static int32_t CountTopologyComponents(
             std::vector<std::array<int32_t, 3>> const& triangles);
         
+        // Detect topology component sets (edge-based connectivity)
+        static std::vector<std::set<int32_t>> DetectTopologyComponentSets(
+            std::vector<std::array<int32_t, 3>> const& triangles);
+        
         // Find close boundary edges between different components
         static std::vector<std::pair<std::pair<int32_t, int32_t>, std::pair<int32_t, int32_t>>>
         FindComponentGaps(
