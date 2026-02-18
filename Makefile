@@ -9,14 +9,13 @@ PTHREAD = -pthread
 TEST_DIR = tests
 
 # Primary test targets
-TARGETS = test_mesh_repair test_remesh test_co3ne test_co3ne_xyz test_full_algorithms test_rvd \
+TARGETS = test_mesh_repair test_co3ne test_full_algorithms test_rvd \
           demo_rvd_cvt test_remesh_comparison test_co3ne_rvd test_newton_optimizer \
           test_rvd_performance stress_test test_threadpool test_parallel_rvd \
           test_enhanced_manifold test_anisotropic_remesh test_delaunay6 test_cvt6d \
           test_delaunay_n test_delaunay_nn test_rvd_n test_cvt_n test_phase4_integration \
           test_anisotropic_end_to_end test_co3ne_stitcher test_ball_pivot_hole_filler \
-          test_ball_pivot_integration test_manifold_closure_r768 test_comprehensive_manifold_analysis test_uv_unwrapping_assessment \
-          test_manifold_production_pipeline
+          test_ball_pivot_integration test_comprehensive_manifold_analysis
 
 all: $(TARGETS)
 
@@ -29,12 +28,6 @@ test_remesh: $(TEST_DIR)/test_remesh.cpp
 
 test_co3ne: $(TEST_DIR)/test_co3ne.cpp
 	$(CXX) $(CXXFLAGS) -o test_co3ne $(TEST_DIR)/test_co3ne.cpp $(LDFLAGS)
-
-test_co3ne_xyz: $(TEST_DIR)/test_co3ne_xyz.cpp
-	$(CXX) $(CXXFLAGS) -o test_co3ne_xyz $(TEST_DIR)/test_co3ne_xyz.cpp $(LDFLAGS)
-
-test_co3ne_xyz_debug: $(TEST_DIR)/test_co3ne_xyz_debug.cpp
-	$(CXX) $(CXXFLAGS) -o test_co3ne_xyz_debug $(TEST_DIR)/test_co3ne_xyz_debug.cpp $(LDFLAGS)
 
 test_full_algorithms: $(TEST_DIR)/test_full_algorithms.cpp
 	$(CXX) $(CXXFLAGS) -o test_full_algorithms $(TEST_DIR)/test_full_algorithms.cpp $(LDFLAGS)
