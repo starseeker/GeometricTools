@@ -2676,7 +2676,166 @@ namespace gte
                 }
             }
             
-            // If we get here, detria failed (even with LSCM if attempted)
+            // Per new requirement: Try degeneracy detection and repair as final fallback
+            // If both planar and LSCM detria failed, the hole may have degenerate geometry
+            if (hole.vertexIndices.size() >= 3)
+            {
+                if (params.verbose)
+                {
+                    std::cout << "\n      Attempting degeneracy detection and repair as final fallback...\n";
+                }
+                
+                // Detect if hole is degenerate
+                DegeneracyInfo degeneracy = DetectDegenerateHole(vertices, hole, params);
+                
+                if (degeneracy.isDegenerate)
+                {
+                    if (params.verbose)
+                    {
+                        std::cout << "      ✓ Hole is degenerate, attempting repair...\n";
+                    }
+                    
+                    // Repair the degenerate hole
+                    BoundaryLoop repairedHole = RepairDegenerateHole(vertices, hole, degeneracy, params);
+                    
+                    // Check if repair made progress
+                    if (repairedHole.vertexIndices.size() < hole.vertexIndices.size() &&
+                        repairedHole.vertexIndices.size() >= 3)
+                    {
+                        if (params.verbose)
+                        {
+                            std::cout << "      Simplified boundary: " << hole.vertexIndices.size() 
+                                     << " → " << repairedHole.vertexIndices.size() << " vertices\n";
+                            std::cout << "      Retrying triangulation with repaired boundary...\n";
+                        }
+                        
+                        // Try planar projection + detria with repaired boundary
+                        std::vector<detria::PointD> repairedPoints2D;
+                        std::vector<int32_t> repairedIndexMap;
+                        
+                        // Compute best-fit plane for repaired boundary
+                        Vector3<Real> repairedCentroid{0, 0, 0};
+                        for (int32_t vi : repairedHole.vertexIndices)
+                        {
+                            repairedCentroid += vertices[vi];
+                        }
+                        repairedCentroid /= static_cast<Real>(repairedHole.vertexIndices.size());
+                        
+                        // Use same normal computation as before
+                        Vector3<Real> repairedAvgNormal{0, 0, 0};
+                        for (size_t i = 0; i < repairedHole.vertexIndices.size(); ++i)
+                        {
+                            size_t next = (i + 1) % repairedHole.vertexIndices.size();
+                            Vector3<Real> const& v1 = vertices[repairedHole.vertexIndices[i]];
+                            Vector3<Real> const& v2 = vertices[repairedHole.vertexIndices[next]];
+                            repairedAvgNormal += Cross(v1 - repairedCentroid, v2 - repairedCentroid);
+                        }
+                        Normalize(repairedAvgNormal);
+                        
+                        // Create orthonormal basis for 2D projection
+                        Vector3<Real> repairedZAxis = repairedAvgNormal;
+                        Vector3<Real> repairedU, repairedV;
+                        
+                        // Find a vector not parallel to zAxis
+                        Vector3<Real> arbitrary{static_cast<Real>(1), static_cast<Real>(0), static_cast<Real>(0)};
+                        if (std::abs(Dot(arbitrary, repairedZAxis)) > static_cast<Real>(0.9))
+                        {
+                            arbitrary = Vector3<Real>{static_cast<Real>(0), static_cast<Real>(1), static_cast<Real>(0)};
+                        }
+                        
+                        repairedU = Cross(arbitrary, repairedZAxis);
+                        Real uLen = Length(repairedU);
+                        if (uLen > static_cast<Real>(1e-10))
+                        {
+                            repairedU = repairedU / uLen;
+                        }
+                        
+                        repairedV = Cross(repairedZAxis, repairedU);
+                        Real vLen = Length(repairedV);
+                        if (vLen > static_cast<Real>(1e-10))
+                        {
+                            repairedV = repairedV / vLen;
+                        }
+                        
+                        // Project to 2D
+                        for (int32_t vi : repairedHole.vertexIndices)
+                        {
+                            Vector3<Real> p = vertices[vi] - repairedCentroid;
+                            repairedPoints2D.push_back({
+                                static_cast<double>(Dot(p, repairedU)),
+                                static_cast<double>(Dot(p, repairedV))
+                            });
+                            repairedIndexMap.push_back(vi);
+                        }
+                        
+                        // Try detria on repaired boundary
+                        detria::Triangulation repairedTri;
+                        repairedTri.setPoints(repairedPoints2D);
+                        
+                        std::vector<uint32_t> repairedOutline;
+                        for (size_t i = 0; i < repairedHole.vertexIndices.size(); ++i)
+                        {
+                            repairedOutline.push_back(static_cast<uint32_t>(i));
+                        }
+                        repairedTri.addOutline(repairedOutline);
+                        
+                        bool repairedSuccess = repairedTri.triangulate(true);
+                        
+                        if (repairedSuccess)
+                        {
+                            if (params.verbose)
+                            {
+                                std::cout << "      ✓ SUCCESS with repaired boundary + detria!\n";
+                            }
+                            
+                            // Extract triangles
+                            size_t trianglesAdded = 0;
+                            bool cwTriangles = true;
+                            
+                            repairedTri.forEachTriangle([&](detria::Triangle<uint32_t> triangle)
+                            {
+                                int32_t v0 = repairedIndexMap[triangle.x];
+                                int32_t v1 = repairedIndexMap[triangle.y];
+                                int32_t v2 = repairedIndexMap[triangle.z];
+                                
+                                // Check triangle orientation
+                                Vector3<Real> edge1 = vertices[v1] - vertices[v0];
+                                Vector3<Real> edge2 = vertices[v2] - vertices[v0];
+                                Vector3<Real> triNormal = Cross(edge1, edge2);
+                                
+                                if (Dot(triNormal, repairedAvgNormal) < static_cast<Real>(0))
+                                {
+                                    std::swap(v1, v2);
+                                }
+                                
+                                triangles.push_back({v0, v1, v2});
+                                trianglesAdded++;
+                            }, cwTriangles);
+                            
+                            if (params.verbose)
+                            {
+                                std::cout << "      Degeneracy repair added " << trianglesAdded << " triangles\n";
+                            }
+                            
+                            return trianglesAdded > 0;
+                        }
+                        else if (params.verbose)
+                        {
+                            std::cout << "      Detria still failed with repaired boundary\n";
+                        }
+                    }
+                    else if (params.verbose)
+                    {
+                        std::cout << "      Repair did not simplify boundary enough\n";
+                    }
+                }
+                else if (params.verbose)
+                {
+                    std::cout << "      Hole is not degenerate (no geometric issues detected)\n";
+                }
+            }
+            
+            // If we get here, all methods failed
             return false;
         }
         
@@ -2713,6 +2872,300 @@ namespace gte
         }
         
         return trianglesAdded > 0;
+    }
+    
+    // Degeneracy detection - analyzes if a hole boundary has degenerate geometry
+    template <typename Real>
+    typename BallPivotMeshHoleFiller<Real>::DegeneracyInfo 
+    BallPivotMeshHoleFiller<Real>::DetectDegenerateHole(
+        std::vector<Vector3<Real>> const& vertices,
+        BoundaryLoop const& hole,
+        Parameters const& params)
+    {
+        DegeneracyInfo info;
+        
+        if (hole.vertexIndices.size() < 3)
+        {
+            return info;  // Too small to analyze
+        }
+        
+        int32_t n = static_cast<int32_t>(hole.vertexIndices.size());
+        Real avgEdgeLength = hole.avgEdgeLength;
+        Real epsilon = avgEdgeLength * static_cast<Real>(0.01);  // 1% of average edge
+        Real angleThreshold = static_cast<Real>(170.0 * 3.14159265358979323846 / 180.0);  // 170 degrees in radians
+        
+        // Check 1: Collinear consecutive edges (angle near 180°)
+        for (int32_t i = 0; i < n; ++i)
+        {
+            int32_t prev = (i - 1 + n) % n;
+            int32_t curr = i;
+            int32_t next = (i + 1) % n;
+            
+            Vector3<Real> const& vPrev = vertices[hole.vertexIndices[prev]];
+            Vector3<Real> const& vCurr = vertices[hole.vertexIndices[curr]];
+            Vector3<Real> const& vNext = vertices[hole.vertexIndices[next]];
+            
+            Vector3<Real> edge1 = vCurr - vPrev;
+            Vector3<Real> edge2 = vNext - vCurr;
+            
+            Real len1 = Length(edge1);
+            Real len2 = Length(edge2);
+            
+            if (len1 > epsilon && len2 > epsilon)
+            {
+                edge1 /= len1;
+                edge2 /= len2;
+                
+                Real dot = Dot(edge1, edge2);
+                Real angle = std::acos(std::clamp(dot, static_cast<Real>(-1), static_cast<Real>(1)));
+                
+                // If angle is close to 180° (pi radians), edges are collinear
+                Real deviation = std::abs(static_cast<Real>(3.14159265358979323846) - angle);
+                Real deviationDegrees = deviation * static_cast<Real>(180.0 / 3.14159265358979323846);
+                
+                if (deviationDegrees < static_cast<Real>(10.0))  // Within 10° of straight line
+                {
+                    info.collinearVertexCount++;
+                    info.collinearVertices.push_back(hole.vertexIndices[curr]);
+                    info.maxAngleDeviation = std::max(info.maxAngleDeviation, deviationDegrees);
+                }
+            }
+        }
+        
+        // Check 2: Near-zero edge lengths
+        for (int32_t i = 0; i < n; ++i)
+        {
+            int32_t next = (i + 1) % n;
+            Vector3<Real> const& v1 = vertices[hole.vertexIndices[i]];
+            Vector3<Real> const& v2 = vertices[hole.vertexIndices[next]];
+            
+            Real edgeLength = Length(v2 - v1);
+            info.minEdgeLength = std::min(info.minEdgeLength, edgeLength);
+            
+            if (edgeLength < epsilon)
+            {
+                info.nearZeroEdgeCount++;
+            }
+        }
+        
+        // Check 3: Vertices lying on opposite edges
+        // For each vertex, check distance to all non-adjacent edges
+        for (int32_t i = 0; i < n; ++i)
+        {
+            Vector3<Real> const& v = vertices[hole.vertexIndices[i]];
+            
+            // Check distance to all edges except adjacent ones
+            for (int32_t j = 0; j < n; ++j)
+            {
+                // Skip adjacent edges
+                if (j == i || j == (i - 1 + n) % n || j == (i + 1) % n)
+                    continue;
+                
+                int32_t next = (j + 1) % n;
+                Vector3<Real> const& e1 = vertices[hole.vertexIndices[j]];
+                Vector3<Real> const& e2 = vertices[hole.vertexIndices[next]];
+                
+                // Compute distance from point to line segment
+                Vector3<Real> edge = e2 - e1;
+                Real edgeLen = Length(edge);
+                
+                if (edgeLen < epsilon)
+                    continue;
+                
+                Vector3<Real> toPoint = v - e1;
+                Real t = Dot(toPoint, edge) / (edgeLen * edgeLen);
+                
+                // Only check if projection is within the edge segment
+                if (t > static_cast<Real>(0.01) && t < static_cast<Real>(0.99))
+                {
+                    Vector3<Real> projection = e1 + edge * t;
+                    Real distance = Length(v - projection);
+                    
+                    if (distance < epsilon * static_cast<Real>(3.0))  // Within 3% of avg edge
+                    {
+                        info.vertexOnEdgeCount++;
+                        break;  // Count each vertex only once
+                    }
+                }
+            }
+        }
+        
+        // Check 4: Near-duplicate vertices
+        for (int32_t i = 0; i < n; ++i)
+        {
+            Vector3<Real> const& v1 = vertices[hole.vertexIndices[i]];
+            
+            for (int32_t j = i + 2; j < n; ++j)  // Skip adjacent vertices
+            {
+                if (j == (i - 1 + n) % n || j == (i + 1) % n)
+                    continue;
+                    
+                Vector3<Real> const& v2 = vertices[hole.vertexIndices[j]];
+                Real distance = Length(v2 - v1);
+                
+                if (distance < epsilon)
+                {
+                    info.nearDuplicateVertexCount++;
+                }
+            }
+        }
+        
+        // Determine if overall degenerate
+        info.isDegenerate = (info.collinearVertexCount > 0) ||
+                           (info.vertexOnEdgeCount > 0) ||
+                           (info.nearZeroEdgeCount > 0) ||
+                           (info.nearDuplicateVertexCount > 0);
+        
+        if (params.verbose && info.isDegenerate)
+        {
+            std::cout << "\n[Degeneracy Detection]\n";
+            std::cout << "  Hole has " << n << " vertices\n";
+            std::cout << "  Collinear vertices: " << info.collinearVertexCount << "\n";
+            std::cout << "  Vertex-on-edge cases: " << info.vertexOnEdgeCount << "\n";
+            std::cout << "  Near-zero edges: " << info.nearZeroEdgeCount << "\n";
+            std::cout << "  Near-duplicate vertices: " << info.nearDuplicateVertexCount << "\n";
+            std::cout << "  Min edge length: " << info.minEdgeLength << "\n";
+            std::cout << "  Max angle deviation: " << info.maxAngleDeviation << " degrees\n";
+        }
+        
+        return info;
+    }
+    
+    // Degeneracy repair - simplifies a degenerate hole boundary
+    template <typename Real>
+    typename BallPivotMeshHoleFiller<Real>::BoundaryLoop 
+    BallPivotMeshHoleFiller<Real>::RepairDegenerateHole(
+        std::vector<Vector3<Real>> const& vertices,
+        BoundaryLoop const& hole,
+        DegeneracyInfo const& degeneracy,
+        Parameters const& params)
+    {
+        BoundaryLoop repairedHole = hole;
+        
+        if (!degeneracy.isDegenerate)
+        {
+            return repairedHole;  // Nothing to repair
+        }
+        
+        if (params.verbose)
+        {
+            std::cout << "\n[Degeneracy Repair]\n";
+            std::cout << "  Starting with " << hole.vertexIndices.size() << " vertices\n";
+        }
+        
+        Real avgEdgeLength = hole.avgEdgeLength;
+        Real epsilon = avgEdgeLength * static_cast<Real>(0.01);
+        
+        // Strategy 1: Remove collinear vertices (industry standard polygon simplification)
+        // This merges consecutive edges that are nearly collinear
+        if (degeneracy.collinearVertexCount > 0 && degeneracy.collinearVertices.size() > 0)
+        {
+            if (params.verbose)
+            {
+                std::cout << "  Removing " << degeneracy.collinearVertexCount << " collinear vertices...\n";
+            }
+            
+            std::set<int32_t> verticesToRemove(
+                degeneracy.collinearVertices.begin(),
+                degeneracy.collinearVertices.end());
+            
+            std::vector<int32_t> newVertices;
+            for (int32_t vi : repairedHole.vertexIndices)
+            {
+                if (verticesToRemove.find(vi) == verticesToRemove.end())
+                {
+                    newVertices.push_back(vi);
+                }
+            }
+            
+            if (newVertices.size() >= 3)
+            {
+                repairedHole.vertexIndices = newVertices;
+                
+                if (params.verbose)
+                {
+                    std::cout << "  After collinear removal: " << newVertices.size() << " vertices\n";
+                }
+            }
+        }
+        
+        // Strategy 2: Remove near-zero edges by merging endpoints
+        if (degeneracy.nearZeroEdgeCount > 0)
+        {
+            if (params.verbose)
+            {
+                std::cout << "  Removing near-zero edges...\n";
+            }
+            
+            std::vector<int32_t> newVertices;
+            int32_t n = static_cast<int32_t>(repairedHole.vertexIndices.size());
+            
+            for (int32_t i = 0; i < n; ++i)
+            {
+                int32_t next = (i + 1) % n;
+                Vector3<Real> const& v1 = vertices[repairedHole.vertexIndices[i]];
+                Vector3<Real> const& v2 = vertices[repairedHole.vertexIndices[next]];
+                
+                Real edgeLength = Length(v2 - v1);
+                
+                // Keep vertex if edge is not near-zero
+                if (edgeLength >= epsilon)
+                {
+                    newVertices.push_back(repairedHole.vertexIndices[i]);
+                }
+                // Otherwise skip this vertex (merge with next)
+            }
+            
+            if (newVertices.size() >= 3)
+            {
+                repairedHole.vertexIndices = newVertices;
+                
+                if (params.verbose)
+                {
+                    std::cout << "  After near-zero edge removal: " << newVertices.size() << " vertices\n";
+                }
+            }
+        }
+        
+        // Strategy 3: For vertex-on-edge cases, we would ideally split edges
+        // However, this requires modifying the vertex list which is more complex
+        // For now, document this limitation
+        if (degeneracy.vertexOnEdgeCount > 0 && params.verbose)
+        {
+            std::cout << "  Note: " << degeneracy.vertexOnEdgeCount 
+                      << " vertex-on-edge cases detected\n";
+            std::cout << "  (Edge splitting not yet implemented - requires vertex list modification)\n";
+        }
+        
+        // Recalculate hole statistics
+        int32_t n = static_cast<int32_t>(repairedHole.vertexIndices.size());
+        Real totalLength = static_cast<Real>(0);
+        Real minLen = std::numeric_limits<Real>::max();
+        Real maxLen = static_cast<Real>(0);
+        
+        for (int32_t i = 0; i < n; ++i)
+        {
+            int32_t next = (i + 1) % n;
+            Vector3<Real> const& v1 = vertices[repairedHole.vertexIndices[i]];
+            Vector3<Real> const& v2 = vertices[repairedHole.vertexIndices[next]];
+            
+            Real edgeLength = Length(v2 - v1);
+            totalLength += edgeLength;
+            minLen = std::min(minLen, edgeLength);
+            maxLen = std::max(maxLen, edgeLength);
+        }
+        
+        repairedHole.avgEdgeLength = totalLength / static_cast<Real>(n);
+        repairedHole.minEdgeLength = minLen;
+        repairedHole.maxEdgeLength = maxLen;
+        
+        if (params.verbose)
+        {
+            std::cout << "  Final repaired hole: " << repairedHole.vertexIndices.size() << " vertices\n";
+            std::cout << "  New avg edge length: " << repairedHole.avgEdgeLength << "\n";
+        }
+        
+        return repairedHole;
     }
     
     // Non-manifold edge detection and repair

@@ -146,6 +146,42 @@ namespace gte
             std::vector<int32_t> const& steinerVertexIndices,
             Parameters const& params);
         
+        // Degeneracy detection and repair structures
+        struct DegeneracyInfo
+        {
+            bool isDegenerate;
+            int32_t collinearVertexCount;      // Number of collinear vertices
+            int32_t vertexOnEdgeCount;         // Number of vertices on opposite edges
+            int32_t nearZeroEdgeCount;         // Number of near-zero length edges
+            int32_t nearDuplicateVertexCount;  // Number of near-duplicate vertices
+            Real minEdgeLength;                // Minimum edge length
+            Real maxAngleDeviation;            // Max deviation from 180° for collinear
+            std::vector<int32_t> collinearVertices;  // Indices of collinear vertices
+            
+            DegeneracyInfo()
+                : isDegenerate(false)
+                , collinearVertexCount(0)
+                , vertexOnEdgeCount(0)
+                , nearZeroEdgeCount(0)
+                , nearDuplicateVertexCount(0)
+                , minEdgeLength(std::numeric_limits<Real>::max())
+                , maxAngleDeviation(static_cast<Real>(0))
+            {}
+        };
+        
+        // Detect if a hole boundary is degenerate
+        static DegeneracyInfo DetectDegenerateHole(
+            std::vector<Vector3<Real>> const& vertices,
+            BoundaryLoop const& hole,
+            Parameters const& params);
+        
+        // Repair a degenerate hole by simplifying its boundary
+        static BoundaryLoop RepairDegenerateHole(
+            std::vector<Vector3<Real>> const& vertices,
+            BoundaryLoop const& hole,
+            DegeneracyInfo const& degeneracy,
+            Parameters const& params);
+        
     private:
         // Edge structure for topology tracking
         struct Edge
