@@ -1043,53 +1043,89 @@ namespace gte
     std::vector<std::set<int32_t>> BallPivotMeshHoleFiller<Real>::DetectConnectedComponents(
         std::vector<std::array<int32_t, 3>> const& triangles)
     {
-        // Build adjacency from triangles
-        std::map<int32_t, std::set<int32_t>> adjacency;
-        for (auto const& tri : triangles)
+        // Build edge-based adjacency for proper component detection
+        // Two triangles are in the same component if they share an EDGE, not just a vertex
+        
+        // First, map each triangle to its edges
+        std::map<int32_t, std::set<std::pair<int32_t, int32_t>>> triangleEdges;
+        std::map<std::pair<int32_t, int32_t>, std::set<int32_t>> edgeToTriangles;
+        
+        for (size_t triIdx = 0; triIdx < triangles.size(); ++triIdx)
         {
+            auto const& tri = triangles[triIdx];
             for (int i = 0; i < 3; ++i)
             {
-                adjacency[tri[i]].insert(tri[(i + 1) % 3]);
-                adjacency[tri[i]].insert(tri[(i + 2) % 3]);
+                int32_t v0 = tri[i];
+                int32_t v1 = tri[(i + 1) % 3];
+                auto edge = std::make_pair(std::min(v0, v1), std::max(v0, v1));
+                triangleEdges[triIdx].insert(edge);
+                edgeToTriangles[edge].insert(triIdx);
             }
         }
         
-        // DFS to find components
-        std::vector<std::set<int32_t>> components;
-        std::set<int32_t> visited;
-        
-        for (auto const& adj : adjacency)
+        // Build triangle-to-triangle adjacency (triangles that share an edge)
+        std::map<int32_t, std::set<int32_t>> triangleAdjacency;
+        for (auto const& [edge, tris] : edgeToTriangles)
         {
-            int32_t start = adj.first;
-            if (visited.count(start))
+            if (tris.size() >= 2)  // Edge shared by 2+ triangles
+            {
+                std::vector<int32_t> triList(tris.begin(), tris.end());
+                for (size_t i = 0; i < triList.size(); ++i)
+                {
+                    for (size_t j = i + 1; j < triList.size(); ++j)
+                    {
+                        triangleAdjacency[triList[i]].insert(triList[j]);
+                        triangleAdjacency[triList[j]].insert(triList[i]);
+                    }
+                }
+            }
+        }
+        
+        // DFS on triangles to find components
+        std::vector<std::set<int32_t>> components;
+        std::set<int32_t> visitedTriangles;
+        
+        for (size_t triIdx = 0; triIdx < triangles.size(); ++triIdx)
+        {
+            if (visitedTriangles.count(triIdx))
                 continue;
             
-            std::set<int32_t> component;
-            std::vector<int32_t> stack = {start};
+            // Start a new component with this triangle
+            std::set<int32_t> componentVertices;
+            std::vector<int32_t> stack = {static_cast<int32_t>(triIdx)};
             
             while (!stack.empty())
             {
-                int32_t v = stack.back();
+                int32_t currentTri = stack.back();
                 stack.pop_back();
                 
-                if (visited.count(v))
+                if (visitedTriangles.count(currentTri))
                     continue;
                 
-                visited.insert(v);
-                component.insert(v);
+                visitedTriangles.insert(currentTri);
                 
-                for (int32_t neighbor : adjacency[v])
+                // Add all vertices from this triangle to component
+                for (int i = 0; i < 3; ++i)
                 {
-                    if (!visited.count(neighbor))
+                    componentVertices.insert(triangles[currentTri][i]);
+                }
+                
+                // Add adjacent triangles (those sharing an edge) to stack
+                if (triangleAdjacency.count(currentTri))
+                {
+                    for (int32_t adjacentTri : triangleAdjacency[currentTri])
                     {
-                        stack.push_back(neighbor);
+                        if (!visitedTriangles.count(adjacentTri))
+                        {
+                            stack.push_back(adjacentTri);
+                        }
                     }
                 }
             }
             
-            if (!component.empty())
+            if (!componentVertices.empty())
             {
-                components.push_back(component);
+                components.push_back(componentVertices);
             }
         }
         
