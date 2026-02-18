@@ -126,8 +126,8 @@ test_anisotropic_end_to_end: $(TEST_DIR)/test_anisotropic_end_to_end.cpp GTE/Mat
 	$(CXX) $(CXXFLAGS) -o test_anisotropic_end_to_end $(TEST_DIR)/test_anisotropic_end_to_end.cpp $(LDFLAGS)
 
 # Co3Ne Manifold Stitcher test
-test_co3ne_stitcher: $(TEST_DIR)/test_co3ne_stitcher.cpp GTE/Mathematics/Co3NeManifoldStitcher.h GTE/Mathematics/Co3Ne.h GTE/Mathematics/MeshHoleFilling.h GTE/Mathematics/BallPivotReconstruction.h GTE/Mathematics/BallPivotReconstruction.cpp
-	$(CXX) $(CXXFLAGS) -o test_co3ne_stitcher $(TEST_DIR)/test_co3ne_stitcher.cpp GTE/Mathematics/BallPivotReconstruction.cpp $(LDFLAGS)
+test_co3ne_stitcher: $(TEST_DIR)/test_co3ne_stitcher.cpp GTE/Mathematics/Co3NeManifoldStitcher.h GTE/Mathematics/Co3Ne.h GTE/Mathematics/MeshHoleFilling.h GTE/Mathematics/BallPivotReconstruction.h GTE/Mathematics/BallPivotReconstruction.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp
+	$(CXX) $(CXXFLAGS) -o test_co3ne_stitcher $(TEST_DIR)/test_co3ne_stitcher.cpp GTE/Mathematics/BallPivotReconstruction.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp $(LDFLAGS)
 
 # Topology-aware bridging test
 test_topology: $(TEST_DIR)/test_topology_bridging.cpp GTE/Mathematics/Co3NeManifoldStitcher.h GTE/Mathematics/Co3Ne.h GTE/Mathematics/BallPivotReconstruction.h GTE/Mathematics/BallPivotReconstruction.cpp

@@ -1970,12 +1970,8 @@ namespace gte
             // Find closest pair of boundary edges
             for (auto const& edge1 : comp1.boundaryEdges)
             {
-                Vector3<Real> e1_mid = (vertices[edge1.first] + vertices[edge1.second]) * static_cast<Real>(0.5);
-                
                 for (auto const& edge2 : comp2.boundaryEdges)
                 {
-                    Vector3<Real> e2_mid = (vertices[edge2.first] + vertices[edge2.second]) * static_cast<Real>(0.5);
-                    
                     // Compute minimum distance between edge endpoints
                     Real dist = std::min({
                         Length(vertices[edge1.first] - vertices[edge2.first]),
@@ -1996,6 +1992,50 @@ namespace gte
             return minDistance;
         }
         
+        // Compute all candidate edge pairs between two components, sorted by distance
+        static void FindCandidateEdgePairs(
+            std::vector<Vector3<Real>> const& vertices,
+            MeshComponent const& comp1,
+            MeshComponent const& comp2,
+            Real threshold,
+            std::vector<std::tuple<Real, std::pair<int32_t, int32_t>, std::pair<int32_t, int32_t>>>& candidates)
+        {
+            candidates.clear();
+            
+            // Early rejection using bounding spheres
+            Real centerDist = Length(comp1.centroid - comp2.centroid);
+            if (centerDist > comp1.boundingRadius + comp2.boundingRadius + threshold)
+            {
+                return;
+            }
+            
+            // Find all edge pairs within threshold
+            for (auto const& edge1 : comp1.boundaryEdges)
+            {
+                for (auto const& edge2 : comp2.boundaryEdges)
+                {
+                    // Compute minimum distance between edge endpoints
+                    Real dist = std::min({
+                        Length(vertices[edge1.first] - vertices[edge2.first]),
+                        Length(vertices[edge1.first] - vertices[edge2.second]),
+                        Length(vertices[edge1.second] - vertices[edge2.first]),
+                        Length(vertices[edge1.second] - vertices[edge2.second])
+                    });
+                    
+                    if (dist < threshold)
+                    {
+                        candidates.push_back(std::make_tuple(dist, edge1, edge2));
+                    }
+                }
+            }
+            
+            // Sort by distance (closest first)
+            std::sort(candidates.begin(), candidates.end(),
+                [](auto const& a, auto const& b) {
+                    return std::get<0>(a) < std::get<0>(b);
+                });
+        }
+        
         // Progressive component merging: largest component bridges to closest component iteratively
         static size_t ProgressiveComponentMerging(
             std::vector<Vector3<Real>> const& vertices,
@@ -2004,8 +2044,9 @@ namespace gte
             bool verbose = false)
         {
             size_t totalBridges = 0;
+            size_t maxAttempts = 100;  // Prevent infinite loops
             
-            while (true)
+            for (size_t attempt = 0; attempt < maxAttempts; ++attempt)
             {
                 // Extract current components
                 std::vector<MeshComponent> components;
@@ -2033,57 +2074,86 @@ namespace gte
                               << components[0].boundaryEdges.size() << " boundary edges\n";
                 }
                 
-                // Find closest component to the largest
-                Real minDist = std::numeric_limits<Real>::max();
-                size_t closestCompIdx = 1;
-                std::pair<int32_t, int32_t> bestEdge1, bestEdge2;
-                
-                for (size_t i = 1; i < components.size(); ++i)
-                {
-                    std::pair<int32_t, int32_t> edge1, edge2;
-                    Real dist = ComputeComponentDistance(vertices, components[0], components[i], edge1, edge2);
-                    
-                    if (dist < minDist)
-                    {
-                        minDist = dist;
-                        closestCompIdx = i;
-                        bestEdge1 = edge1;
-                        bestEdge2 = edge2;
-                    }
-                }
-                
-                // Check if closest component is within threshold
-                if (minDist >= threshold)
+                // Skip if largest component has no boundary edges (closed component)
+                if (components[0].boundaryEdges.empty())
                 {
                     if (verbose)
                     {
-                        std::cout << "Closest component at distance " << minDist 
-                                  << " exceeds threshold " << threshold << ". Stopping.\n";
+                        std::cout << "Largest component is closed (no boundary edges). Cannot bridge.\n";
                     }
                     break;
                 }
                 
-                if (verbose)
+                // Try to find a component to bridge to
+                bool bridgeCreated = false;
+                
+                // Sort other components by distance to largest
+                std::vector<std::pair<Real, size_t>> componentsByDistance;
+                for (size_t i = 1; i < components.size(); ++i)
                 {
-                    std::cout << "Bridging largest component to component " << closestCompIdx 
-                              << " at distance " << minDist << "\n";
+                    // Skip components with no boundary edges
+                    if (components[i].boundaryEdges.empty())
+                    {
+                        continue;
+                    }
+                    
+                    Real centerDist = Length(components[0].centroid - components[i].centroid);
+                    componentsByDistance.push_back({centerDist, i});
                 }
                 
-                // Bridge the two components
-                if (BridgeBoundaryEdges(vertices, triangles, bestEdge1, bestEdge2, true))
+                std::sort(componentsByDistance.begin(), componentsByDistance.end());
+                
+                // Try bridging to each component in order of proximity
+                for (auto const& distComp : componentsByDistance)
                 {
-                    totalBridges++;
+                    size_t compIdx = distComp.second;
+                    
+                    // Find candidate edge pairs
+                    std::vector<std::tuple<Real, std::pair<int32_t, int32_t>, std::pair<int32_t, int32_t>>> candidates;
+                    FindCandidateEdgePairs(vertices, components[0], components[compIdx], threshold, candidates);
+                    
+                    if (candidates.empty())
+                    {
+                        continue;
+                    }
                     
                     if (verbose)
                     {
-                        std::cout << "  Bridge created successfully\n";
+                        std::cout << "Trying to bridge to component " << compIdx 
+                                  << " (" << candidates.size() << " edge pairs within threshold)\n";
+                    }
+                    
+                    // Try each edge pair until one succeeds
+                    for (auto const& candidate : candidates)
+                    {
+                        auto const& edge1 = std::get<1>(candidate);
+                        auto const& edge2 = std::get<2>(candidate);
+                        Real dist = std::get<0>(candidate);
+                        
+                        if (BridgeBoundaryEdges(vertices, triangles, edge1, edge2, true))
+                        {
+                            totalBridges++;
+                            bridgeCreated = true;
+                            
+                            if (verbose)
+                            {
+                                std::cout << "  Bridge created successfully at distance " << dist << "\n";
+                            }
+                            break;
+                        }
+                    }
+                    
+                    if (bridgeCreated)
+                    {
+                        break;
                     }
                 }
-                else
+                
+                if (!bridgeCreated)
                 {
                     if (verbose)
                     {
-                        std::cout << "  Bridge failed validation. Stopping.\n";
+                        std::cout << "No valid bridges found. Stopping.\n";
                     }
                     break;
                 }
