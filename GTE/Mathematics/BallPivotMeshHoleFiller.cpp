@@ -2621,18 +2621,49 @@ namespace gte
                     detria::Triangulation uvTri;
                     uvTri.setPoints(points2D);
                     uvTri.addOutline(outline);
-                    success = uvTri.triangulate(true);
+                    bool uvSuccess = uvTri.triangulate(true);
                     
-                    if (success)
+                    if (uvSuccess)
                     {
-                        // Use the UV triangulation
-                        tri = uvTri;
                         useLSCM = true;
                         
                         if (params.verbose)
                         {
                             std::cout << "      ✓ SUCCESS with UV unwrapping + detria!\n";
                         }
+                        
+                        // Extract triangles immediately from uvTri
+                        size_t trianglesAdded = 0;
+                        bool cwTriangles = true;
+                        
+                        uvTri.forEachTriangle([&](detria::Triangle<uint32_t> triangle)
+                        {
+                            // Map 2D indices back to 3D vertex indices
+                            int32_t v0 = indexMap[triangle.x];
+                            int32_t v1 = indexMap[triangle.y];
+                            int32_t v2 = indexMap[triangle.z];
+                            
+                            // Check triangle orientation matches hole normal
+                            Vector3<Real> edge1 = vertices[v1] - vertices[v0];
+                            Vector3<Real> edge2 = vertices[v2] - vertices[v0];
+                            Vector3<Real> triNormal = Cross(edge1, edge2);
+                            
+                            // Flip if necessary to match hole normal
+                            if (Dot(triNormal, avgNormal) < static_cast<Real>(0))
+                            {
+                                std::swap(v1, v2);
+                            }
+                            
+                            triangles.push_back({v0, v1, v2});
+                            trianglesAdded++;
+                        }, cwTriangles);
+                        
+                        if (params.verbose)
+                        {
+                            std::cout << "      UV unwrapping added " << trianglesAdded << " triangles\n";
+                        }
+                        
+                        return trianglesAdded > 0;
                     }
                     else if (params.verbose)
                     {
@@ -2645,11 +2676,7 @@ namespace gte
                 }
             }
             
-            if (!success)
-            {
-                return false;
-            }
-        }
+            return false;
         
         // Step 6: Extract triangles and add to mesh
         size_t trianglesAdded = 0;
