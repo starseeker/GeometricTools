@@ -2162,6 +2162,151 @@ namespace gte
             return totalBridges;
         }
         
+        // Optimized progressive component merging with batching
+        // Reduces component re-extraction overhead by batching bridges
+        static size_t ProgressiveComponentMergingBatched(
+            std::vector<Vector3<Real>> const& vertices,
+            std::vector<std::array<int32_t, 3>>& triangles,
+            Real threshold,
+            bool verbose = false)
+        {
+            size_t totalBridges = 0;
+            size_t maxBatches = 20;  // Prevent infinite loops
+            
+            for (size_t batchNum = 0; batchNum < maxBatches; ++batchNum)
+            {
+                // Extract current components ONCE per batch
+                std::vector<MeshComponent> components;
+                ExtractComponents(vertices, triangles, components);
+                
+                if (components.size() <= 1)
+                {
+                    if (verbose)
+                    {
+                        std::cout << "Single component achieved!\n";
+                    }
+                    break;
+                }
+                
+                if (verbose)
+                {
+                    std::cout << "Batch " << (batchNum + 1) << ": " << components.size() << " components\n";
+                }
+                
+                // Sort components by size (largest first)
+                std::sort(components.begin(), components.end(),
+                    [](MeshComponent const& a, MeshComponent const& b) {
+                        return a.Size() > b.Size();
+                    });
+                
+                // Collect ALL viable bridges in this batch
+                std::vector<std::tuple<Real, std::pair<int32_t, int32_t>, std::pair<int32_t, int32_t>>> allBridgeCandidates;
+                
+                // For each component, find bridges to other components
+                for (size_t i = 0; i < components.size(); ++i)
+                {
+                    if (components[i].boundaryEdges.empty())
+                    {
+                        continue;
+                    }
+                    
+                    // Find closest component with boundary edges
+                    Real minDist = std::numeric_limits<Real>::max();
+                    size_t closestIdx = components.size();
+                    
+                    for (size_t j = i + 1; j < components.size(); ++j)
+                    {
+                        if (components[j].boundaryEdges.empty())
+                        {
+                            continue;
+                        }
+                        
+                        Real centerDist = Length(components[i].centroid - components[j].centroid);
+                        if (centerDist < minDist)
+                        {
+                            minDist = centerDist;
+                            closestIdx = j;
+                        }
+                    }
+                    
+                    if (closestIdx < components.size())
+                    {
+                        // Find candidate edge pairs between these components
+                        std::vector<std::tuple<Real, std::pair<int32_t, int32_t>, std::pair<int32_t, int32_t>>> candidates;
+                        FindCandidateEdgePairs(vertices, components[i], components[closestIdx], threshold, candidates);
+                        
+                        if (!candidates.empty())
+                        {
+                            // Take the closest edge pair for this component pair
+                            allBridgeCandidates.push_back(candidates[0]);
+                        }
+                    }
+                }
+                
+                if (allBridgeCandidates.empty())
+                {
+                    if (verbose)
+                    {
+                        std::cout << "No valid bridges found in batch. Stopping.\n";
+                    }
+                    break;
+                }
+                
+                // Sort all candidates by distance
+                std::sort(allBridgeCandidates.begin(), allBridgeCandidates.end(),
+                    [](auto const& a, auto const& b) {
+                        return std::get<0>(a) < std::get<0>(b);
+                    });
+                
+                // Apply bridges in order, avoiding conflicts
+                std::set<std::pair<int32_t, int32_t>> usedEdges;
+                size_t bridgesThisBatch = 0;
+                
+                for (auto const& candidate : allBridgeCandidates)
+                {
+                    auto const& edge1 = std::get<1>(candidate);
+                    auto const& edge2 = std::get<2>(candidate);
+                    Real dist = std::get<0>(candidate);
+                    
+                    // Check if either edge already used
+                    if (usedEdges.count(edge1) || usedEdges.count(edge2))
+                    {
+                        continue;
+                    }
+                    
+                    if (BridgeBoundaryEdges(vertices, triangles, edge1, edge2, true))
+                    {
+                        usedEdges.insert(edge1);
+                        usedEdges.insert(edge2);
+                        bridgesThisBatch++;
+                        totalBridges++;
+                        
+                        if (verbose && bridgesThisBatch <= 5)
+                        {
+                            std::cout << "  Bridge " << bridgesThisBatch 
+                                      << ": distance " << dist << "\n";
+                        }
+                    }
+                }
+                
+                if (verbose)
+                {
+                    std::cout << "  Created " << bridgesThisBatch << " bridges in batch\n";
+                }
+                
+                if (bridgesThisBatch == 0)
+                {
+                    if (verbose)
+                    {
+                        std::cout << "No successful bridges in batch. Stopping.\n";
+                    }
+                    break;
+                }
+            }
+            
+            return totalBridges;
+        }
+        
         // Optimized topology-aware component bridging with iterative multi-pass strategy
         static void TopologyAwareComponentBridging(
             std::vector<Vector3<Real>>& vertices,
@@ -2201,8 +2346,8 @@ namespace gte
                               << (currentThreshold / avgEdgeLength) << "x avg edge length)\n";
                 }
                 
-                // Step 1: Progressive component merging (bridge largest to closest)
-                size_t bridgesThisPass = ProgressiveComponentMerging(
+                // Step 1: Progressive component merging with batching (optimized)
+                size_t bridgesThisPass = ProgressiveComponentMergingBatched(
                     vertices, triangles, currentThreshold, params.verbose);
                 totalBridges += bridgesThisPass;
                 
