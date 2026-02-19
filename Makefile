@@ -184,3 +184,7 @@ test_progressive_merging: $(TEST_DIR)/test_progressive_merging.cpp GTE/Mathemati
 # Bridging comparison analysis
 test_bridging_comparison: $(TEST_DIR)/test_bridging_comparison.cpp GTE/Mathematics/Co3NeManifoldStitcher.h
 	$(CXX) $(CXXFLAGS) -o test_bridging_comparison $(TEST_DIR)/test_bridging_comparison.cpp $(LDFLAGS)
+
+# Performance benchmark test
+test_performance_benchmark: $(TEST_DIR)/test_performance_benchmark.cpp GTE/Mathematics/Co3NeManifoldStitcher.h GTE/Mathematics/Co3Ne.h GTE/Mathematics/BallPivotReconstruction.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp
+	$(CXX) $(CXXFLAGS) -o test_performance_benchmark $(TEST_DIR)/test_performance_benchmark.cpp GTE/Mathematics/BallPivotReconstruction.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp $(LDFLAGS)
