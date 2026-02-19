@@ -2157,7 +2157,104 @@ namespace gte
             return minDistance;
         }
         
+        // Spatial index for boundary edges to accelerate O(B²) queries
+        struct EdgeSpatialIndex
+        {
+            struct EdgeEntry
+            {
+                std::pair<int32_t, int32_t> edge;
+                Vector3<Real> midpoint;
+                Vector3<Real> boxMin;
+                Vector3<Real> boxMax;
+                
+                EdgeEntry(std::pair<int32_t, int32_t> const& e,
+                         std::vector<Vector3<Real>> const& vertices,
+                         Real padding = static_cast<Real>(0))
+                {
+                    edge = e;
+                    Vector3<Real> const& v0 = vertices[e.first];
+                    Vector3<Real> const& v1 = vertices[e.second];
+                    midpoint = (v0 + v1) * static_cast<Real>(0.5);
+                    
+                    // Create bounding box with padding
+                    for (int i = 0; i < 3; ++i)
+                    {
+                        boxMin[i] = std::min(v0[i], v1[i]) - padding;
+                        boxMax[i] = std::max(v0[i], v1[i]) + padding;
+                    }
+                }
+            };
+            
+            std::vector<EdgeEntry> edges;
+            
+            void Build(std::vector<std::pair<int32_t, int32_t>> const& boundaryEdges,
+                      std::vector<Vector3<Real>> const& vertices,
+                      Real padding = static_cast<Real>(0))
+            {
+                edges.clear();
+                edges.reserve(boundaryEdges.size());
+                
+                for (auto const& edge : boundaryEdges)
+                {
+                    edges.emplace_back(edge, vertices, padding);
+                }
+            }
+            
+            // Query edges within threshold distance of a point
+            void QueryNearPoint(Vector3<Real> const& point,
+                               Real threshold,
+                               std::vector<size_t>& results) const
+            {
+                results.clear();
+                Real thresholdSq = threshold * threshold;
+                
+                for (size_t i = 0; i < edges.size(); ++i)
+                {
+                    // Quick box test
+                    bool outsideBox = false;
+                    for (int j = 0; j < 3; ++j)
+                    {
+                        if (point[j] < edges[i].boxMin[j] - threshold ||
+                            point[j] > edges[i].boxMax[j] + threshold)
+                        {
+                            outsideBox = true;
+                            break;
+                        }
+                    }
+                    
+                    if (!outsideBox)
+                    {
+                        // More precise distance check to midpoint
+                        Vector3<Real> diff = point - edges[i].midpoint;
+                        Real distSq = Dot(diff, diff);
+                        if (distSq <= thresholdSq)
+                        {
+                            results.push_back(i);
+                        }
+                    }
+                }
+            }
+            
+            // Query edges within threshold of another edge
+            void QueryNearEdge(std::pair<int32_t, int32_t> const& queryEdge,
+                              std::vector<Vector3<Real>> const& vertices,
+                              Real threshold,
+                              std::vector<size_t>& results) const
+            {
+                results.clear();
+                
+                Vector3<Real> const& v0 = vertices[queryEdge.first];
+                Vector3<Real> const& v1 = vertices[queryEdge.second];
+                Vector3<Real> midpoint = (v0 + v1) * static_cast<Real>(0.5);
+                
+                // First, query based on midpoint
+                Real expandedThreshold = threshold + Length(v1 - v0) * static_cast<Real>(0.5);
+                QueryNearPoint(midpoint, expandedThreshold, results);
+            }
+        };
+        
         // Compute all candidate edge pairs between two components, sorted by distance
+        // Uses spatial indexing to reduce from O(B1 × B2) to O(B1 × log B2)
         static void FindCandidateEdgePairs(
             std::vector<Vector3<Real>> const& vertices,
             MeshComponent const& comp1,
@@ -2174,22 +2271,59 @@ namespace gte
                 return;
             }
             
-            // Find all edge pairs within threshold
-            for (auto const& edge1 : comp1.boundaryEdges)
+            // For small edge counts, brute force is faster
+            if (comp1.boundaryEdges.size() * comp2.boundaryEdges.size() < 100)
             {
-                for (auto const& edge2 : comp2.boundaryEdges)
+                // Brute force for small cases
+                for (auto const& edge1 : comp1.boundaryEdges)
                 {
-                    // Compute minimum distance between edge endpoints
-                    Real dist = std::min({
-                        Length(vertices[edge1.first] - vertices[edge2.first]),
-                        Length(vertices[edge1.first] - vertices[edge2.second]),
-                        Length(vertices[edge1.second] - vertices[edge2.first]),
-                        Length(vertices[edge1.second] - vertices[edge2.second])
-                    });
-                    
-                    if (dist <= threshold)
+                    for (auto const& edge2 : comp2.boundaryEdges)
                     {
-                        candidates.push_back(std::make_tuple(dist, edge1, edge2));
+                        // Compute minimum distance between edge endpoints
+                        Real dist = std::min({
+                            Length(vertices[edge1.first] - vertices[edge2.first]),
+                            Length(vertices[edge1.first] - vertices[edge2.second]),
+                            Length(vertices[edge1.second] - vertices[edge2.first]),
+                            Length(vertices[edge1.second] - vertices[edge2.second])
+                        });
+                        
+                        if (dist <= threshold)
+                        {
+                            candidates.push_back(std::make_tuple(dist, edge1, edge2));
+                        }
+                    }
+                }
+            }
+            else
+            {
+                // Use spatial index for larger cases
+                EdgeSpatialIndex index;
+                index.Build(comp2.boundaryEdges, vertices, threshold);
+                
+                std::vector<size_t> nearbyIndices;
+                
+                for (auto const& edge1 : comp1.boundaryEdges)
+                {
+                    // Query spatial index for edges near edge1
+                    index.QueryNearEdge(edge1, vertices, threshold, nearbyIndices);
+                    
+                    // Check actual distances to nearby edges
+                    for (size_t idx : nearbyIndices)
+                    {
+                        auto const& edge2 = comp2.boundaryEdges[idx];
+                        
+                        // Compute minimum distance between edge endpoints
+                        Real dist = std::min({
+                            Length(vertices[edge1.first] - vertices[edge2.first]),
+                            Length(vertices[edge1.first] - vertices[edge2.second]),
+                            Length(vertices[edge1.second] - vertices[edge2.first]),
+                            Length(vertices[edge1.second] - vertices[edge2.second])
+                        });
+                        
+                        if (dist <= threshold)
+                        {
+                            candidates.push_back(std::make_tuple(dist, edge1, edge2));
+                        }
                     }
                 }
             }
