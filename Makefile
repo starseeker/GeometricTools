@@ -180,3 +180,7 @@ test_manifold_production_pipeline: $(TEST_DIR)/test_manifold_production_pipeline
 # Progressive component merging test
 test_progressive_merging: $(TEST_DIR)/test_progressive_merging.cpp GTE/Mathematics/Co3NeManifoldStitcher.h GTE/Mathematics/BallPivotReconstruction.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp
 	$(CXX) $(CXXFLAGS) -o test_progressive_merging $(TEST_DIR)/test_progressive_merging.cpp GTE/Mathematics/BallPivotReconstruction.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp $(LDFLAGS)
+
+# Bridging comparison analysis
+test_bridging_comparison: $(TEST_DIR)/test_bridging_comparison.cpp GTE/Mathematics/Co3NeManifoldStitcher.h
+	$(CXX) $(CXXFLAGS) -o test_bridging_comparison $(TEST_DIR)/test_bridging_comparison.cpp $(LDFLAGS)
