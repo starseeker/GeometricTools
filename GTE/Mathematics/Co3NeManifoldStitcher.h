@@ -1874,7 +1874,7 @@ namespace gte
             }
         };
         
-        // Structure to represent a connected component
+        // Structure to represent a connected component with incremental update support
         struct MeshComponent
         {
             std::vector<size_t> triangleIndices;  // Indices of triangles in this component
@@ -1882,13 +1882,97 @@ namespace gte
             std::set<int32_t> vertices;  // All vertices in component
             Vector3<Real> centroid;  // Component centroid
             Real boundingRadius;  // Bounding sphere radius
+            size_t vertexCount;  // Number of vertices (for weighted centroid merging)
             
             MeshComponent() 
                 : centroid{static_cast<Real>(0), static_cast<Real>(0), static_cast<Real>(0)}
                 , boundingRadius(static_cast<Real>(0))
+                , vertexCount(0)
             {}
             
             size_t Size() const { return triangleIndices.size(); }
+            
+            // Merge another component into this one (incremental update)
+            void MergeWith(MeshComponent const& other, 
+                          std::vector<Vector3<Real>> const& verticesArray)
+            {
+                // Merge triangle indices
+                triangleIndices.insert(triangleIndices.end(), 
+                                      other.triangleIndices.begin(), 
+                                      other.triangleIndices.end());
+                
+                // Merge vertex sets (this->vertices is the member variable)
+                this->vertices.insert(other.vertices.begin(), other.vertices.end());
+                
+                // Update centroid as weighted average
+                if (vertexCount + other.vertexCount > 0)
+                {
+                    Real w1 = static_cast<Real>(vertexCount);
+                    Real w2 = static_cast<Real>(other.vertexCount);
+                    Real totalWeight = w1 + w2;
+                    
+                    centroid = (centroid * w1 + other.centroid * w2) / totalWeight;
+                    vertexCount += other.vertexCount;
+                }
+                
+                // Update bounding sphere: compute bounding sphere of two bounding spheres
+                UpdateBoundingSphereAfterMerge(other, verticesArray);
+                
+                // Note: Boundary edges will be updated separately after bridging
+            }
+            
+            // Update bounding sphere after merging with another component
+            void UpdateBoundingSphereAfterMerge(MeshComponent const& other,
+                                                std::vector<Vector3<Real>> const& vertices)
+            {
+                // Distance between sphere centers
+                Vector3<Real> centerDiff = other.centroid - centroid;
+                Real centerDist = Length(centerDiff);
+                
+                // If one sphere contains the other, use the larger one
+                if (centerDist + other.boundingRadius <= boundingRadius)
+                {
+                    // Other sphere is inside this one
+                    return;
+                }
+                if (centerDist + boundingRadius <= other.boundingRadius)
+                {
+                    // This sphere is inside the other one
+                    centroid = other.centroid;
+                    boundingRadius = other.boundingRadius;
+                    return;
+                }
+                
+                // Compute bounding sphere that contains both spheres
+                // The new sphere's diameter is the distance between the farthest points
+                Real newRadius = (boundingRadius + centerDist + other.boundingRadius) * static_cast<Real>(0.5);
+                
+                // New center is along the line between centers
+                if (centerDist > static_cast<Real>(0))
+                {
+                    Real t = (newRadius - boundingRadius) / centerDist;
+                    centroid = centroid + centerDiff * t;
+                }
+                
+                boundingRadius = newRadius;
+            }
+            
+            // Remove edges that are no longer boundaries after bridging
+            void RemoveBoundaryEdges(std::set<std::pair<int32_t, int32_t>> const& edgesToRemove)
+            {
+                auto it = boundaryEdges.begin();
+                while (it != boundaryEdges.end())
+                {
+                    if (edgesToRemove.count(*it))
+                    {
+                        it = boundaryEdges.erase(it);
+                    }
+                    else
+                    {
+                        ++it;
+                    }
+                }
+            }
         };
         
         // Extract connected components from mesh
@@ -2023,6 +2107,9 @@ namespace gte
                     Real dist = Length(vertices[vIdx] - component.centroid);
                     component.boundingRadius = std::max(component.boundingRadius, dist);
                 }
+                
+                // Set vertex count for weighted centroid merging
+                component.vertexCount = component.vertices.size();
                 
                 components.push_back(component);
             }
@@ -2542,6 +2629,220 @@ namespace gte
             return totalBridges;
         }
         
+        // Incremental component merging with cached geometric properties
+        // Avoids full re-extraction by updating component properties incrementally
+        static size_t ProgressiveComponentMergingIncremental(
+            std::vector<Vector3<Real>> const& vertices,
+            std::vector<std::array<int32_t, 3>>& triangles,
+            Real threshold,
+            bool verbose = false)
+        {
+            if (triangles.empty())
+            {
+                return 0;
+            }
+            
+            size_t totalBridges = 0;
+            size_t maxIterations = 10;
+            
+            // Initial extraction (only done once!)
+            std::vector<MeshComponent> components;
+            ExtractComponents(vertices, triangles, components);
+            
+            if (verbose)
+            {
+                std::cout << "\n=== Incremental Component Merging ===\n";
+                std::cout << "Initial components: " << components.size() << "\n";
+            }
+            
+            for (size_t iter = 0; iter < maxIterations; ++iter)
+            {
+                if (components.size() <= 1)
+                {
+                    if (verbose)
+                    {
+                        std::cout << "Single component achieved!\n";
+                    }
+                    break;
+                }
+                
+                if (verbose)
+                {
+                    std::cout << "Iteration " << (iter + 1) << ": " 
+                              << components.size() << " components\n";
+                }
+                
+                // Build list of ALL possible bridges between ALL component pairs
+                std::vector<std::tuple<Real, size_t, size_t, std::pair<int32_t, int32_t>, std::pair<int32_t, int32_t>>> allPossibleBridges;
+                
+                for (size_t i = 0; i < components.size(); ++i)
+                {
+                    if (components[i].boundaryEdges.empty())
+                    {
+                        continue;
+                    }
+                    
+                    for (size_t j = i + 1; j < components.size(); ++j)
+                    {
+                        if (components[j].boundaryEdges.empty())
+                        {
+                            continue;
+                        }
+                        
+                        // Quick distance check using centroids and bounding spheres
+                        Real centerDist = Length(components[i].centroid - components[j].centroid);
+                        Real maxReach = components[i].boundingRadius + components[j].boundingRadius + threshold;
+                        
+                        if (centerDist > maxReach)
+                        {
+                            continue;  // Too far apart
+                        }
+                        
+                        // Find best edge pair between these components
+                        std::vector<std::tuple<Real, std::pair<int32_t, int32_t>, std::pair<int32_t, int32_t>>> candidates;
+                        FindCandidateEdgePairs(vertices, components[i], components[j], threshold, candidates);
+                        
+                        if (!candidates.empty())
+                        {
+                            auto const& best = candidates[0];
+                            Real dist = std::get<0>(best);
+                            auto const& edge1 = std::get<1>(best);
+                            auto const& edge2 = std::get<2>(best);
+                            
+                            allPossibleBridges.push_back(std::make_tuple(dist, i, j, edge1, edge2));
+                        }
+                    }
+                }
+                
+                if (allPossibleBridges.empty())
+                {
+                    if (verbose)
+                    {
+                        std::cout << "No valid bridges found. Stopping.\n";
+                    }
+                    break;
+                }
+                
+                // Sort by distance (closest first)
+                std::sort(allPossibleBridges.begin(), allPossibleBridges.end(),
+                    [](auto const& a, auto const& b) {
+                        return std::get<0>(a) < std::get<0>(b);
+                    });
+                
+                // Track which components are being merged
+                std::map<size_t, size_t> componentMergeMap;  // Maps component index to its merge target
+                std::set<size_t> mergedComponents;
+                std::vector<std::tuple<size_t, size_t, std::pair<int32_t, int32_t>, std::pair<int32_t, int32_t>>> successfulBridges;
+                size_t bridgesThisIter = 0;
+                
+                // Apply bridges greedily
+                for (auto const& bridge : allPossibleBridges)
+                {
+                    Real dist = std::get<0>(bridge);
+                    size_t comp1 = std::get<1>(bridge);
+                    size_t comp2 = std::get<2>(bridge);
+                    auto const& edge1 = std::get<3>(bridge);
+                    auto const& edge2 = std::get<4>(bridge);
+                    
+                    // Skip if either component already merged
+                    if (mergedComponents.count(comp1) || mergedComponents.count(comp2))
+                    {
+                        continue;
+                    }
+                    
+                    // Try to create bridge
+                    if (BridgeBoundaryEdges(vertices, triangles, edge1, edge2, true))
+                    {
+                        mergedComponents.insert(comp1);
+                        mergedComponents.insert(comp2);
+                        componentMergeMap[comp2] = comp1;  // comp2 merges into comp1
+                        successfulBridges.push_back(std::make_tuple(comp1, comp2, edge1, edge2));
+                        bridgesThisIter++;
+                        totalBridges++;
+                        
+                        if (verbose && bridgesThisIter <= 10)
+                        {
+                            std::cout << "  Bridge " << bridgesThisIter 
+                                      << ": comp " << comp1 << " <-> " << comp2
+                                      << " at distance " << dist << "\n";
+                        }
+                    }
+                }
+                
+                if (bridgesThisIter == 0)
+                {
+                    if (verbose)
+                    {
+                        std::cout << "No successful bridges. Stopping.\n";
+                    }
+                    break;
+                }
+                
+                // INCREMENTAL UPDATE: Merge components and update their properties
+                std::vector<MeshComponent> newComponents;
+                std::set<size_t> processedComponents;
+                
+                for (auto const& bridgeInfo : successfulBridges)
+                {
+                    size_t target = std::get<0>(bridgeInfo);
+                    size_t source = std::get<1>(bridgeInfo);
+                    auto const& edge1 = std::get<2>(bridgeInfo);
+                    auto const& edge2 = std::get<3>(bridgeInfo);
+                    
+                    if (processedComponents.count(target) == 0)
+                    {
+                        // Merge source into target (incremental update)
+                        components[target].MergeWith(components[source], vertices);
+                        
+                        // Remove bridged edges from boundary (subtractive update)
+                        std::set<std::pair<int32_t, int32_t>> edgesToRemove;
+                        edgesToRemove.insert(edge1);
+                        edgesToRemove.insert(edge2);
+                        components[target].RemoveBoundaryEdges(edgesToRemove);
+                        
+                        processedComponents.insert(target);
+                        processedComponents.insert(source);
+                    }
+                }
+                
+                // Build new component list (keep non-merged and merged targets)
+                for (size_t i = 0; i < components.size(); ++i)
+                {
+                    // Skip if this component was merged into another
+                    bool wasMergedInto = false;
+                    for (auto const& pair : componentMergeMap)
+                    {
+                        if (pair.first == i && pair.second != i)
+                        {
+                            wasMergedInto = true;
+                            break;
+                        }
+                    }
+                    
+                    if (!wasMergedInto)
+                    {
+                        newComponents.push_back(std::move(components[i]));
+                    }
+                }
+                
+                components = std::move(newComponents);
+                
+                if (verbose)
+                {
+                    std::cout << "  Created " << bridgesThisIter << " bridges, "
+                              << components.size() << " components remain\n";
+                }
+            }
+            
+            if (verbose)
+            {
+                std::cout << "Final components: " << components.size() << "\n";
+                std::cout << "Total bridges created: " << totalBridges << "\n";
+            }
+            
+            return totalBridges;
+        }
+        
         // Union-Find optimized progressive component merging
         // Uses Union-Find to track which triangles belong together, minimizing re-extraction
         static size_t ProgressiveComponentMergingUnionFind(
@@ -2550,8 +2851,8 @@ namespace gte
             Real threshold,
             bool verbose = false)
         {
-            // Use aggressive batching strategy
-            return ProgressiveComponentMergingAggressiveBatch(vertices, triangles, threshold, verbose);
+            // Use incremental strategy with cached properties
+            return ProgressiveComponentMergingIncremental(vertices, triangles, threshold, verbose);
         }
         
         // Optimized topology-aware component bridging with iterative multi-pass strategy
