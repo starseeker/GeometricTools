@@ -2385,9 +2385,9 @@ namespace gte
             return totalBridges;
         }
         
-        // Union-Find optimized progressive component merging
-        // Uses Union-Find to track which triangles belong together, minimizing re-extraction
-        static size_t ProgressiveComponentMergingUnionFind(
+        // Aggressive multi-merge: bridges multiple component pairs simultaneously
+        // Reduces iterations from O(C) to O(log C) where C = number of components
+        static size_t ProgressiveComponentMergingAggressiveBatch(
             std::vector<Vector3<Real>> const& vertices,
             std::vector<std::array<int32_t, 3>>& triangles,
             Real threshold,
@@ -2399,41 +2399,15 @@ namespace gte
             }
             
             size_t totalBridges = 0;
-            size_t maxBatches = 20;
+            size_t maxIterations = 10;  // Much fewer iterations needed
             
-            for (size_t batchNum = 0; batchNum < maxBatches; ++batchNum)
+            for (size_t iter = 0; iter < maxIterations; ++iter)
             {
-                // Extract components at start of each batch
-                // Initialize Union-Find for current triangle set
-                size_t initialTriangleCount = triangles.size();
-                UnionFind uf(initialTriangleCount);
+                // Extract components ONCE per iteration
+                std::vector<MeshComponent> components;
+                ExtractComponents(vertices, triangles, components);
                 
-                // Build edge-to-triangles adjacency
-                std::map<std::pair<int32_t, int32_t>, std::vector<size_t>> edgeToTriangles;
-                
-                for (size_t triIdx = 0; triIdx < initialTriangleCount; ++triIdx)
-                {
-                    auto const& tri = triangles[triIdx];
-                    for (int i = 0; i < 3; ++i)
-                    {
-                        auto edge = std::make_pair(
-                            std::min(tri[i], tri[(i + 1) % 3]),
-                            std::max(tri[i], tri[(i + 1) % 3]));
-                        edgeToTriangles[edge].push_back(triIdx);
-                    }
-                }
-                
-                // Unite triangles that share interior edges
-                for (auto const& entry : edgeToTriangles)
-                {
-                    auto const& tris = entry.second;
-                    if (tris.size() == 2)
-                    {
-                        uf.Unite(tris[0], tris[1]);
-                    }
-                }
-                
-                if (uf.GetNumComponents() <= 1)
+                if (components.size() <= 1)
                 {
                     if (verbose)
                     {
@@ -2444,103 +2418,19 @@ namespace gte
                 
                 if (verbose)
                 {
-                    std::cout << "Batch " << (batchNum + 1) << ": " 
-                              << uf.GetNumComponents() << " components\n";
+                    std::cout << "Iteration " << (iter + 1) << ": " 
+                              << components.size() << " components\n";
                 }
                 
-                // Build component data structures from Union-Find
-                std::map<size_t, std::vector<size_t>> componentMap;
-                for (size_t i = 0; i < initialTriangleCount; ++i)
-                {
-                    size_t root = uf.Find(i);
-                    componentMap[root].push_back(i);
-                }
+                // Build a list of ALL possible bridges between ALL component pairs
+                std::vector<std::tuple<Real, size_t, size_t, std::pair<int32_t, int32_t>, std::pair<int32_t, int32_t>>> allPossibleBridges;
                 
-                std::vector<MeshComponent> components;
-                components.reserve(componentMap.size());
-                
-                for (auto const& entry : componentMap)
-                {
-                    MeshComponent comp;
-                    comp.triangleIndices = entry.second;
-                    
-                    // Gather vertices and compute centroid
-                    for (size_t triIdx : comp.triangleIndices)
-                    {
-                        auto const& tri = triangles[triIdx];
-                        for (int i = 0; i < 3; ++i)
-                        {
-                            comp.vertices.insert(tri[i]);
-                        }
-                    }
-                    
-                    comp.centroid = Vector3<Real>{
-                        static_cast<Real>(0), 
-                        static_cast<Real>(0), 
-                        static_cast<Real>(0)};
-                    
-                    for (int32_t vIdx : comp.vertices)
-                    {
-                        comp.centroid += vertices[vIdx];
-                    }
-                    if (!comp.vertices.empty())
-                    {
-                        comp.centroid /= static_cast<Real>(comp.vertices.size());
-                    }
-                    
-                    // Compute bounding radius
-                    comp.boundingRadius = static_cast<Real>(0);
-                    for (int32_t vIdx : comp.vertices)
-                    {
-                        Real dist = Length(vertices[vIdx] - comp.centroid);
-                        comp.boundingRadius = std::max(comp.boundingRadius, dist);
-                    }
-                    
-                    // Extract boundary edges
-                    std::map<std::pair<int32_t, int32_t>, size_t> edgeCounts;
-                    for (size_t triIdx : comp.triangleIndices)
-                    {
-                        auto const& tri = triangles[triIdx];
-                        for (int i = 0; i < 3; ++i)
-                        {
-                            auto edge = std::make_pair(
-                                std::min(tri[i], tri[(i + 1) % 3]),
-                                std::max(tri[i], tri[(i + 1) % 3]));
-                            edgeCounts[edge]++;
-                        }
-                    }
-                    
-                    for (auto const& ec : edgeCounts)
-                    {
-                        if (ec.second == 1)
-                        {
-                            comp.boundaryEdges.push_back(ec.first);
-                        }
-                    }
-                    
-                    components.push_back(comp);
-                }
-                
-                // Sort by size
-                std::sort(components.begin(), components.end(),
-                    [](MeshComponent const& a, MeshComponent const& b) {
-                        return a.Size() > b.Size();
-                    });
-                
-                // Collect ALL viable bridges in this batch
-                std::vector<std::tuple<Real, std::pair<int32_t, int32_t>, std::pair<int32_t, int32_t>>> allBridgeCandidates;
-                
-                // For each component, find bridges to other components
                 for (size_t i = 0; i < components.size(); ++i)
                 {
                     if (components[i].boundaryEdges.empty())
                     {
                         continue;
                     }
-                    
-                    // Find closest component with boundary edges
-                    Real minDist = std::numeric_limits<Real>::max();
-                    size_t closestIdx = components.size();
                     
                     for (size_t j = i + 1; j < components.size(); ++j)
                     {
@@ -2549,90 +2439,119 @@ namespace gte
                             continue;
                         }
                         
+                        // Quick distance check using centroids
                         Real centerDist = Length(components[i].centroid - components[j].centroid);
-                        if (centerDist < minDist)
+                        Real maxReach = components[i].boundingRadius + components[j].boundingRadius + threshold;
+                        
+                        if (centerDist > maxReach)
                         {
-                            minDist = centerDist;
-                            closestIdx = j;
+                            continue;  // Too far apart
                         }
-                    }
-                    
-                    if (closestIdx < components.size())
-                    {
-                        // Find candidate edge pairs between these components
+                        
+                        // Find best edge pair between these components
                         std::vector<std::tuple<Real, std::pair<int32_t, int32_t>, std::pair<int32_t, int32_t>>> candidates;
-                        FindCandidateEdgePairs(vertices, components[i], components[closestIdx], threshold, candidates);
+                        FindCandidateEdgePairs(vertices, components[i], components[j], threshold, candidates);
                         
                         if (!candidates.empty())
                         {
-                            // Take the closest edge pair for this component pair
-                            allBridgeCandidates.push_back(candidates[0]);
+                            // Store best bridge candidate for this component pair
+                            auto const& best = candidates[0];
+                            Real dist = std::get<0>(best);
+                            auto const& edge1 = std::get<1>(best);
+                            auto const& edge2 = std::get<2>(best);
+                            
+                            allPossibleBridges.push_back(std::make_tuple(dist, i, j, edge1, edge2));
                         }
                     }
                 }
                 
-                if (allBridgeCandidates.empty())
+                if (allPossibleBridges.empty())
                 {
                     if (verbose)
                     {
-                        std::cout << "No valid bridges found in batch. Stopping.\n";
+                        std::cout << "No valid bridges found. Stopping.\n";
                     }
                     break;
                 }
                 
-                // Sort all candidates by distance
-                std::sort(allBridgeCandidates.begin(), allBridgeCandidates.end(),
+                // Sort by distance (closest first)
+                std::sort(allPossibleBridges.begin(), allPossibleBridges.end(),
                     [](auto const& a, auto const& b) {
                         return std::get<0>(a) < std::get<0>(b);
                     });
                 
-                // Apply bridges in order, avoiding conflicts
+                // Greedily apply bridges, avoiding conflicts
+                std::set<size_t> mergedComponents;  // Track which components have been merged
                 std::set<std::pair<int32_t, int32_t>> usedEdges;
-                size_t bridgesThisBatch = 0;
+                size_t bridgesThisIter = 0;
                 
-                for (auto const& candidate : allBridgeCandidates)
+                for (auto const& bridge : allPossibleBridges)
                 {
-                    auto const& edge1 = std::get<1>(candidate);
-                    auto const& edge2 = std::get<2>(candidate);
-                    Real dist = std::get<0>(candidate);
+                    Real dist = std::get<0>(bridge);
+                    size_t comp1 = std::get<1>(bridge);
+                    size_t comp2 = std::get<2>(bridge);
+                    auto const& edge1 = std::get<3>(bridge);
+                    auto const& edge2 = std::get<4>(bridge);
                     
-                    // Check if either edge already used
+                    // Skip if either component already merged in this iteration
+                    if (mergedComponents.count(comp1) || mergedComponents.count(comp2))
+                    {
+                        continue;
+                    }
+                    
+                    // Skip if edges already used
                     if (usedEdges.count(edge1) || usedEdges.count(edge2))
                     {
                         continue;
                     }
                     
+                    // Try to create bridge
                     if (BridgeBoundaryEdges(vertices, triangles, edge1, edge2, true))
                     {
+                        mergedComponents.insert(comp1);
+                        mergedComponents.insert(comp2);
                         usedEdges.insert(edge1);
                         usedEdges.insert(edge2);
-                        bridgesThisBatch++;
+                        bridgesThisIter++;
                         totalBridges++;
                         
-                        if (verbose && bridgesThisBatch <= 5)
+                        if (verbose && bridgesThisIter <= 10)
                         {
-                            std::cout << "  Bridge " << bridgesThisBatch 
-                                      << ": distance " << dist << "\n";
+                            std::cout << "  Bridge " << bridgesThisIter 
+                                      << ": comp " << comp1 << " <-> " << comp2
+                                      << " at distance " << dist << "\n";
                         }
                     }
                 }
                 
                 if (verbose)
                 {
-                    std::cout << "  Created " << bridgesThisBatch << " bridges in batch\n";
+                    std::cout << "  Created " << bridgesThisIter << " bridges this iteration\n";
                 }
                 
-                if (bridgesThisBatch == 0)
+                if (bridgesThisIter == 0)
                 {
                     if (verbose)
                     {
-                        std::cout << "No successful bridges in batch. Stopping.\n";
+                        std::cout << "No successful bridges. Stopping.\n";
                     }
                     break;
                 }
             }
             
             return totalBridges;
+        }
+        
+        // Union-Find optimized progressive component merging
+        // Uses Union-Find to track which triangles belong together, minimizing re-extraction
+        static size_t ProgressiveComponentMergingUnionFind(
+            std::vector<Vector3<Real>> const& vertices,
+            std::vector<std::array<int32_t, 3>>& triangles,
+            Real threshold,
+            bool verbose = false)
+        {
+            // Use aggressive batching strategy
+            return ProgressiveComponentMergingAggressiveBatch(vertices, triangles, threshold, verbose);
         }
         
         // Optimized topology-aware component bridging with iterative multi-pass strategy

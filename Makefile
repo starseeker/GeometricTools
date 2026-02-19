@@ -188,3 +188,7 @@ test_bridging_comparison: $(TEST_DIR)/test_bridging_comparison.cpp GTE/Mathemati
 # Performance benchmark test
 test_performance_benchmark: $(TEST_DIR)/test_performance_benchmark.cpp GTE/Mathematics/Co3NeManifoldStitcher.h GTE/Mathematics/Co3Ne.h GTE/Mathematics/BallPivotReconstruction.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp
 	$(CXX) $(CXXFLAGS) -o test_performance_benchmark $(TEST_DIR)/test_performance_benchmark.cpp GTE/Mathematics/BallPivotReconstruction.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp $(LDFLAGS)
+
+# Bottleneck analysis test
+test_bottleneck: $(TEST_DIR)/test_bottleneck.cpp GTE/Mathematics/Co3NeManifoldStitcher.h GTE/Mathematics/Co3Ne.h GTE/Mathematics/BallPivotReconstruction.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp
+	$(CXX) $(CXXFLAGS) -o test_bottleneck $(TEST_DIR)/test_bottleneck.cpp GTE/Mathematics/BallPivotReconstruction.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp $(LDFLAGS)
