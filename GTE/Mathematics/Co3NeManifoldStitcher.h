@@ -2572,7 +2572,7 @@ namespace gte
                 return;
             }
             
-            // Multi-pass iterative strategy: bridge → hole fill → repeat
+            // Multi-pass iterative strategy: bridge components first, then fill holes
             Real avgEdgeLength = EstimateAverageEdgeLength(vertices, triangles);
             Real currentThreshold = avgEdgeLength * params.initialBridgeThreshold;
             Real maxThreshold = avgEdgeLength * params.maxBridgeThreshold;
@@ -2584,6 +2584,7 @@ namespace gte
             size_t totalBridges = 0;
             size_t totalHolesFilled = 0;
             
+            // Phase 1: Component bridging (defer hole filling)
             for (size_t iteration = 0; iteration < params.maxIterations; ++iteration)
             {
                 if (params.verbose)
@@ -2603,19 +2604,8 @@ namespace gte
                     std::cout << "Created " << bridgesThisPass << " bridges this pass\n";
                 }
                 
-                // Step 2: Fill holes that bridging created or exposed
+                // Step 2: Skip hole filling during bridging phase (deferred to end)
                 size_t holesFilledThisPass = 0;
-                if (params.enableHoleFilling)
-                {
-                    holesFilledThisPass = FillHolesConservative(
-                        vertices, triangles, params, params.verbose);
-                    totalHolesFilled += holesFilledThisPass;
-                    
-                    if (params.verbose && holesFilledThisPass > 0)
-                    {
-                        std::cout << "Filled " << holesFilledThisPass << " holes this pass\n";
-                    }
-                }
                 
                 // Step 3: Check progress
                 ValidateManifoldDetailed(triangles, isClosedManifold, hasNonManifold, 
@@ -2660,6 +2650,23 @@ namespace gte
                         }
                         break;
                     }
+                }
+            }
+            
+            // Phase 2: Hole filling (now that component bridging is complete)
+            if (params.enableHoleFilling)
+            {
+                if (params.verbose)
+                {
+                    std::cout << "\n=== Phase 2: Hole Filling ===\n";
+                }
+                
+                totalHolesFilled = FillHolesConservative(
+                    vertices, triangles, params, params.verbose);
+                
+                if (params.verbose)
+                {
+                    std::cout << "Filled " << totalHolesFilled << " holes total\n";
                 }
             }
             
