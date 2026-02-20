@@ -85,7 +85,7 @@ namespace gte
                 , orientNormals(true)
                 , strictMode(false)
                 , removeIsolatedTriangles(true)
-                , smoothWithRVD(false)      // Disabled by default: O(n²) per iteration; opt-in for small meshes only
+                , smoothWithRVD(false)      // Disabled by default: O(n²)/iter; see SmoothWithRVD for full analysis
                 , rvdSmoothIterations(3)    // 3 iterations usually sufficient
                 , relaxedManifoldExtraction(false)  // Default to original behavior
                 , bypassManifoldExtraction(false)   // Default to standard manifold extraction
@@ -617,7 +617,37 @@ namespace gte
             return normal;
         }
 
-        // RVD-based smoothing for improved vertex distribution and triangle quality
+        // RVD-based smoothing for improved vertex distribution and triangle quality.
+        //
+        // Analysis: consequences of keeping smoothWithRVD disabled (the default)
+        // -----------------------------------------------------------------------
+        // smoothWithRVD moves each vertex toward the centroid of its Voronoi cell
+        // on the reconstructed surface (Lloyd relaxation restricted to the mesh).
+        // Enabling it improves:
+        //   - Edge-length uniformity (vertices spread more evenly)
+        //   - Triangle aspect ratios (fewer slivers near thin features)
+        //   - CVT energy (quantifiable mesh quality metric)
+        //
+        // Cost: O(n²) per iteration via the naive RVD implementation, making it
+        // impractical for meshes with more than ~2000 vertices.  3 iterations at
+        // n=1 000 already dominate the reconstruction time budget.
+        //
+        // Consequence of keeping it OFF (the current default):
+        //   - Mesh quality is somewhat lower near irregular sampling regions.
+        //   - Vertex distribution reflects the original point-cloud density rather
+        //     than an optimised placement — tolerable for most downstream uses.
+        //   - No runtime cost: the reconstruction pipeline is not affected.
+        //
+        // Alternative to RVD smoothing (recommended if regularisation is needed):
+        //   Laplacian smoothing (O(E) per iteration, where E = number of edges)
+        //   provides similar visual improvement at a fraction of the cost:
+        //     v_i' = (1-λ) v_i + λ · (1/k) Σ_{j∈N(i)} v_j
+        //   λ ∈ [0.1, 0.5] for stability.  Even 5-10 Laplacian passes are fast
+        //   enough to run on meshes of 100 000+ vertices.  A Taubin (λ/μ) variant
+        //   avoids the volume shrinkage that plain Laplacian smoothing introduces.
+        //
+        // Recommendation: leave smoothWithRVD=false (default); add an opt-in
+        // Laplacian/Taubin smoothing step if per-vertex regularisation is required.
         static void SmoothWithRVD(
             std::vector<Vector3<Real>>& vertices,
             std::vector<std::array<int32_t, 3>> const& triangles,

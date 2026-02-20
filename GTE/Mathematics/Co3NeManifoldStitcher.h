@@ -29,11 +29,13 @@
 #include <GTE/Mathematics/NearestNeighborQuery.h>
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <iostream>
 #include <map>
 #include <numeric>
 #include <set>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 #include <memory>
@@ -274,6 +276,7 @@ namespace gte
             // Step 4: Fill holes using existing hole filling (with validation)
             if (params.enableHoleFilling)
             {
+                auto t4start = std::chrono::steady_clock::now();
                 typename MeshHoleFilling<Real>::Parameters holeParams;
                 holeParams.maxArea = params.maxHoleArea;
                 holeParams.maxEdges = params.maxHoleEdges;
@@ -303,11 +306,18 @@ namespace gte
                     std::cout << "Hole filling added " << (trianglesAfter - trianglesBefore) 
                               << " triangles\n";
                 }
+                if (params.verbose)
+                {
+                    auto t4ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - t4start).count();
+                    std::cout << "  [Profiling] Step 4 (hole fill): " << t4ms << " ms\n";
+                }
             }
             
             // Step 5: Adaptive Mesh Hole Filler (iterative ear-clipping with detria fallback)
             if (params.enableBallPivotHoleFiller)
             {
+                auto t5start = std::chrono::steady_clock::now();
                 if (params.verbose)
                 {
                     std::cout << "[Stitcher] Step 5: Adaptive Mesh Hole Filler\n";
@@ -332,12 +342,16 @@ namespace gte
                               << (holeFilled ? "SUCCESS" : "NO CHANGES") 
                               << ", added " << (trianglesAfter - trianglesBefore) 
                               << " triangles\n";
+                    auto t5ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - t5start).count();
+                    std::cout << "  [Profiling] Step 5 (ball pivot hole fill): " << t5ms << " ms\n";
                 }
             }
             
             // Step 6: Final hole filling (conservative, not aggressive)
             if (params.enableHoleFilling)
             {
+                auto t6start = std::chrono::steady_clock::now();
                 // Fill remaining holes conservatively
                 typename MeshHoleFilling<Real>::Parameters holeParams;
                 holeParams.maxArea = params.maxHoleArea;
@@ -367,10 +381,25 @@ namespace gte
                     std::cout << "Final hole filling added " 
                               << (trianglesAfter - trianglesBefore) << " triangles\n";
                 }
+                if (params.verbose)
+                {
+                    auto t6ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - t6start).count();
+                    std::cout << "  [Profiling] Step 6 (final hole fill): " << t6ms << " ms\n";
+                }
             }
             
             // Step 7: Topology-Aware Component Bridging with RTree-accelerated gap detection
-            TopologyAwareComponentBridging(vertices, triangles, params);
+            {
+                auto t7start = std::chrono::steady_clock::now();
+                TopologyAwareComponentBridging(vertices, triangles, params);
+                if (params.verbose)
+                {
+                    auto t7ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - t7start).count();
+                    std::cout << "  [Profiling] Step 7 (component bridging): " << t7ms << " ms\n";
+                }
+            }
             
             // Step 8: UV parameterization merging (if enabled)
             if (params.enableUVMerging)
@@ -2514,51 +2543,98 @@ namespace gte
             using BridgeVal = std::tuple<Real,
                                          std::pair<int32_t,int32_t>,
                                          std::pair<int32_t,int32_t>>;
-            std::unordered_map<BridgeKey, BridgeVal, BridgeKeyHash> bestBridge;
-            bestBridge.reserve(components.size());
 
             constexpr int32_t MaxNearbyEdges = 32;
-            std::array<int32_t, MaxNearbyEdges> nearbyIdx;
 
-            for (size_t gi = 0; gi < edgeMidSites.size(); ++gi)
+            // ---------------------------------------------------------------
+            // Parallelise the NNTree query loop across boundary edges.
+            // FindNeighbors is read-only on the tree and therefore thread-safe.
+            // Each thread accumulates candidates into its own local map; the
+            // maps are merged in O(components) time after all threads finish.
+            // ---------------------------------------------------------------
+            unsigned int numThreads = std::max(1u, std::thread::hardware_concurrency());
+            size_t totalEdges = edgeMidSites.size();
+
+            // One local bestBridge map per thread.
+            std::vector<std::unordered_map<BridgeKey, BridgeVal, BridgeKeyHash>> localBridges(numThreads);
+
+            auto queryChunk = [&](unsigned int t)
             {
-                size_t compI = globalEdgeIdx[gi].componentIndex;
-                auto const& edge1 =
-                    components[compI].boundaryEdges[globalEdgeIdx[gi].localEdgeIndex];
+                size_t chunkStart = (totalEdges * t) / numThreads;
+                size_t chunkEnd   = (totalEdges * (t + 1u)) / numThreads;
+                auto& localBridge = localBridges[t];
+                std::array<int32_t, MaxNearbyEdges> nearbyIdxLocal;
 
-                int32_t numNearby = edgeTree.template FindNeighbors<MaxNearbyEdges>(
-                    edgeMidSites[gi].position, queryRadius, nearbyIdx);
-
-                for (int32_t kk = 0; kk < numNearby; ++kk)
+                for (size_t gi = chunkStart; gi < chunkEnd; ++gi)
                 {
-                    size_t gj = static_cast<size_t>(nearbyIdx[kk]);
-                    size_t compJ = globalEdgeIdx[gj].componentIndex;
-                    if (compI == compJ) continue;
+                    size_t compI = globalEdgeIdx[gi].componentIndex;
+                    auto const& edge1 =
+                        components[compI].boundaryEdges[globalEdgeIdx[gi].localEdgeIndex];
 
-                    size_t ci = std::min(compI, compJ);
-                    size_t cj = std::max(compI, compJ);
+                    int32_t numNearby = edgeTree.template FindNeighbors<MaxNearbyEdges>(
+                        edgeMidSites[gi].position, queryRadius, nearbyIdxLocal);
 
-                    auto const& edge2 =
-                        components[compJ].boundaryEdges[globalEdgeIdx[gj].localEdgeIndex];
-
-                    Real dist = std::min({
-                        Length(vertices[edge1.first]  - vertices[edge2.first]),
-                        Length(vertices[edge1.first]  - vertices[edge2.second]),
-                        Length(vertices[edge1.second] - vertices[edge2.first]),
-                        Length(vertices[edge1.second] - vertices[edge2.second])
-                    });
-
-                    if (dist > threshold) continue;
-
-                    BridgeKey key{ci, cj};
-                    auto it = bestBridge.find(key);
-                    if (it == bestBridge.end() || dist < std::get<0>(it->second))
+                    for (int32_t kk = 0; kk < numNearby; ++kk)
                     {
-                        auto const& eA = (compI == ci) ? edge1 : edge2;
-                        auto const& eB = (compI == ci) ? edge2 : edge1;
-                        bestBridge[key] = {dist, eA, eB};
+                        size_t gj = static_cast<size_t>(nearbyIdxLocal[kk]);
+                        size_t compJ = globalEdgeIdx[gj].componentIndex;
+                        if (compI == compJ) continue;
+
+                        size_t ci = std::min(compI, compJ);
+                        size_t cj = std::max(compI, compJ);
+
+                        auto const& edge2 =
+                            components[compJ].boundaryEdges[globalEdgeIdx[gj].localEdgeIndex];
+
+                        Real dist = std::min({
+                            Length(vertices[edge1.first]  - vertices[edge2.first]),
+                            Length(vertices[edge1.first]  - vertices[edge2.second]),
+                            Length(vertices[edge1.second] - vertices[edge2.first]),
+                            Length(vertices[edge1.second] - vertices[edge2.second])
+                        });
+
+                        if (dist > threshold) continue;
+
+                        BridgeKey key{ci, cj};
+                        auto it = localBridge.find(key);
+                        if (it == localBridge.end() || dist < std::get<0>(it->second))
+                        {
+                            auto const& eA = (compI == ci) ? edge1 : edge2;
+                            auto const& eB = (compI == ci) ? edge2 : edge1;
+                            localBridge[key] = {dist, eA, eB};
+                        }
                     }
                 }
+            };
+
+            // Launch worker threads for chunks [1..numThreads-1]; run chunk 0 on caller.
+            std::vector<std::thread> threads;
+            threads.reserve(numThreads - 1);
+            for (unsigned int t = 1; t < numThreads; ++t)
+            {
+                threads.emplace_back(queryChunk, t);
+            }
+            queryChunk(0);
+            for (auto& th : threads) th.join();
+
+            // Merge thread-local maps into bestBridge.
+            std::unordered_map<BridgeKey, BridgeVal, BridgeKeyHash> bestBridge;
+            bestBridge.reserve(components.size());
+            for (auto const& localBridge : localBridges)
+            {
+                for (auto const& [key, val] : localBridge)
+                {
+                    auto it = bestBridge.find(key);
+                    if (it == bestBridge.end() || std::get<0>(val) < std::get<0>(it->second))
+                    {
+                        bestBridge[key] = val;
+                    }
+                }
+            }
+            if (verbose)
+            {
+                std::cout << "  [Profiling] NNTree parallel query: " << numThreads
+                          << " thread(s), " << totalEdges << " boundary edges\n";
             }
 
             if (bestBridge.empty())
