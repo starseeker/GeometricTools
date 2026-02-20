@@ -32,11 +32,25 @@
 #include <iostream>
 #include <map>
 #include <set>
+#include <unordered_map>
 #include <vector>
 #include <memory>
 
 namespace gte
 {
+    // Hash for std::pair<int32_t, int32_t> edges – used by all edge count maps
+    // in Co3NeManifoldStitcher to give O(1) average lookups instead of O(log n).
+    struct EdgePairHash
+    {
+        size_t operator()(std::pair<int32_t, int32_t> const& p) const noexcept
+        {
+            size_t h = static_cast<size_t>(static_cast<uint32_t>(p.first));
+            h ^= static_cast<size_t>(static_cast<uint32_t>(p.second)) * 2654435761ULL
+                 + 0x9e3779b9ULL + (h << 6) + (h >> 2);
+            return h;
+        }
+    };
+
     template <typename Real>
     class Co3NeManifoldStitcher
     {
@@ -733,33 +747,105 @@ namespace gte
         }
         
                 // Validate that mesh is manifold (simple check)
-        static bool ValidateManifold(std::vector<std::array<int32_t, 3>> const& triangles)
+        // Persistent edge count map used to avoid O(T) full-mesh rebuilds.
+        // An entry with count 1 = boundary edge, count 2 = interior, count > 2 = non-manifold.
+        using EdgeCountMap = std::unordered_map<std::pair<int32_t, int32_t>, size_t, EdgePairHash>;
+
+        // Build an edge count map for the entire triangle list in O(T).
+        static EdgeCountMap BuildEdgeCountMap(
+            std::vector<std::array<int32_t, 3>> const& triangles)
         {
-            std::map<std::pair<int32_t, int32_t>, size_t> edgeCounts;
-            
+            EdgeCountMap ecm;
+            ecm.reserve(triangles.size() * 3);
             for (auto const& tri : triangles)
             {
                 for (int i = 0; i < 3; ++i)
                 {
                     int32_t v0 = tri[i];
                     int32_t v1 = tri[(i + 1) % 3];
-                    auto edge = std::make_pair(std::min(v0, v1), std::max(v0, v1));
-                    edgeCounts[edge]++;
+                    ecm[{std::min(v0, v1), std::max(v0, v1)}]++;
                 }
             }
-            
-            for (auto const& ec : edgeCounts)
+            return ecm;
+        }
+
+        // Validate that the mesh is manifold: no edge has more than 2 incident triangles.
+        // Uses an unordered_map for O(T) average time (was O(T log T) with std::map).
+        static bool ValidateManifold(std::vector<std::array<int32_t, 3>> const& triangles)
+        {
+            EdgeCountMap ecm;
+            ecm.reserve(triangles.size() * 3);
+            for (auto const& tri : triangles)
             {
-                if (ec.second > 2)
+                for (int i = 0; i < 3; ++i)
                 {
-                    return false;  // Non-manifold edge found
+                    int32_t v0 = tri[i];
+                    int32_t v1 = tri[(i + 1) % 3];
+                    if (++ecm[{std::min(v0, v1), std::max(v0, v1)}] > 2)
+                    {
+                        return false;  // Non-manifold edge found early-out
+                    }
                 }
             }
-            
             return true;
         }
-        
-        // Detailed manifold validation
+
+        // Local manifold check for adding exactly two bridge triangles.
+        // Returns true if both triangles can be added without creating a non-manifold
+        // edge (count > 2).  If valid, appends the triangles and updates ecm in-place;
+        // otherwise leaves both triangles and ecm unchanged.
+        //
+        // This is the key performance fix: avoids the O(T) full-mesh rebuild that the
+        // old validate-after-append approach required.
+        static bool ValidateBridgeLocal(
+            std::vector<std::array<int32_t, 3>>& triangles,
+            std::array<int32_t, 3> const& tri1,
+            std::array<int32_t, 3> const& tri2,
+            EdgeCountMap& ecm)
+        {
+            // Collect the 6 edges from the two new triangles
+            std::pair<int32_t, int32_t> edges[6];
+            int ne = 0;
+            for (auto const& tri : {tri1, tri2})
+            {
+                for (int i = 0; i < 3; ++i)
+                {
+                    int32_t v0 = tri[i];
+                    int32_t v1 = tri[(i + 1) % 3];
+                    edges[ne++] = {std::min(v0, v1), std::max(v0, v1)};
+                }
+            }
+
+            // Check if any edge would exceed count 2
+            // Use a temporary delta to handle duplicate edges among the 6 (rare but possible)
+            std::unordered_map<std::pair<int32_t,int32_t>, int, EdgePairHash> delta;
+            delta.reserve(6);
+            for (auto const& e : edges)
+            {
+                delta[e]++;
+            }
+            for (auto const& [e, add] : delta)
+            {
+                auto it = ecm.find(e);
+                size_t cur = (it != ecm.end()) ? it->second : 0;
+                if (cur + static_cast<size_t>(add) > 2)
+                {
+                    return false;
+                }
+            }
+
+            // Valid – commit
+            triangles.push_back(tri1);
+            triangles.push_back(tri2);
+            for (auto const& [e, add] : delta)
+            {
+                ecm[e] += static_cast<size_t>(add);
+            }
+            return true;
+        }
+
+        // Detailed manifold validation: O(T) time using hash maps and a proper
+        // edge-adjacency BFS (was O(T²) due to the nested-loop BFS approach).
         static void ValidateManifoldDetailed(
             std::vector<std::array<int32_t, 3>> const& triangles,
             bool& isClosedManifold,
@@ -777,93 +863,78 @@ namespace gte
                 return;
             }
             
-            // Count edge occurrences
-            std::map<std::pair<int32_t, int32_t>, size_t> edgeCounts;
-            
-            for (auto const& tri : triangles)
+            // Build edge count map and edge-to-triangles adjacency simultaneously
+            // in a single O(T) pass (was O(T²) due to the nested-loop BFS below).
+            EdgeCountMap edgeCounts;
+            std::unordered_map<std::pair<int32_t,int32_t>,
+                               std::vector<int32_t>, EdgePairHash> edgeToTris;
+            edgeCounts.reserve(triangles.size() * 3);
+            edgeToTris.reserve(triangles.size() * 3);
+
+            for (int32_t ti = 0; ti < static_cast<int32_t>(triangles.size()); ++ti)
             {
+                auto const& tri = triangles[ti];
                 for (int i = 0; i < 3; ++i)
                 {
                     int32_t v0 = tri[i];
                     int32_t v1 = tri[(i + 1) % 3];
                     auto edge = std::make_pair(std::min(v0, v1), std::max(v0, v1));
                     edgeCounts[edge]++;
+                    edgeToTris[edge].push_back(ti);
                 }
             }
             
             // Analyze edges
-            for (auto const& ec : edgeCounts)
+            for (auto const& [edge, cnt] : edgeCounts)
             {
-                if (ec.second == 1)
+                if (cnt == 1)
                 {
                     boundaryEdgeCount++;
                 }
-                else if (ec.second > 2)
+                else if (cnt > 2)
                 {
                     hasNonManifoldEdges = true;
                 }
             }
             
-            // Count connected components using BFS
-            std::set<size_t> visited;
+            // Count connected components using O(T) edge-adjacency BFS.
+            // Each triangle is visited at most once; each edge lookup is O(1).
+            std::vector<bool> visited(triangles.size(), false);
             componentCount = 0;
             
             for (size_t startIdx = 0; startIdx < triangles.size(); ++startIdx)
             {
-                if (visited.count(startIdx) > 0)
+                if (visited[startIdx])
                 {
                     continue;
                 }
                 
-                // Start new component
                 componentCount++;
-                std::vector<size_t> queue;
-                queue.push_back(startIdx);
-                visited.insert(startIdx);
+                std::vector<int32_t> queue;
+                queue.push_back(static_cast<int32_t>(startIdx));
+                visited[startIdx] = true;
                 
-                // BFS to find all connected triangles
-                while (!queue.empty())
+                for (size_t qi = 0; qi < queue.size(); ++qi)
                 {
-                    size_t currentIdx = queue.back();
-                    queue.pop_back();
-                    
+                    int32_t currentIdx = queue[qi];
                     auto const& currentTri = triangles[currentIdx];
                     
-                    // Find triangles sharing edges with current
-                    for (size_t otherIdx = 0; otherIdx < triangles.size(); ++otherIdx)
+                    for (int i = 0; i < 3; ++i)
                     {
-                        if (visited.count(otherIdx) > 0)
-                        {
-                            continue;
-                        }
+                        int32_t v0 = currentTri[i];
+                        int32_t v1 = currentTri[(i + 1) % 3];
+                        auto edge = std::make_pair(std::min(v0, v1), std::max(v0, v1));
                         
-                        auto const& otherTri = triangles[otherIdx];
+                        auto it = edgeToTris.find(edge);
+                        if (it == edgeToTris.end()) continue;
                         
-                        // Check if they share an edge
-                        bool sharesEdge = false;
-                        for (int i = 0; i < 3 && !sharesEdge; ++i)
+                        for (int32_t neighborIdx : it->second)
                         {
-                            auto e1 = std::make_pair(
-                                std::min(currentTri[i], currentTri[(i + 1) % 3]),
-                                std::max(currentTri[i], currentTri[(i + 1) % 3]));
-                            
-                            for (int j = 0; j < 3 && !sharesEdge; ++j)
+                            if (!visited[neighborIdx])
                             {
-                                auto e2 = std::make_pair(
-                                    std::min(otherTri[j], otherTri[(j + 1) % 3]),
-                                    std::max(otherTri[j], otherTri[(j + 1) % 3]));
-                                
-                                if (e1 == e2)
-                                {
-                                    sharesEdge = true;
-                                }
+                                visited[neighborIdx] = true;
+                                queue.push_back(neighborIdx);
                             }
-                        }
-                        
-                        if (sharesEdge)
-                        {
-                            queue.push_back(otherIdx);
-                            visited.insert(otherIdx);
                         }
                     }
                 }
@@ -1012,7 +1083,8 @@ namespace gte
             }
         }
         
-        // Bridge two boundary edges by creating two triangles
+        // Bridge two boundary edges by creating two triangles.
+        // Overload 1: legacy path – validates against the full mesh (O(T) per call).
         static bool BridgeBoundaryEdges(
             std::vector<Vector3<Real>> const& vertices,
             std::vector<std::array<int32_t, 3>>& triangles,
@@ -1070,8 +1142,40 @@ namespace gte
             
             return true;
         }
-        
-        // Cap a boundary loop with fan triangulation from centroid
+
+        // Overload 2: fast path – validates only the 6 new edges against ecm (O(1)).
+        // Updates ecm and appends to triangles only on success.
+        static bool BridgeBoundaryEdges(
+            std::vector<Vector3<Real>> const& vertices,
+            std::vector<std::array<int32_t, 3>>& triangles,
+            std::pair<int32_t, int32_t> const& edge1,
+            std::pair<int32_t, int32_t> const& edge2,
+            EdgeCountMap& ecm)
+        {
+            int32_t a = edge1.first;
+            int32_t b = edge1.second;
+            int32_t c = edge2.first;
+            int32_t d = edge2.second;
+
+            Real dist_ac = Length(vertices[c] - vertices[a]);
+            Real dist_bd = Length(vertices[d] - vertices[b]);
+            Real dist_ad = Length(vertices[d] - vertices[a]);
+            Real dist_bc = Length(vertices[c] - vertices[b]);
+
+            std::array<int32_t, 3> tri1, tri2;
+            if (dist_ac + dist_bd < dist_ad + dist_bc)
+            {
+                tri1 = {a, b, c};
+                tri2 = {b, d, c};
+            }
+            else
+            {
+                tri1 = {a, b, d};
+                tri2 = {a, d, c};
+            }
+
+            return ValidateBridgeLocal(triangles, tri1, tri2, ecm);
+        }
         static bool CapBoundaryLoop(
             std::vector<Vector3<Real>>& vertices,
             std::vector<std::array<int32_t, 3>>& triangles,
@@ -1316,9 +1420,11 @@ namespace gte
                 return;
             }
             
-            // Build edge-to-triangles adjacency
-            std::map<std::pair<int32_t, int32_t>, std::vector<size_t>> edgeToTriangles;
-            for (size_t triIdx = 0; triIdx < triangles.size(); ++triIdx)
+            // Build edge-to-triangles adjacency using unordered_map for O(1) lookups
+            std::unordered_map<std::pair<int32_t,int32_t>, std::vector<int32_t>, EdgePairHash>
+                edgeToTriangles;
+            edgeToTriangles.reserve(triangles.size() * 3);
+            for (int32_t triIdx = 0; triIdx < static_cast<int32_t>(triangles.size()); ++triIdx)
             {
                 auto const& tri = triangles[triIdx];
                 for (int i = 0; i < 3; ++i)
@@ -1330,21 +1436,21 @@ namespace gte
                 }
             }
             
-            // BFS to find connected components
-            std::set<size_t> visited;
+            // BFS to find connected components – O(1) per triangle using vector<bool>
+            std::vector<bool> visited(triangles.size(), false);
             
             for (size_t startIdx = 0; startIdx < triangles.size(); ++startIdx)
             {
-                if (visited.count(startIdx) > 0)
+                if (visited[startIdx])
                 {
                     continue;
                 }
                 
                 // Start new component
                 MeshComponent component;
-                std::vector<size_t> queue;
-                queue.push_back(startIdx);
-                visited.insert(startIdx);
+                std::vector<int32_t> queue;
+                queue.push_back(static_cast<int32_t>(startIdx));
+                visited[startIdx] = true;
                 component.triangleIndices.push_back(startIdx);
                 
                 // Add vertices from first triangle
@@ -1357,7 +1463,7 @@ namespace gte
                 size_t queuePos = 0;
                 while (queuePos < queue.size())
                 {
-                    size_t currentIdx = queue[queuePos++];
+                    int32_t currentIdx = queue[queuePos++];
                     auto const& currentTri = triangles[currentIdx];
                     
                     // Check all edges of current triangle
@@ -1370,11 +1476,11 @@ namespace gte
                         auto it = edgeToTriangles.find(edge);
                         if (it != edgeToTriangles.end())
                         {
-                            for (size_t neighborIdx : it->second)
+                            for (int32_t neighborIdx : it->second)
                             {
-                                if (visited.count(neighborIdx) == 0)
+                                if (!visited[neighborIdx])
                                 {
-                                    visited.insert(neighborIdx);
+                                    visited[neighborIdx] = true;
                                     queue.push_back(neighborIdx);
                                     component.triangleIndices.push_back(neighborIdx);
                                     
@@ -1389,8 +1495,9 @@ namespace gte
                     }
                 }
                 
-                // Extract boundary edges for this component
-                std::map<std::pair<int32_t, int32_t>, size_t> edgeCounts;
+                // Extract boundary edges for this component using unordered_map
+                EdgeCountMap edgeCounts;
+                edgeCounts.reserve(component.triangleIndices.size() * 3);
                 for (size_t triIdx : component.triangleIndices)
                 {
                     auto const& tri = triangles[triIdx];
@@ -2197,6 +2304,10 @@ namespace gte
                 std::vector<std::tuple<size_t, size_t, std::pair<int32_t, int32_t>, std::pair<int32_t, int32_t>>> successfulBridges;
                 size_t bridgesThisIter = 0;
                 
+                // Build a persistent edge count map once per iteration so that each
+                // bridge attempt is O(1) instead of O(T log T).
+                EdgeCountMap ecm = BuildEdgeCountMap(triangles);
+
                 // Apply bridges greedily
                 for (auto const& bridge : allPossibleBridges)
                 {
@@ -2212,8 +2323,8 @@ namespace gte
                         continue;
                     }
                     
-                    // Try to create bridge
-                    if (BridgeBoundaryEdges(vertices, triangles, edge1, edge2, true))
+                    // Try to create bridge using the fast ECM-based local check (O(1))
+                    if (BridgeBoundaryEdges(vertices, triangles, edge1, edge2, ecm))
                     {
                         mergedComponents.insert(comp1);
                         mergedComponents.insert(comp2);
