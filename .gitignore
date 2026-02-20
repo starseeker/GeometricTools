@@ -56,3 +56,6 @@ a.out
 *.obj
 perf.data
 perf.data.old
+gmon.out
+build/
+test_performance_benchmark

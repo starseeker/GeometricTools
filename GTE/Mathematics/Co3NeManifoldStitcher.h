@@ -26,11 +26,13 @@
 #include <GTE/Mathematics/MeshRepair.h>
 #include <GTE/Mathematics/MeshValidation.h>
 #include <GTE/Mathematics/BallPivotMeshHoleFiller.h>
+#include <GTE/Mathematics/NearestNeighborQuery.h>
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <iostream>
 #include <map>
+#include <numeric>
 #include <set>
 #include <unordered_map>
 #include <vector>
@@ -170,13 +172,15 @@ namespace gte
                 return true;  // Nothing to stitch
             }
             
-            // Step 1: Analyze mesh topology
+            // Step 1: Analyze mesh topology.
+            // For non-verbose mode we only need the non-manifold edge list (for Step 2),
+            // so avoid building the expensive std::map output in that case.
             std::map<std::pair<int32_t, int32_t>, EdgeType> edgeTypes;
             std::vector<std::pair<int32_t, int32_t>> nonManifoldEdges;
-            AnalyzeEdgeTopology(triangles, edgeTypes, nonManifoldEdges);
-            
             if (params.verbose)
             {
+                AnalyzeEdgeTopology(triangles, edgeTypes, nonManifoldEdges);
+
                 size_t boundaryEdges = 0;
                 size_t interiorEdges = 0;
                 for (auto const& et : edgeTypes)
@@ -184,11 +188,15 @@ namespace gte
                     if (et.second == EdgeType::Boundary) ++boundaryEdges;
                     if (et.second == EdgeType::Interior) ++interiorEdges;
                 }
-                
+
                 std::cout << "Topology Analysis:\n";
                 std::cout << "  Boundary edges: " << boundaryEdges << "\n";
                 std::cout << "  Interior edges: " << interiorEdges << "\n";
                 std::cout << "  Non-manifold edges: " << nonManifoldEdges.size() << "\n";
+            }
+            else
+            {
+                FindNonManifoldEdges(triangles, nonManifoldEdges);
             }
             
             // Step 2: If enabled, remove non-manifold edges first
@@ -201,65 +209,67 @@ namespace gte
                     std::cout << "Removed " << removed << " triangles to fix non-manifold edges\n";
                 }
                 
-                // Re-analyze after removal
+                // Re-analyze after removal (only need the full map when verbose)
                 edgeTypes.clear();
                 nonManifoldEdges.clear();
-                AnalyzeEdgeTopology(triangles, edgeTypes, nonManifoldEdges);
+                if (params.verbose)
+                {
+                    AnalyzeEdgeTopology(triangles, edgeTypes, nonManifoldEdges);
+                }
+                else
+                {
+                    FindNonManifoldEdges(triangles, nonManifoldEdges);
+                }
             }
             
-            // Step 3: Identify connected patches
-            std::vector<Patch> patches;
-            IdentifyPatches(vertices, triangles, edgeTypes, patches);
-            
+            // Step 3: Identify connected patches (diagnostic/verbose only — patchPairs is
+            // never used downstream, so skip entirely in non-verbose mode).
             if (params.verbose)
             {
+                std::vector<Patch> patches;
+                IdentifyPatches(vertices, triangles, edgeTypes, patches);
+
                 std::cout << "Found " << patches.size() << " connected patches\n";
                 size_t closedPatches = 0;
                 for (size_t i = 0; i < patches.size(); ++i)
                 {
-                    std::cout << "  Patch " << i << ": " 
+                    std::cout << "  Patch " << i << ": "
                               << patches[i].triangleIndices.size() << " triangles, "
                               << patches[i].boundaryEdges.size() << " boundary edges, "
                               << (patches[i].isManifold ? "manifold" : "non-manifold")
                               << (patches[i].isClosed ? ", closed" : ", open") << "\n";
-                    
-                    if (patches[i].isClosed)
-                    {
-                        closedPatches++;
-                    }
+                    if (patches[i].isClosed) closedPatches++;
                 }
                 std::cout << "  " << closedPatches << " closed patches (no boundaries)\n";
                 std::cout << "  " << (patches.size() - closedPatches) << " open patches (have boundaries)\n";
-            }
-            
-            // Step 4a: Analyze patch pairs to identify stitching opportunities
-            std::vector<PatchPair> patchPairs;
-            if (patches.size() > 1)
-            {
-                // Estimate a reasonable max distance based on mesh scale
-                Real avgEdgeLength = EstimateAverageEdgeLength(vertices, triangles);
-                Real maxPairDistance = avgEdgeLength * static_cast<Real>(3);  // 3x average edge
-                
-                AnalyzePatchPairs(vertices, patches, patchPairs, maxPairDistance);
-                
-                if (params.verbose && !patchPairs.empty())
+
+                // Step 4a: Analyze patch pairs to identify stitching opportunities
+                std::vector<PatchPair> patchPairs;
+                if (patches.size() > 1)
                 {
-                    std::cout << "\nFound " << patchPairs.size() << " patch pairs for potential stitching\n";
-                    size_t toShow = std::min(static_cast<size_t>(5), patchPairs.size());
-                    for (size_t i = 0; i < toShow; ++i)
+                    Real avgEdgeLength = EstimateAverageEdgeLength(vertices, triangles);
+                    Real maxPairDistance = avgEdgeLength * static_cast<Real>(3);
+                    AnalyzePatchPairs(vertices, patches, patchPairs, maxPairDistance);
+
+                    if (!patchPairs.empty())
                     {
-                        auto const& pair = patchPairs[i];
-                        std::cout << "  Pair " << i << ": patches " << pair.patch1Index 
-                                  << " and " << pair.patch2Index
-                                  << ", min dist = " << pair.minDistance
-                                  << ", close vertices = " << pair.closeBoundaryVertices << "\n";
-                    }
-                    if (patchPairs.size() > toShow)
-                    {
-                        std::cout << "  ... and " << (patchPairs.size() - toShow) << " more pairs\n";
+                        std::cout << "\nFound " << patchPairs.size() << " patch pairs for potential stitching\n";
+                        size_t toShow = std::min(static_cast<size_t>(5), patchPairs.size());
+                        for (size_t i = 0; i < toShow; ++i)
+                        {
+                            auto const& pair = patchPairs[i];
+                            std::cout << "  Pair " << i << ": patches " << pair.patch1Index
+                                      << " and " << pair.patch2Index
+                                      << ", min dist = " << pair.minDistance
+                                      << ", close vertices = " << pair.closeBoundaryVertices << "\n";
+                        }
+                        if (patchPairs.size() > toShow)
+                        {
+                            std::cout << "  ... and " << (patchPairs.size() - toShow) << " more pairs\n";
+                        }
                     }
                 }
-            }
+            }  // end verbose Steps 3 & 4a
             
             // Step 4: Fill holes using existing hole filling (with validation)
             if (params.enableHoleFilling)
@@ -275,9 +285,8 @@ namespace gte
                 size_t trianglesAfter = triangles.size();
                 
                 // Validate no non-manifold edges were created
-                std::map<std::pair<int32_t, int32_t>, EdgeType> checkEdgeTypes;
                 std::vector<std::pair<int32_t, int32_t>> checkNonManifold;
-                AnalyzeEdgeTopology(triangles, checkEdgeTypes, checkNonManifold);
+                FindNonManifoldEdges(triangles, checkNonManifold);
                 
                 if (!checkNonManifold.empty())
                 {
@@ -341,11 +350,10 @@ namespace gte
                 size_t trianglesAfter = triangles.size();
                 
                 // Validate no non-manifold edges were created
-                std::map<std::pair<int32_t, int32_t>, EdgeType> checkEdgeTypes;
-                std::vector<std::pair<int32_t, int32_t>> checkNonManifold;
-                AnalyzeEdgeTopology(triangles, checkEdgeTypes, checkNonManifold);
+                std::vector<std::pair<int32_t, int32_t>> checkNonManifoldFinal;
+                FindNonManifoldEdges(triangles, checkNonManifoldFinal);
                 
-                if (!checkNonManifold.empty())
+                if (!checkNonManifoldFinal.empty())
                 {
                     // Hole filling created non-manifold edges - revert
                     if (params.verbose)
@@ -431,6 +439,27 @@ namespace gte
                     edgeTypes[edge] = EdgeType::NonManifold;
                     nonManifoldEdges.push_back(edge);
                 }
+            }
+        }
+
+        // Lightweight variant that only identifies non-manifold edges (count >= 3).
+        // Avoids the expensive std::map output entirely — O(T) with hash map.
+        static void FindNonManifoldEdges(
+            std::vector<std::array<int32_t, 3>> const& triangles,
+            std::vector<std::pair<int32_t, int32_t>>& nonManifoldEdges)
+        {
+            EdgeCountMap edgeCounts;
+            edgeCounts.reserve(triangles.size() * 3);
+            for (auto const& tri : triangles)
+            {
+                for (int i = 0; i < 3; ++i)
+                {
+                    edgeCounts[MakeEdgeKey(tri[i], tri[(i + 1) % 3])]++;
+                }
+            }
+            for (auto const& [edge, count] : edgeCounts)
+            {
+                if (count >= 3) nonManifoldEdges.push_back(edge);
             }
         }
         
@@ -668,76 +697,135 @@ namespace gte
         }
         
         // Analyze distances between patch pairs
+        // Uses a centroid KD-tree to reduce from O(P²) to O(P·k) when
+        // maxDistance > 0 provides a meaningful spatial cutoff.
         static void AnalyzePatchPairs(
             std::vector<Vector3<Real>> const& vertices,
             std::vector<Patch> const& patches,
             std::vector<PatchPair>& patchPairs,
             Real maxDistance = static_cast<Real>(0))
         {
-            // Find pairs of patches that are close enough to potentially stitch
-            for (size_t i = 0; i < patches.size(); ++i)
+            patchPairs.clear();
+
+            if (patches.empty()) return;
+
+            // When maxDistance is provided we can use a centroid spatial index to
+            // skip pairs that are definitely beyond the distance cutoff.
+            // Fall back to the O(P²) brute-force only when maxDistance == 0.
+            if (maxDistance > static_cast<Real>(0))
             {
-                for (size_t j = i + 1; j < patches.size(); ++j)
+                using CentroidSite = PositionSite<3, Real>;
+                std::vector<CentroidSite> centroidSites;
+                centroidSites.reserve(patches.size());
+                for (auto const& p : patches)
                 {
-                    PatchPair pair;
-                    pair.patch1Index = i;
-                    pair.patch2Index = j;
-                    
-                    // Quick distance check using centroids
-                    Vector3<Real> centroidDiff = patches[i].centroid - patches[j].centroid;
-                    Real centroidDist = Length(centroidDiff);
-                    
-                    // If centroids are too far apart, skip detailed analysis
-                    if (maxDistance > static_cast<Real>(0) && 
-                        centroidDist > maxDistance * static_cast<Real>(5))
+                    centroidSites.emplace_back(p.centroid);
+                }
+
+                // The centroid-pair cutoff used in the original code was 5×maxDistance.
+                Real searchRadius = maxDistance * static_cast<Real>(5);
+
+                static constexpr int32_t maxLeafSize = 10;
+                static constexpr int32_t maxLevel = 20;
+                NearestNeighborQuery<3, Real, CentroidSite> centroidTree(
+                    centroidSites, maxLeafSize, maxLevel);
+
+                constexpr int32_t MaxNearby = 512;
+                std::array<int32_t, MaxNearby> nearbyIndices;
+
+                for (size_t i = 0; i < patches.size(); ++i)
+                {
+                    int32_t numNearby = centroidTree.template FindNeighbors<MaxNearby>(
+                        patches[i].centroid, searchRadius, nearbyIndices);
+
+                    for (int32_t kk = 0; kk < numNearby; ++kk)
                     {
-                        continue;
-                    }
-                    
-                    // Analyze boundary vertex distances
-                    std::set<int32_t> boundary1, boundary2;
-                    for (auto const& edge : patches[i].boundaryEdges)
-                    {
-                        boundary1.insert(edge.first);
-                        boundary1.insert(edge.second);
-                    }
-                    for (auto const& edge : patches[j].boundaryEdges)
-                    {
-                        boundary2.insert(edge.first);
-                        boundary2.insert(edge.second);
-                    }
-                    
-                    // Find min/max distances between boundary vertices
-                    pair.minDistance = std::numeric_limits<Real>::max();
-                    pair.maxDistance = static_cast<Real>(0);
-                    pair.closeBoundaryVertices = 0;
-                    
-                    for (auto v1 : boundary1)
-                    {
-                        for (auto v2 : boundary2)
+                        size_t j = static_cast<size_t>(nearbyIndices[kk]);
+                        if (j <= i) continue;  // Process each pair once
+
+                        PatchPair pair;
+                        pair.patch1Index = i;
+                        pair.patch2Index = j;
+
+                        // Collect unique boundary vertices for each patch
+                        std::set<int32_t> boundary1, boundary2;
+                        for (auto const& edge : patches[i].boundaryEdges)
                         {
-                            Vector3<Real> diff = vertices[v1] - vertices[v2];
-                            Real dist = Length(diff);
-                            
-                            pair.minDistance = std::min(pair.minDistance, dist);
-                            pair.maxDistance = std::max(pair.maxDistance, dist);
-                            
-                            if (maxDistance > static_cast<Real>(0) && dist < maxDistance)
+                            boundary1.insert(edge.first);
+                            boundary1.insert(edge.second);
+                        }
+                        for (auto const& edge : patches[j].boundaryEdges)
+                        {
+                            boundary2.insert(edge.first);
+                            boundary2.insert(edge.second);
+                        }
+
+                        pair.minDistance = std::numeric_limits<Real>::max();
+                        pair.maxDistance = static_cast<Real>(0);
+                        pair.closeBoundaryVertices = 0;
+
+                        for (auto v1 : boundary1)
+                        {
+                            for (auto v2 : boundary2)
                             {
-                                pair.closeBoundaryVertices++;
+                                Vector3<Real> diff = vertices[v1] - vertices[v2];
+                                Real dist = Length(diff);
+                                pair.minDistance = std::min(pair.minDistance, dist);
+                                pair.maxDistance = std::max(pair.maxDistance, dist);
+                                if (dist < maxDistance) pair.closeBoundaryVertices++;
                             }
                         }
+
+                        if (pair.minDistance < maxDistance)
+                        {
+                            patchPairs.push_back(pair);
+                        }
                     }
-                    
-                    // Only add pairs that are close enough
-                    if (maxDistance <= static_cast<Real>(0) || 
-                        pair.minDistance < maxDistance)
+                }
+            }
+            else
+            {
+                // Brute-force O(P²) fallback when no spatial cutoff is available
+                for (size_t i = 0; i < patches.size(); ++i)
+                {
+                    for (size_t j = i + 1; j < patches.size(); ++j)
                     {
+                        PatchPair pair;
+                        pair.patch1Index = i;
+                        pair.patch2Index = j;
+
+                        std::set<int32_t> boundary1, boundary2;
+                        for (auto const& edge : patches[i].boundaryEdges)
+                        {
+                            boundary1.insert(edge.first);
+                            boundary1.insert(edge.second);
+                        }
+                        for (auto const& edge : patches[j].boundaryEdges)
+                        {
+                            boundary2.insert(edge.first);
+                            boundary2.insert(edge.second);
+                        }
+
+                        pair.minDistance = std::numeric_limits<Real>::max();
+                        pair.maxDistance = static_cast<Real>(0);
+                        pair.closeBoundaryVertices = 0;
+
+                        for (auto v1 : boundary1)
+                        {
+                            for (auto v2 : boundary2)
+                            {
+                                Vector3<Real> diff = vertices[v1] - vertices[v2];
+                                Real dist = Length(diff);
+                                pair.minDistance = std::min(pair.minDistance, dist);
+                                pair.maxDistance = std::max(pair.maxDistance, dist);
+                            }
+                        }
+
                         patchPairs.push_back(pair);
                     }
                 }
             }
-            
+
             // Sort by minimum distance (closest pairs first)
             std::sort(patchPairs.begin(), patchPairs.end(),
                 [](PatchPair const& a, PatchPair const& b) {
@@ -2341,8 +2429,10 @@ namespace gte
             return totalBridges;
         }
         
-        // Incremental component merging with cached geometric properties
-        // Avoids full re-extraction by updating component properties incrementally
+        // Incremental component merging using a global boundary-edge NNTree.
+        // Each call does ONE pass: build tree, find all candidate bridges,
+        // apply greedily.  Iteration is handled by the outer
+        // TopologyAwareComponentBridging loop.
         static size_t ProgressiveComponentMergingIncremental(
             std::vector<Vector3<Real>> const& vertices,
             std::vector<std::array<int32_t, 3>>& triangles,
@@ -2353,205 +2443,176 @@ namespace gte
             {
                 return 0;
             }
-            
-            size_t totalBridges = 0;
-            size_t maxIterations = 10;
-            
-            // Initial extraction (only done once!)
+
+            // Extract connected components (O(T)).
             std::vector<MeshComponent> components;
             ExtractComponents(vertices, triangles, components);
-            
+
             if (verbose)
             {
-                std::cout << "\n=== Incremental Component Merging ===\n";
-                std::cout << "Initial components: " << components.size() << "\n";
+                std::cout << "\n=== Global-Edge-NNTree Component Merging ===\n";
+                std::cout << "Components: " << components.size() << "\n";
             }
 
-            // Build ECM once before the inner loop and update it in-place after each
-            // successful bridge.  This avoids O(T) rebuilds per inner iteration.
+            if (components.size() <= 1)
+            {
+                return 0;
+            }
+
+            // Build ECM once; update incrementally after each bridge.
             EdgeCountMap ecm = BuildEdgeCountMap(triangles);
 
-            for (size_t iter = 0; iter < maxIterations; ++iter)
+            // ---------------------------------------------------------------
+            // Build a global NNTree of ALL boundary-edge midpoints (ONE time).
+            // ---------------------------------------------------------------
+            struct GlobalEdgeEntry
             {
-                if (components.size() <= 1)
-                {
-                    if (verbose)
-                    {
-                        std::cout << "Single component achieved!\n";
-                    }
-                    break;
-                }
-                
-                if (verbose)
-                {
-                    std::cout << "Iteration " << (iter + 1) << ": " 
-                              << components.size() << " components\n";
-                }
-                
-                // Build list of ALL possible bridges between ALL component pairs.
-                // The bounding-sphere pre-filter efficiently skips distant pairs.
-                std::vector<std::tuple<Real, size_t, size_t, std::pair<int32_t, int32_t>, std::pair<int32_t, int32_t>>> allPossibleBridges;
+                size_t componentIndex;
+                size_t localEdgeIndex;
+            };
 
-                for (size_t i = 0; i < components.size(); ++i)
-                {
-                    if (components[i].boundaryEdges.empty())
-                    {
-                        continue;
-                    }
+            std::vector<PositionSite<3, Real>> edgeMidSites;
+            std::vector<GlobalEdgeEntry> globalEdgeIdx;
 
-                    for (size_t j = i + 1; j < components.size(); ++j)
-                    {
-                        if (components[j].boundaryEdges.empty())
-                        {
-                            continue;
-                        }
-
-                        // Quick bounding-sphere distance check using squared distance
-                        // to avoid sqrt() for pairs that will be rejected anyway.
-                        Vector3<Real> diff = components[i].centroid - components[j].centroid;
-                        Real centerDistSq = Dot(diff, diff);
-                        Real maxReach = components[i].boundingRadius + components[j].boundingRadius + threshold;
-
-                        if (centerDistSq > maxReach * maxReach)
-                        {
-                            continue;  // Too far apart
-                        }
-
-                        // Find best edge pair between these components
-                        std::vector<std::tuple<Real, std::pair<int32_t, int32_t>, std::pair<int32_t, int32_t>>> candidates;
-                        FindCandidateEdgePairs(vertices, components[i], components[j], threshold, candidates);
-
-                        if (!candidates.empty())
-                        {
-                            auto const& best = candidates[0];
-                            allPossibleBridges.emplace_back(
-                                std::get<0>(best), i, j,
-                                std::get<1>(best), std::get<2>(best));
-                        }
-                    }
-                }
-                
-                if (allPossibleBridges.empty())
+            for (size_t i = 0; i < components.size(); ++i)
+            {
+                for (size_t ei = 0; ei < components[i].boundaryEdges.size(); ++ei)
                 {
-                    if (verbose)
-                    {
-                        std::cout << "No valid bridges found. Stopping.\n";
-                    }
-                    break;
-                }
-                
-                // Sort by distance (closest first)
-                std::sort(allPossibleBridges.begin(), allPossibleBridges.end(),
-                    [](auto const& a, auto const& b) {
-                        return std::get<0>(a) < std::get<0>(b);
-                    });
-                
-                // Track which components are being merged — use vector<bool> for O(1) lookup.
-                std::vector<bool> mergedComponents(components.size(), false);
-                // mergeTarget[i] == i means component i is unmerged (identity).
-                // mergeTarget[i] == j (j != i) means component i was merged into j.
-                std::vector<size_t> mergeTarget(components.size());
-                std::iota(mergeTarget.begin(), mergeTarget.end(), 0);  // start as identity
-                std::vector<std::tuple<size_t, size_t, std::pair<int32_t, int32_t>, std::pair<int32_t, int32_t>>> successfulBridges;
-                size_t bridgesThisIter = 0;
-                // ECM is maintained across iterations — no rebuild needed here.
-
-                // Apply bridges greedily
-                for (auto const& bridge : allPossibleBridges)
-                {
-                    Real dist = std::get<0>(bridge);
-                    size_t comp1 = std::get<1>(bridge);
-                    size_t comp2 = std::get<2>(bridge);
-                    auto const& edge1 = std::get<3>(bridge);
-                    auto const& edge2 = std::get<4>(bridge);
-                    
-                    // Skip if either component already merged
-                    if (mergedComponents[comp1] || mergedComponents[comp2])
-                    {
-                        continue;
-                    }
-                    
-                    // Try to create bridge using the fast ECM-based local check (O(1))
-                    if (BridgeBoundaryEdges(vertices, triangles, edge1, edge2, ecm))
-                    {
-                        mergedComponents[comp1] = true;
-                        mergedComponents[comp2] = true;
-                        mergeTarget[comp2] = comp1;  // comp2 merges into comp1
-                        successfulBridges.push_back(std::make_tuple(comp1, comp2, edge1, edge2));
-                        bridgesThisIter++;
-                        totalBridges++;
-                        
-                        if (verbose && bridgesThisIter <= 10)
-                        {
-                            std::cout << "  Bridge " << bridgesThisIter 
-                                      << ": comp " << comp1 << " <-> " << comp2
-                                      << " at distance " << dist << "\n";
-                        }
-                    }
-                }
-                
-                if (bridgesThisIter == 0)
-                {
-                    if (verbose)
-                    {
-                        std::cout << "No successful bridges. Stopping.\n";
-                    }
-                    break;
-                }
-                
-                // INCREMENTAL UPDATE: Merge components and update their properties
-                std::vector<MeshComponent> newComponents;
-                std::vector<bool> processedComponents(components.size(), false);
-                
-                for (auto const& bridgeInfo : successfulBridges)
-                {
-                    size_t target = std::get<0>(bridgeInfo);
-                    size_t source = std::get<1>(bridgeInfo);
-                    auto const& edge1 = std::get<2>(bridgeInfo);
-                    auto const& edge2 = std::get<3>(bridgeInfo);
-                    
-                    if (!processedComponents[target])
-                    {
-                        // Merge source into target (incremental update)
-                        components[target].MergeWith(components[source], vertices);
-                        
-                        // Remove bridged edges from boundary (subtractive update)
-                        std::set<std::pair<int32_t, int32_t>> edgesToRemove;
-                        edgesToRemove.insert(edge1);
-                        edgesToRemove.insert(edge2);
-                        components[target].RemoveBoundaryEdges(edgesToRemove);
-                        
-                        processedComponents[target] = true;
-                        processedComponents[source] = true;
-                    }
-                }
-                
-                // Build new component list (keep non-merged and merged targets)
-                for (size_t i = 0; i < components.size(); ++i)
-                {
-                    // Skip sources that were merged into a target
-                    if (mergeTarget[i] != i)
-                    {
-                        continue;
-                    }
-                    newComponents.push_back(std::move(components[i]));
-                }
-                
-                components = std::move(newComponents);
-                
-                if (verbose)
-                {
-                    std::cout << "  Created " << bridgesThisIter << " bridges, "
-                              << components.size() << " components remain\n";
+                    auto const& e = components[i].boundaryEdges[ei];
+                    Vector3<Real> mid =
+                        (vertices[e.first] + vertices[e.second]) * static_cast<Real>(0.5);
+                    edgeMidSites.emplace_back(mid);
+                    globalEdgeIdx.push_back({i, ei});
                 }
             }
-            
+
+            if (edgeMidSites.empty())
+            {
+                return 0;
+            }
+
+            static constexpr int32_t maxLeafSize = 10;
+            static constexpr int32_t maxLevel = 20;
+            NearestNeighborQuery<3, Real, PositionSite<3, Real>> edgeTree(
+                edgeMidSites, maxLeafSize, maxLevel);
+
+            // Query radius: midpoints within threshold + half-edge-length.
+            // A factor of 1.5 is conservative and avoids missed bridges.
+            Real queryRadius = threshold * static_cast<Real>(1.5);
+
+            // Map componentPair → best (dist, edge1, edge2)
+            using BridgeKey = std::pair<size_t, size_t>;
+            struct BridgeKeyHash
+            {
+                size_t operator()(BridgeKey const& k) const noexcept
+                {
+                    size_t h = k.first;
+                    h ^= k.second + 0x9e3779b9ULL + (h << 6) + (h >> 2);
+                    return h;
+                }
+            };
+            using BridgeVal = std::tuple<Real,
+                                         std::pair<int32_t,int32_t>,
+                                         std::pair<int32_t,int32_t>>;
+            std::unordered_map<BridgeKey, BridgeVal, BridgeKeyHash> bestBridge;
+            bestBridge.reserve(components.size());
+
+            constexpr int32_t MaxNearbyEdges = 32;
+            std::array<int32_t, MaxNearbyEdges> nearbyIdx;
+
+            for (size_t gi = 0; gi < edgeMidSites.size(); ++gi)
+            {
+                size_t compI = globalEdgeIdx[gi].componentIndex;
+                auto const& edge1 =
+                    components[compI].boundaryEdges[globalEdgeIdx[gi].localEdgeIndex];
+
+                int32_t numNearby = edgeTree.template FindNeighbors<MaxNearbyEdges>(
+                    edgeMidSites[gi].position, queryRadius, nearbyIdx);
+
+                for (int32_t kk = 0; kk < numNearby; ++kk)
+                {
+                    size_t gj = static_cast<size_t>(nearbyIdx[kk]);
+                    size_t compJ = globalEdgeIdx[gj].componentIndex;
+                    if (compI == compJ) continue;
+
+                    size_t ci = std::min(compI, compJ);
+                    size_t cj = std::max(compI, compJ);
+
+                    auto const& edge2 =
+                        components[compJ].boundaryEdges[globalEdgeIdx[gj].localEdgeIndex];
+
+                    Real dist = std::min({
+                        Length(vertices[edge1.first]  - vertices[edge2.first]),
+                        Length(vertices[edge1.first]  - vertices[edge2.second]),
+                        Length(vertices[edge1.second] - vertices[edge2.first]),
+                        Length(vertices[edge1.second] - vertices[edge2.second])
+                    });
+
+                    if (dist > threshold) continue;
+
+                    BridgeKey key{ci, cj};
+                    auto it = bestBridge.find(key);
+                    if (it == bestBridge.end() || dist < std::get<0>(it->second))
+                    {
+                        auto const& eA = (compI == ci) ? edge1 : edge2;
+                        auto const& eB = (compI == ci) ? edge2 : edge1;
+                        bestBridge[key] = {dist, eA, eB};
+                    }
+                }
+            }
+
+            if (bestBridge.empty())
+            {
+                if (verbose) std::cout << "No candidate bridges found.\n";
+                return 0;
+            }
+
+            // Sort candidates by distance and apply greedily.
+            std::vector<std::tuple<Real, size_t, size_t,
+                                   std::pair<int32_t,int32_t>,
+                                   std::pair<int32_t,int32_t>>> candidates;
+            candidates.reserve(bestBridge.size());
+            for (auto const& [key, val] : bestBridge)
+            {
+                candidates.emplace_back(std::get<0>(val), key.first, key.second,
+                                        std::get<1>(val), std::get<2>(val));
+            }
+            std::sort(candidates.begin(), candidates.end(),
+                [](auto const& a, auto const& b) { return std::get<0>(a) < std::get<0>(b); });
+
+            std::vector<bool> mergedComponents(components.size(), false);
+            size_t totalBridges = 0;
+
+            for (auto const& cand : candidates)
+            {
+                size_t ci = std::get<1>(cand);
+                size_t cj = std::get<2>(cand);
+
+                if (mergedComponents[ci] || mergedComponents[cj]) continue;
+
+                auto const& e1 = std::get<3>(cand);
+                auto const& e2 = std::get<4>(cand);
+
+                if (BridgeBoundaryEdges(vertices, triangles, e1, e2, ecm))
+                {
+                    mergedComponents[ci] = true;
+                    mergedComponents[cj] = true;
+                    totalBridges++;
+
+                    if (verbose && totalBridges <= 10)
+                    {
+                        std::cout << "  Bridge " << totalBridges
+                                  << ": comp " << ci << " <-> " << cj
+                                  << " at distance " << std::get<0>(cand) << "\n";
+                    }
+                }
+            }
+
             if (verbose)
             {
-                std::cout << "Final components: " << components.size() << "\n";
-                std::cout << "Total bridges created: " << totalBridges << "\n";
+                std::cout << "Bridges created: " << totalBridges << "\n";
             }
-            
+
             return totalBridges;
         }
         
