@@ -47,8 +47,11 @@
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <queue>
 #include <set>
+#include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace gte
@@ -82,7 +85,7 @@ namespace gte
                 , orientNormals(true)
                 , strictMode(false)
                 , removeIsolatedTriangles(true)
-                , smoothWithRVD(true)       // Enable RVD smoothing for better quality
+                , smoothWithRVD(false)      // Disabled by default: O(n²) per iteration; opt-in for small meshes only
                 , rvdSmoothIterations(3)    // 3 iterations usually sufficient
                 , relaxedManifoldExtraction(false)  // Default to original behavior
                 , bypassManifoldExtraction(false)   // Default to standard manifold extraction
@@ -105,9 +108,32 @@ namespace gte
                 return false;
             }
 
+            // Build the KD-tree ONCE and compute the search radius ONCE.
+            // All three spatial-query phases (normal estimation, orientation
+            // propagation, and triangle generation) use the same tree because
+            // NearestNeighborQuery searches by position only; the direction
+            // component of PositionDirectionSite does not affect the query.
+            using Site = PositionSite<3, Real>;
+            std::vector<Site> sites;
+            sites.reserve(points.size());
+            for (auto const& p : points)
+            {
+                sites.emplace_back(p);
+            }
+
+            static constexpr int32_t maxLeafSize = 10;
+            static constexpr int32_t maxLevel = 20;
+            NearestNeighborQuery<3, Real, Site> nnQuery(sites, maxLeafSize, maxLevel);
+
+            Real searchRadius = params.searchRadius;
+            if (searchRadius == static_cast<Real>(0))
+            {
+                searchRadius = ComputeAutomaticSearchRadius(points);
+            }
+
             // Step 1: Compute normals using PCA
             std::vector<Vector3<Real>> normals;
-            if (!ComputeNormals(points, normals, params))
+            if (!ComputeNormals(points, normals, params, nnQuery, searchRadius))
             {
                 return false;
             }
@@ -115,12 +141,12 @@ namespace gte
             // Step 2: Orient normals consistently if requested
             if (params.orientNormals)
             {
-                OrientNormalsConsistently(points, normals, params);
+                OrientNormalsConsistently(points, normals, params, nnQuery, searchRadius);
             }
 
             // Step 3: Generate candidate triangles using co-cone analysis
             std::vector<std::array<int32_t, 3>> candidateTriangles;
-            GenerateTriangles(points, normals, candidateTriangles, params);
+            GenerateTriangles(points, normals, candidateTriangles, params, nnQuery, searchRadius);
 
             if (candidateTriangles.empty())
             {
@@ -152,6 +178,8 @@ namespace gte
             outVertices = points;
 
             // Step 5: Optional RVD-based smoothing for improved quality
+            // NOTE: This is O(n²) per iteration and should only be used for
+            // small meshes (n < ~2000 vertices).  Disabled by default.
             if (params.smoothWithRVD && params.rvdSmoothIterations > 0 && !outTriangles.empty())
             {
                 SmoothWithRVD(outVertices, outTriangles, params);
@@ -166,35 +194,38 @@ namespace gte
         static constexpr int32_t NO_TRIANGLE = -1;
         static constexpr int32_t NO_COMPONENT = -1;
 
+        // Shared NNTree type: PositionSite is used rather than
+        // PositionDirectionSite because the spatial search is position-only.
+        using NNTree = NearestNeighborQuery<3, Real, PositionSite<3, Real>>;
+
+        // Hash for std::array<int32_t,3> — used in triangle-count map to give
+        // O(1) average insertion/lookup instead of O(log T) with std::map.
+        struct TriangleArrayHash
+        {
+            size_t operator()(std::array<int32_t, 3> const& a) const noexcept
+            {
+                size_t h = 0;
+                for (auto v : a)
+                {
+                    h ^= std::hash<int32_t>{}(v) + 0x9e3779b9ULL + (h << 6) + (h >> 2);
+                }
+                return h;
+            }
+        };
+
         // ===== NORMAL ESTIMATION =====
 
-        // Compute normals using PCA (Principal Component Analysis)
+        // Compute normals using PCA (Principal Component Analysis).
+        // Accepts a pre-built NNTree and search radius to avoid rebuilding
+        // the tree for every phase.
         static bool ComputeNormals(
             std::vector<Vector3<Real>> const& points,
             std::vector<Vector3<Real>>& normals,
-            Parameters const& params)
+            Parameters const& params,
+            NNTree const& nnQuery,
+            Real searchRadius)
         {
             normals.resize(points.size());
-
-            // Build nearest neighbor structure
-            using Site = PositionDirectionSite<3, Real>;
-            std::vector<Site> sites;
-            sites.reserve(points.size());
-            for (size_t i = 0; i < points.size(); ++i)
-            {
-                sites.emplace_back(points[i], Vector3<Real>::Zero());
-            }
-
-            int32_t maxLeafSize = 10;
-            int32_t maxLevel = 20;
-            NearestNeighborQuery<3, Real, Site> nnQuery(sites, maxLeafSize, maxLevel);
-
-            // Determine search radius if not specified
-            Real searchRadius = params.searchRadius;
-            if (searchRadius == static_cast<Real>(0))
-            {
-                searchRadius = ComputeAutomaticSearchRadius(points);
-            }
 
             // For each point, compute normal using PCA of neighbors
             for (size_t i = 0; i < points.size(); ++i)
@@ -269,35 +300,19 @@ namespace gte
             return true;
         }
 
-        // Orient normals consistently using BFS on k-NN graph
+        // Orient normals consistently using BFS on k-NN graph.
+        // Accepts a pre-built NNTree and search radius.
         static void OrientNormalsConsistently(
             std::vector<Vector3<Real>> const& points,
             std::vector<Vector3<Real>>& normals,
-            Parameters const& params)
+            Parameters const& params,
+            NNTree const& nnQuery,
+            Real searchRadius)
         {
             size_t n = points.size();
             if (n == 0)
             {
                 return;
-            }
-
-            // Build nearest neighbor structure
-            using Site = PositionDirectionSite<3, Real>;
-            std::vector<Site> sites;
-            sites.reserve(n);
-            for (size_t i = 0; i < n; ++i)
-            {
-                sites.emplace_back(points[i], normals[i]);
-            }
-
-            int32_t maxLeafSize = 10;
-            int32_t maxLevel = 20;
-            NearestNeighborQuery<3, Real, Site> nnQuery(sites, maxLeafSize, maxLevel);
-
-            Real searchRadius = params.searchRadius;
-            if (searchRadius == static_cast<Real>(0))
-            {
-                searchRadius = ComputeAutomaticSearchRadius(points);
             }
 
             // Priority queue for BFS: (dot product deviation, vertex index)
@@ -365,32 +380,17 @@ namespace gte
 
         // ===== TRIANGLE GENERATION =====
 
-        // Generate triangles using co-cone analysis
+        // Generate triangles using co-cone analysis.
+        // Accepts a pre-built NNTree and search radius to avoid rebuilding
+        // the tree for every phase.
         static void GenerateTriangles(
             std::vector<Vector3<Real>> const& points,
             std::vector<Vector3<Real>> const& normals,
             std::vector<std::array<int32_t, 3>>& triangles,
-            Parameters const& params)
+            Parameters const& params,
+            NNTree const& nnQuery,
+            Real searchRadius)
         {
-            // Build nearest neighbor structure
-            using Site = PositionDirectionSite<3, Real>;
-            std::vector<Site> sites;
-            sites.reserve(points.size());
-            for (size_t i = 0; i < points.size(); ++i)
-            {
-                sites.emplace_back(points[i], normals[i]);
-            }
-
-            int32_t maxLeafSize = 10;
-            int32_t maxLevel = 20;
-            NearestNeighborQuery<3, Real, Site> nnQuery(sites, maxLeafSize, maxLevel);
-
-            Real searchRadius = params.searchRadius;
-            if (searchRadius == static_cast<Real>(0))
-            {
-                searchRadius = ComputeAutomaticSearchRadius(points);
-            }
-
             Real maxCosAngle = std::cos(params.maxNormalAngle * static_cast<Real>(3.14159265358979323846) / static_cast<Real>(180));
 
             // For each point, generate local triangles
@@ -435,11 +435,11 @@ namespace gte
                 // Using a simple fan triangulation for each neighbor pair
                 for (size_t j = 0; j < consistentNeighbors.size(); ++j)
                 {
-                    for (size_t k = j + 1; k < consistentNeighbors.size(); ++k)
+                    for (size_t kk = j + 1; kk < consistentNeighbors.size(); ++kk)
                     {
                         int32_t v0 = static_cast<int32_t>(i);
                         int32_t v1 = consistentNeighbors[j];
-                        int32_t v2 = consistentNeighbors[k];
+                        int32_t v2 = consistentNeighbors[kk];
 
                         // Check triangle quality
                         if (!IsTriangleValid(points, v0, v1, v2, params))
@@ -542,8 +542,11 @@ namespace gte
             std::vector<std::array<int32_t, 3>> goodTriangles;
             std::vector<std::array<int32_t, 3>> notSoGoodTriangles;
             
-            // Build triangle count map
-            std::map<std::array<int32_t, 3>, int> triangleCounts;
+            // Build triangle count map.
+            // Use unordered_map for O(1) average insertion/lookup vs O(log T) for
+            // std::map.  With O(n·k²) candidate triangles this matters at scale.
+            std::unordered_map<std::array<int32_t, 3>, int, TriangleArrayHash> triangleCounts;
+            triangleCounts.reserve(candidateTriangles.size() / 3);  // rough estimate
             for (auto const& tri : candidateTriangles)
             {
                 // Normalize triangle (sort vertices for comparison)
