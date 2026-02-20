@@ -54,3 +54,5 @@ a.out
 *.gch
 *.pch
 *.obj
+perf.data
+perf.data.old
