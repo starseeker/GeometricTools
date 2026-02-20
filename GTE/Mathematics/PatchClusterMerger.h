@@ -80,9 +80,12 @@ namespace gte
             // are left unchanged.
             int32_t minPatchesPerCluster;
 
-            // Fraction of the average cluster boundary-edge length used as
-            // the minimum indentation threshold for the shrinkwrap step.
-            Real shrinkwrapEpsilonFactor;
+            // Maximum ratio of smallest PCA eigenvalue to largest for a
+            // cluster to be considered "planar enough" for UV re-triangulation.
+            // A value of 0 disables the planarity check (always attempt).
+            // Typical good value: 0.3 (cluster is planar if its thickness is
+            // less than 30% of its lateral extent).
+            Real maxPlanarityRatio;
 
             bool verbose;
 
@@ -90,7 +93,7 @@ namespace gte
                 : numClusters(6)
                 , kmeansMaxIterations(50)
                 , minPatchesPerCluster(2)
-                , shrinkwrapEpsilonFactor(static_cast<Real>(0.05))
+                , maxPlanarityRatio(static_cast<Real>(0.3))
                 , verbose(false)
             {}
         };
@@ -102,6 +105,11 @@ namespace gte
         // the original triangles are removed and replaced by the re-
         // triangulated Delaunay patch.  Returns the number of clusters
         // that were successfully merged.
+        //
+        // Key design: ALL clusters are evaluated against the ORIGINAL
+        // triangle array (read-only phase), and only AFTER all evaluations
+        // are done are the triangles modified (write phase).  This avoids
+        // stale triangle-index bugs when processing multiple clusters.
         static int32_t MergeClusteredPatches(
             std::vector<Vector3<Real>>& vertices,
             std::vector<std::array<int32_t, 3>>& triangles,
@@ -138,8 +146,16 @@ namespace gte
                 KMeansClusterPatches(patches, params.numClusters,
                     params.kmeansMaxIterations);
 
-            // Step 3: for each cluster, re-triangulate.
+            // Step 3: READ-ONLY phase – compute new triangles for each cluster
+            // without modifying the triangles array.
+            struct ClusterResult
+            {
+                std::set<int32_t>               oldTriIndices;  // to remove
+                std::vector<std::array<int32_t,3>> newTris;     // to add
+            };
+            std::vector<ClusterResult> results(params.numClusters);
             int32_t mergedCount = 0;
+
             for (int32_t c = 0; c < params.numClusters; ++c)
             {
                 // Collect patches in this cluster.
@@ -157,8 +173,9 @@ namespace gte
                     continue;
                 }
 
-                bool ok = MergeCluster(vertices, triangles,
-                    clusterPatches, patches, params);
+                bool ok = ComputeClusterMerge(vertices, triangles,
+                    clusterPatches, patches, params,
+                    results[c].oldTriIndices, results[c].newTris);
                 if (ok)
                 {
                     ++mergedCount;
@@ -168,6 +185,32 @@ namespace gte
                     std::cout << "[PatchClusterMerger] cluster " << c
                               << " merge failed, keeping original triangles\n";
                 }
+            }
+
+            // Step 4: WRITE phase – apply all successful cluster replacements.
+            if (mergedCount > 0)
+            {
+                // Collect all old triangle indices to remove.
+                std::set<int32_t> allOldIndices;
+                for (auto const& r : results)
+                {
+                    allOldIndices.insert(r.oldTriIndices.begin(), r.oldTriIndices.end());
+                }
+
+                std::vector<std::array<int32_t, 3>> kept;
+                kept.reserve(triangles.size());
+                for (int32_t ti = 0; ti < static_cast<int32_t>(triangles.size()); ++ti)
+                {
+                    if (!allOldIndices.count(ti))
+                    {
+                        kept.push_back(triangles[ti]);
+                    }
+                }
+                for (auto const& r : results)
+                {
+                    kept.insert(kept.end(), r.newTris.begin(), r.newTris.end());
+                }
+                triangles = std::move(kept);
             }
 
             if (params.verbose)
@@ -357,16 +400,19 @@ namespace gte
         }
 
         // ---------------------------------------------------------------
-        // Step 3: merge one cluster
+        // Step 3: compute new triangles for one cluster (READ-ONLY).
         // ---------------------------------------------------------------
-        // Returns true if re-triangulation succeeded and triangles were
-        // replaced; false on any failure (original triangles kept).
-        static bool MergeCluster(
+        // Evaluates the cluster merge against the ORIGINAL triangles array
+        // and returns the set of old triangle indices to remove and the new
+        // triangles to add.  Does NOT modify 'triangles'.
+        static bool ComputeClusterMerge(
             std::vector<Vector3<Real>> const& vertices,
-            std::vector<std::array<int32_t, 3>>& triangles,
+            std::vector<std::array<int32_t, 3>> const& triangles,
             std::vector<int32_t> const& clusterPatchIndices,
             std::vector<PatchInfo> const& allPatches,
-            Parameters const& params)
+            Parameters const& params,
+            std::set<int32_t>& outOldTriIndices,
+            std::vector<std::array<int32_t, 3>>& outNewTris)
         {
             // Collect the set of triangle indices and vertex indices for
             // this cluster.
@@ -396,8 +442,22 @@ namespace gte
             // --- a. PCA projection to UV. ---
             Vector3<Real> origin, uAxis, vAxis;
             std::vector<Vector2<Real>> uvCoords;
-            if (!ProjectToUV(vertices, clusterVertList, uvCoords, origin, uAxis, vAxis))
+            Real planarityRatio = static_cast<Real>(0);
+            if (!ProjectToUV(vertices, clusterVertList, uvCoords, origin, uAxis, vAxis,
+                    &planarityRatio))
             {
+                return false;
+            }
+
+            // Skip non-planar clusters: UV projection would distort too much.
+            if (params.maxPlanarityRatio > static_cast<Real>(0)
+                && planarityRatio > params.maxPlanarityRatio)
+            {
+                if (params.verbose)
+                {
+                    std::cout << "[PatchClusterMerger] cluster skipped (planarityRatio="
+                              << planarityRatio << " > " << params.maxPlanarityRatio << ")\n";
+                }
                 return false;
             }
 
@@ -477,32 +537,18 @@ namespace gte
                 return false;
             }
 
-            // --- f. Replace original triangles. ---
-            // Remove cluster triangles (mark as degenerate {0,0,0} then
-            // compact, but compact is expensive; instead build a replacement
-            // list and swap).
-            // We rebuild the triangles array: keep non-cluster triangles,
-            // then append new cluster triangles.
-            std::vector<std::array<int32_t, 3>> kept;
-            kept.reserve(triangles.size());
-            for (int32_t ti = 0; ti < static_cast<int32_t>(triangles.size()); ++ti)
-            {
-                if (clusterTriSet.find(ti) == clusterTriSet.end())
-                {
-                    kept.push_back(triangles[ti]);
-                }
-            }
+            // --- f. Populate output: old indices to remove + new triangles. ---
+            outOldTriIndices = clusterTriSet;
 
-            // Append new triangles (map local UV indices back to global).
+            outNewTris.clear();
             for (auto const& uvTri : uvTriangles)
             {
                 int32_t v0 = clusterVertList[uvTri[0]];
                 int32_t v1 = clusterVertList[uvTri[1]];
                 int32_t v2 = clusterVertList[uvTri[2]];
-                kept.push_back({v0, v1, v2});
+                outNewTris.push_back({v0, v1, v2});
             }
 
-            triangles = std::move(kept);
             return true;
         }
 
@@ -515,7 +561,8 @@ namespace gte
             std::vector<Vector2<Real>>& uvCoords,
             Vector3<Real>& origin,
             Vector3<Real>& uAxis,
-            Vector3<Real>& vAxis)
+            Vector3<Real>& vAxis,
+            Real* outPlanarityRatio = nullptr)
         {
             int32_t N = static_cast<int32_t>(vertIdxList.size());
             if (N < 3)
@@ -553,6 +600,16 @@ namespace gte
             std::array<std::array<Real, 3>, 3> evec{};
             SymmetricEigensolver3x3<Real> solver;
             solver(c00, c01, c02, c11, c12, c22, false, +1, eval, evec);
+
+            // Planarity ratio: smallest eigenvalue / largest eigenvalue.
+            // A truly planar cluster has eval[0] ≈ 0.
+            if (outPlanarityRatio != nullptr)
+            {
+                Real maxEval = eval[2];
+                *outPlanarityRatio = (maxEval > static_cast<Real>(1e-15))
+                    ? eval[0] / maxEval
+                    : static_cast<Real>(0);
+            }
 
             // evec[0] = eigenvector for smallest eigenvalue = surface normal.
             // evec[1] and evec[2] = the two principal tangent directions.
@@ -652,7 +709,7 @@ namespace gte
         }
 
         // ---------------------------------------------------------------
-        // Step 3d: outer boundary (single loop or shrinkwrap of convex hull)
+        // Step 3d: outer boundary (single loop or convex hull of all loops)
         // ---------------------------------------------------------------
         static std::vector<int32_t> ComputeOuterBoundary(
             std::vector<Vector2<Real>> const& uvCoords,
@@ -665,8 +722,10 @@ namespace gte
                 return loops[0];
             }
 
-            // Multiple loops: collect all boundary vertices and build the
-            // convex hull, then shrink-wrap inward to tighten it.
+            // Multiple loops: compute the convex hull of all boundary vertices.
+            // The convex hull is a valid simple polygon and is guaranteed to
+            // enclose all boundary points.  (Shrinkwrap is omitted to avoid
+            // self-intersections in the UV outline.)
             std::vector<int32_t> allBoundaryVerts(
                 boundaryVertSet.begin(), boundaryVertSet.end());
 
@@ -677,7 +736,6 @@ namespace gte
                 boundaryUV.push_back(uvCoords[idx]);
             }
 
-            // Convex hull.
             ConvexHull2<Real> hull;
             if (!hull(boundaryUV))
             {
@@ -686,7 +744,12 @@ namespace gte
             }
 
             std::vector<int32_t> const& hullLocalIndices = hull.GetHull();
-            // Map back to cluster-local vertex indices.
+            if (hullLocalIndices.size() < 3)
+            {
+                return loops[0];
+            }
+
+            // Map hull indices (into boundaryUV) back to cluster-local vertex indices.
             std::vector<int32_t> hullIndices;
             hullIndices.reserve(hullLocalIndices.size());
             for (int32_t h : hullLocalIndices)
@@ -694,129 +757,17 @@ namespace gte
                 hullIndices.push_back(allBoundaryVerts[h]);
             }
 
-            // Shrink-wrap the convex hull inward to capture concavities.
-            return ShrinkwrapHull(uvCoords, hullIndices, boundaryVertSet, params);
-        }
-
-        // ---------------------------------------------------------------
-        // Shrink-wrap: refine convex hull toward concave hull
-        // ---------------------------------------------------------------
-        // For each hull edge (A,B) we find the boundary vertex that lies on
-        // the interior side and is furthest from the edge.  If its distance
-        // exceeds epsilon we insert it into the hull, splitting the edge.
-        // We repeat until no more vertices can be inserted.
-        static std::vector<int32_t> ShrinkwrapHull(
-            std::vector<Vector2<Real>> const& uvCoords,
-            std::vector<int32_t> const& initialHull,
-            std::set<int32_t> const& boundaryVertSet,
-            Parameters const& params)
-        {
-            std::vector<int32_t> hull = initialHull;
-
-            // Estimate epsilon from average hull edge length.
-            Real totalLen = static_cast<Real>(0);
-            for (size_t i = 0; i < hull.size(); ++i)
-            {
-                Vector2<Real> d = uvCoords[hull[(i + 1) % hull.size()]]
-                                - uvCoords[hull[i]];
-                totalLen += std::sqrt(Dot(d, d));
-            }
-            Real epsilon = (hull.empty() ? static_cast<Real>(0) :
-                totalLen / static_cast<Real>(hull.size()))
-                * params.shrinkwrapEpsilonFactor;
-
-            std::set<int32_t> hullSet(hull.begin(), hull.end());
-
-            bool changed = true;
-            // Limit total insertions to avoid O(N²) blow-up in degenerate cases.
-            int32_t maxInsertions = static_cast<int32_t>(boundaryVertSet.size()) * 2;
-
-            while (changed && maxInsertions > 0)
-            {
-                changed = false;
-                for (int32_t ei = 0; ei < static_cast<int32_t>(hull.size()); ++ei)
-                {
-                    int32_t iA = hull[ei];
-                    int32_t iB = hull[(ei + 1) % hull.size()];
-                    Vector2<Real> A = uvCoords[iA];
-                    Vector2<Real> B = uvCoords[iB];
-                    Vector2<Real> AB = B - A;
-                    Real ABlen = std::sqrt(Dot(AB, AB));
-                    if (ABlen < static_cast<Real>(1e-15))
-                    {
-                        continue;
-                    }
-
-                    // Inward-pointing perpendicular (to the left of A→B
-                    // when the hull is counter-clockwise).
-                    Vector2<Real> inward{-AB[1] / ABlen, AB[0] / ABlen};
-
-                    // Find the centroid of the hull to determine "inward".
-                    Vector2<Real> hullCentroid{static_cast<Real>(0), static_cast<Real>(0)};
-                    for (int32_t h : hull)
-                    {
-                        hullCentroid = hullCentroid + uvCoords[h];
-                    }
-                    hullCentroid = hullCentroid / static_cast<Real>(hull.size());
-
-                    // Ensure inward points toward centroid.
-                    Vector2<Real> toCenter = hullCentroid - A;
-                    if (Dot(toCenter, inward) < static_cast<Real>(0))
-                    {
-                        inward[0] = -inward[0];
-                        inward[1] = -inward[1];
-                    }
-
-                    // Find best boundary vertex to insert.
-                    int32_t bestV = -1;
-                    Real bestDist = epsilon;
-                    for (int32_t v : boundaryVertSet)
-                    {
-                        if (hullSet.count(v))
-                        {
-                            continue;
-                        }
-                        Vector2<Real> AV = uvCoords[v] - A;
-
-                        // Must lie on the interior side of edge AB.
-                        if (Dot(AV, inward) <= epsilon)
-                        {
-                            continue;
-                        }
-
-                        // Must lie between A and B along the edge direction
-                        // (not beyond either endpoint).
-                        Real t = Dot(AV, AB) / Dot(AB, AB);
-                        if (t <= static_cast<Real>(0) || t >= static_cast<Real>(1))
-                        {
-                            continue;
-                        }
-
-                        Real dist = Dot(AV, inward);
-                        if (dist > bestDist)
-                        {
-                            bestDist = dist;
-                            bestV = v;
-                        }
-                    }
-
-                    if (bestV >= 0)
-                    {
-                        hull.insert(hull.begin() + ei + 1, bestV);
-                        hullSet.insert(bestV);
-                        changed = true;
-                        --maxInsertions;
-                        break;  // Restart scan with updated hull.
-                    }
-                }
-            }
-
-            return hull;
+            return hullIndices;
         }
 
         // ---------------------------------------------------------------
         // Step 3e: triangulate in UV space with detria
         // ---------------------------------------------------------------
+        // Only boundary vertices are used for the triangulation: the outline
+        // holds the outer boundary, and the remaining boundary vertices (not
+        // in the outline) are Steiner points.  Interior vertices are excluded
+        // because the simple PCA projection does not guarantee they fall
+        // inside the convex/concave boundary polygon.
         static bool TriangulateClusterUV(
             std::vector<Vector2<Real>> const& uvCoords,
             std::vector<int32_t> const& outerBoundary,
@@ -832,33 +783,68 @@ namespace gte
                 return false;
             }
 
+            // Validate outline indices.
             int32_t numVerts = static_cast<int32_t>(uvCoords.size());
-
-            // Build detria point list (all cluster vertices in UV).
-            std::vector<detria::PointD> pts2D;
-            pts2D.reserve(numVerts);
-            for (auto const& uv : uvCoords)
+            std::set<int32_t> outlineSet(outerBoundary.begin(), outerBoundary.end());
+            if (static_cast<int32_t>(outlineSet.size()) < 3)
             {
-                pts2D.push_back({static_cast<double>(uv[0]),
-                                 static_cast<double>(uv[1])});
+                return false;  // Degenerate (fewer than 3 unique vertices).
             }
-
-            // Build outline (uses local indices from outerBoundary).
-            std::vector<uint32_t> outline;
-            outline.reserve(outerBoundary.size());
             for (int32_t localIdx : outerBoundary)
             {
                 if (localIdx < 0 || localIdx >= numVerts)
                 {
                     return false;
                 }
-                outline.push_back(static_cast<uint32_t>(localIdx));
+            }
+
+            // Build detria point list from outline + remaining boundary vertices.
+            // We use a compact index space: outline first, then other boundary verts.
+            std::vector<detria::PointD> pts2D;
+            std::vector<int32_t> localToCompact(numVerts, -1);  // local → compact index
+
+            // Add outline vertices first.
+            // Deduplicate (preserve first occurrence of each unique local index).
+            std::vector<uint32_t> outline;
+            for (int32_t localIdx : outerBoundary)
+            {
+                if (localToCompact[localIdx] == -1)
+                {
+                    localToCompact[localIdx] = static_cast<int32_t>(pts2D.size());
+                    auto const& uv = uvCoords[localIdx];
+                    pts2D.push_back({static_cast<double>(uv[0]),
+                                     static_cast<double>(uv[1])});
+                }
+                outline.push_back(static_cast<uint32_t>(localToCompact[localIdx]));
+            }
+
+            // Add small random perturbation to break collinearity.
+            // Scale is 1e-6 of the bounding box diagonal.
+            {
+                double minU = pts2D[0].x, maxU = pts2D[0].x;
+                double minV = pts2D[0].y, maxV = pts2D[0].y;
+                for (auto const& p : pts2D)
+                {
+                    minU = std::min(minU, p.x); maxU = std::max(maxU, p.x);
+                    minV = std::min(minV, p.y); maxV = std::max(maxV, p.y);
+                }
+                double diag = std::sqrt((maxU-minU)*(maxU-minU) + (maxV-minV)*(maxV-minV));
+                double eps = diag * 1e-6;
+                if (eps > 0.0)
+                {
+                    // Deterministic "noise" using point index.
+                    for (size_t i = 0; i < pts2D.size(); ++i)
+                    {
+                        double t = static_cast<double>(i) / static_cast<double>(pts2D.size());
+                        pts2D[i].x += eps * std::sin(t * 137.508);
+                        pts2D[i].y += eps * std::cos(t * 137.508);
+                    }
+                }
             }
 
             detria::Triangulation tri;
             tri.setPoints(pts2D);
             tri.addOutline(outline);
-            // All other vertices are automatically treated as Steiner points.
 
             bool ok = tri.triangulate(/*delaunay=*/true);
             if (!ok)
@@ -870,15 +856,43 @@ namespace gte
                 return false;
             }
 
-            // Collect triangles that are inside the outline
-            // (detria classifies each triangle by location).
+            // Collect triangles inside the outline, mapping compact indices back
+            // to local cluster indices.
             bool cwTriangles = true;
             tri.forEachTriangle(
                 [&](detria::Triangle<uint32_t> t)
                 {
-                    outLocalTriangles.push_back({static_cast<int32_t>(t.x),
-                                                 static_cast<int32_t>(t.y),
-                                                 static_cast<int32_t>(t.z)});
+                    // Map compact indices back to local cluster-vertex indices.
+                    // localToCompact is a local→compact map; invert on-the-fly.
+                    // Since compact indices are assigned sequentially starting
+                    // from outline vertices, we can search localToCompact.
+                    // For efficiency build the inverse once.
+                    (void)t;  // handled via the inverse map below
+                },
+                cwTriangles);
+            outLocalTriangles.clear();
+
+            // Build compact→local inverse map.
+            std::vector<int32_t> compactToLocal(pts2D.size(), -1);
+            for (int32_t li = 0; li < numVerts; ++li)
+            {
+                int32_t ci = localToCompact[li];
+                if (ci >= 0)
+                {
+                    compactToLocal[ci] = li;
+                }
+            }
+
+            tri.forEachTriangle(
+                [&](detria::Triangle<uint32_t> t)
+                {
+                    int32_t v0 = compactToLocal[t.x];
+                    int32_t v1 = compactToLocal[t.y];
+                    int32_t v2 = compactToLocal[t.z];
+                    if (v0 >= 0 && v1 >= 0 && v2 >= 0)
+                    {
+                        outLocalTriangles.push_back({v0, v1, v2});
+                    }
                 },
                 cwTriangles);
 

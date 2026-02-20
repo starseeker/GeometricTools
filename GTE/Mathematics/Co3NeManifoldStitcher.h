@@ -277,7 +277,31 @@ namespace gte
                     }
                 }
             }  // end verbose Steps 3 & 4a
-            
+
+            // Step 3.5: UV-based cluster merge (if enabled).
+            // Run BEFORE hole filling and component bridging so that the
+            // pipeline works on a smaller number of larger patches.
+            if (params.enableUVMerging)
+            {
+                auto t35start = std::chrono::steady_clock::now();
+
+                typename PatchClusterMerger<Real>::Parameters mergeParams;
+                mergeParams.numClusters = params.numClusters;
+                mergeParams.verbose    = params.verbose;
+
+                int32_t merged = PatchClusterMerger<Real>::MergeClusteredPatches(
+                    vertices, triangles, mergeParams);
+
+                if (params.verbose)
+                {
+                    auto t35ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - t35start).count();
+                    std::cout << "  [Profiling] Step 3.5 (UV cluster merge, "
+                              << merged << " clusters merged): "
+                              << t35ms << " ms\n";
+                }
+            }
+
             // Step 4: Fill holes using existing hole filling (with validation)
             if (params.enableHoleFilling)
             {
@@ -403,28 +427,6 @@ namespace gte
                     auto t7ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - t7start).count();
                     std::cout << "  [Profiling] Step 7 (component bridging): " << t7ms << " ms\n";
-                }
-            }
-            
-            // Step 8: UV parameterization merging (if enabled)
-            if (params.enableUVMerging)
-            {
-                auto t8start = std::chrono::steady_clock::now();
-
-                typename PatchClusterMerger<Real>::Parameters mergeParams;
-                mergeParams.numClusters = params.numClusters;
-                mergeParams.verbose    = params.verbose;
-
-                int32_t merged = PatchClusterMerger<Real>::MergeClusteredPatches(
-                    vertices, triangles, mergeParams);
-
-                if (params.verbose)
-                {
-                    auto t8ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - t8start).count();
-                    std::cout << "  [Profiling] Step 8 (UV cluster merge, "
-                              << merged << " clusters merged): "
-                              << t8ms << " ms\n";
                 }
             }
             

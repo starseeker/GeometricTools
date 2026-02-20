@@ -7,6 +7,7 @@
 #include <GTE/Mathematics/Co3Ne.h>
 #include <GTE/Mathematics/PatchClusterMerger.h>
 #include <GTE/Mathematics/Co3NeManifoldStitcher.h>
+#include <fstream>
 #include <iostream>
 #include <vector>
 #include <array>
@@ -178,45 +179,71 @@ static bool TestTwoPatchMerge()
 }
 
 // -----------------------------------------------------------------------
-// Test 3: Co3Ne + PatchClusterMerger integration with enableUVMerging
+// Test 3: Co3Ne + PatchClusterMerger integration with enableUVMerging.
+// Tries to load r768_1000.xyz; falls back to synthetic sphere if missing.
 // -----------------------------------------------------------------------
 static bool TestCo3NeIntegration()
 {
     std::cout << "\n=== Test 3: Co3Ne + StitchPatches with enableUVMerging ===\n";
 
-    // Dense sphere point cloud (good for Co3Ne).
     std::vector<Vector3<double>> points;
-    int const M = 8;
-    for (int ui = 0; ui <= M; ++ui)
+    std::vector<Vector3<double>> normals;
+
+    // Try loading the sample xyz file first (6 columns: x y z nx ny nz).
     {
-        double theta = kPi * ui / M;
-        for (int vi = 0; vi < 2*M; ++vi)
+        std::ifstream f("r768_1000.xyz");
+        if (f.is_open())
         {
-            double phi = 2.0 * kPi * vi / (2*M);
-            points.push_back({
-                std::sin(theta)*std::cos(phi),
-                std::sin(theta)*std::sin(phi),
-                std::cos(theta)
-            });
+            double x, y, z, nx, ny, nz;
+            while (f >> x >> y >> z >> nx >> ny >> nz)
+            {
+                points.push_back({x, y, z});
+                normals.push_back({nx, ny, nz});
+            }
+            std::cout << "Loaded " << points.size() << " points from r768_1000.xyz\n";
         }
     }
 
-    // Add some noise to avoid perfectly co-planar points.
-    for (auto& p : points)
+    // Fallback: denser synthetic sphere if the file wasn't found.
+    if (points.empty())
     {
-        p[0] += 0.01 * ((double)rand()/RAND_MAX - 0.5);
-        p[1] += 0.01 * ((double)rand()/RAND_MAX - 0.5);
-        p[2] += 0.01 * ((double)rand()/RAND_MAX - 0.5);
+        std::cout << "r768_1000.xyz not found – using synthetic sphere (M=12)\n";
+        int const M = 12;
+        for (int ui = 1; ui < M; ++ui)  // skip poles to avoid degenerate fans
+        {
+            double theta = kPi * ui / M;
+            for (int vi = 0; vi < 2*M; ++vi)
+            {
+                double phi = 2.0 * kPi * vi / (2*M);
+                double sx = std::sin(theta)*std::cos(phi);
+                double sy = std::sin(theta)*std::sin(phi);
+                double sz = std::cos(theta);
+                points.push_back({sx, sy, sz});
+                normals.push_back({sx, sy, sz});  // outward normals
+            }
+        }
+        // Add poles.
+        points.push_back({0, 0,  1});  normals.push_back({0, 0,  1});
+        points.push_back({0, 0, -1});  normals.push_back({0, 0, -1});
     }
 
     Co3Ne<double>::Parameters co3Params;
-    co3Params.kNeighbors = 10;
+    co3Params.kNeighbors               = 20;
     co3Params.relaxedManifoldExtraction = true;
+    co3Params.triangleQualityThreshold  = 0.1;
 
-    std::vector<Vector3<double>> outVerts;
-    std::vector<std::array<int32_t,3>> outTris;
+    std::vector<Vector3<double>>          outVerts;
+    std::vector<std::array<int32_t,3>>    outTris;
 
-    bool ok = Co3Ne<double>::Reconstruct(points, outVerts, outTris, co3Params);
+    bool ok = Co3Ne<double>::ReconstructWithNormals(
+        points, normals, outVerts, outTris, co3Params);
+
+    if (!ok || outTris.empty())
+    {
+        // Second attempt without precomputed normals.
+        ok = Co3Ne<double>::Reconstruct(points, outVerts, outTris, co3Params);
+    }
+
     if (!ok || outTris.empty())
     {
         std::cout << "Co3Ne produced no triangles – skipping integration test\n";
