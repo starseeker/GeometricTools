@@ -13,6 +13,8 @@
 #include <set>
 #include <cmath>
 
+static constexpr double kPi = 3.14159265358979323846;
+
 using namespace gte;
 
 // -----------------------------------------------------------------------
@@ -130,7 +132,7 @@ static bool TestTwoPatchMerge()
     int const N = 8;
     for (int i = 0; i < N; ++i)
     {
-        double a = 2.0 * 3.14159265358979 * i / N;
+        double a = 2.0 * kPi * i / N;
         verts.push_back({std::cos(a), std::sin(a), 0.0});  // 1..8
     }
     for (int i = 0; i < N; ++i)
@@ -143,7 +145,7 @@ static bool TestTwoPatchMerge()
     verts.push_back({10, 0, 0});  // offset + 0 – centre
     for (int i = 0; i < N; ++i)
     {
-        double a = 2.0 * 3.14159265358979 * i / N;
+        double a = 2.0 * kPi * i / N;
         verts.push_back({10 + std::cos(a), std::sin(a), 0.0});
     }
     for (int i = 0; i < N; ++i)
@@ -187,10 +189,10 @@ static bool TestCo3NeIntegration()
     int const M = 8;
     for (int ui = 0; ui <= M; ++ui)
     {
-        double theta = 3.14159265358979 * ui / M;
+        double theta = kPi * ui / M;
         for (int vi = 0; vi < 2*M; ++vi)
         {
-            double phi = 2.0 * 3.14159265358979 * vi / (2*M);
+            double phi = 2.0 * kPi * vi / (2*M);
             points.push_back({
                 std::sin(theta)*std::cos(phi),
                 std::sin(theta)*std::sin(phi),
