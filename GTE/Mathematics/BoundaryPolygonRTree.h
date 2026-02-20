@@ -8,18 +8,27 @@
 // BoundaryPolygonRTree
 //
 // A standalone spatial index for boundary polygon edges, providing efficient
-// overlap queries between two boundary polygon RTrees without BRL-CAD dependencies.
+// overlap queries between two boundary polygon RTrees without BRL-CAD
+// dependencies.
 //
 // Inspired by the RTree.h Overlaps() concept from the project repository, this
-// class implements a grid-based spatial index that achieves similar locality
-// detection:
+// class implements an endpoint-indexed uniform 3D grid that achieves correct
+// locality detection regardless of edge length:
 //
-//   1. Build an RTree for each boundary polygon's edges (Build()).
-//   2. Query which edge pairs from two different polygons are spatially close
-//      (Overlaps()), limiting distance checks to candidate pairs only.
+//   1. Build(): index each edge by BOTH its endpoints (not midpoint).
+//   2. Overlaps(): for each edge A[i], search the OTHER tree's cells near
+//      each endpoint of A[i] with cellRadius = ceil(maxDist/cellSize)+1.
+//      Any B[j] with an endpoint within maxDist of any endpoint of A[i] is
+//      guaranteed to be found without any half-edge-length expansion.
 //
-// This is used to accelerate component gap finding (bridging) from the naive
+// This is used to accelerate component gap-finding (bridging) from the naive
 // O(B_i × B_j) per component-pair to near-linear in the number of close pairs.
+//
+// Design note: endpoint-based insertion (rather than midpoint-based) is
+// essential for correctness when edges are longer than the query distance.
+// With midpoint indexing a long edge's endpoint can be close to a remote
+// edge's endpoint even though their midpoints are far apart, requiring a
+// prohibitively large cell-search radius.
 
 #ifndef GTE_MATHEMATICS_BOUNDARY_POLYGON_RTREE_H
 #define GTE_MATHEMATICS_BOUNDARY_POLYGON_RTREE_H
@@ -39,7 +48,8 @@
 namespace gte
 {
     // Spatial index for a single boundary polygon's edges.
-    // Internally uses a uniform 3D grid so that nearby-edge queries are O(1) average.
+    // Internally uses a uniform 3D grid indexed by edge endpoints so that
+    // nearby-edge queries are O(1) average, independent of edge length.
     template <typename Real>
     class BoundaryPolygonRTree
     {
@@ -48,10 +58,10 @@ namespace gte
 
         BoundaryPolygonRTree() = default;
 
-        // Build the spatial index from a set of boundary edges and the mesh vertices.
-        // cellSizeHint: if > 0, used as the grid cell size; otherwise it is auto-derived
-        //               from the average edge length so that each cell holds ~maxLeafEdges
-        //               edges on average for a uniform distribution.
+        // Build the spatial index from a set of boundary edges and the mesh
+        // vertices.
+        // cellSizeHint: if > 0, used as the grid cell size; otherwise it is
+        //               auto-derived from the bounding box diagonal.
         void Build(
             std::vector<EdgeType> const& edges,
             std::vector<Vector3<Real>> const& vertices,
@@ -65,21 +75,19 @@ namespace gte
                 return;
             }
 
-            // Compute midpoints and bounding box
-            mMidpoints.resize(edges.size());
+            // Compute bounding box over all edge endpoints
             Vector3<Real> bboxMin = vertices[edges[0].first];
             Vector3<Real> bboxMax = bboxMin;
 
-            for (size_t i = 0; i < edges.size(); ++i)
+            for (auto const& e : edges)
             {
-                Vector3<Real> const& v0 = vertices[edges[i].first];
-                Vector3<Real> const& v1 = vertices[edges[i].second];
-                mMidpoints[i] = (v0 + v1) * static_cast<Real>(0.5);
-
-                for (int k = 0; k < 3; ++k)
+                for (int32_t vi : {e.first, e.second})
                 {
-                    bboxMin[k] = std::min(bboxMin[k], std::min(v0[k], v1[k]));
-                    bboxMax[k] = std::max(bboxMax[k], std::max(v0[k], v1[k]));
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        bboxMin[k] = std::min(bboxMin[k], vertices[vi][k]);
+                        bboxMax[k] = std::max(bboxMax[k], vertices[vi][k]);
+                    }
                 }
             }
 
@@ -90,7 +98,6 @@ namespace gte
             }
             else
             {
-                // Auto-derive: use a fraction of the bounding box diagonal
                 Real diag = Length(bboxMax - bboxMin);
                 mCellSize = (diag > static_cast<Real>(0))
                     ? diag / static_cast<Real>(8)
@@ -99,16 +106,31 @@ namespace gte
 
             mBBoxMin = bboxMin;
 
-            // Insert each edge into its grid cell
+            // Insert each edge by BOTH its endpoints.
+            // This guarantees that any edge with an endpoint in a given cell
+            // neighbourhood is findable by a query anchored at that cell,
+            // regardless of how long the edge is.
             for (size_t i = 0; i < edges.size(); ++i)
             {
-                mGrid[CellOf(mMidpoints[i])].push_back(static_cast<int32_t>(i));
+                GridCell c0 = CellOf(vertices[edges[i].first]);
+                GridCell c1 = CellOf(vertices[edges[i].second]);
+                mGrid[c0].push_back(static_cast<int32_t>(i));
+                // Insert the second endpoint only if it maps to a different cell
+                // to avoid storing the same edge index twice in the same cell.
+                if (c1 != c0)
+                {
+                    mGrid[c1].push_back(static_cast<int32_t>(i));
+                }
             }
         }
 
-        // Find all edge pairs (indexInThis, indexInOther) where the two edges
-        // are within maxDist of each other (measured between edge midpoints plus
-        // an additional vertex-to-vertex check for precision).
+        // Find all edge pairs (indexInThis, indexInOther) where the minimum
+        // vertex-to-vertex distance between the two edges is <= maxDist.
+        //
+        // Algorithm: for each edge A[i], search cells within cellRadius of
+        // EACH endpoint of A[i] in OTHER's grid.  Because OTHER's grid is
+        // indexed by endpoints, any B[j] that has an endpoint within maxDist
+        // of any endpoint of A[i] will be found.
         //
         // Returns the number of candidate pairs found.
         size_t Overlaps(
@@ -124,54 +146,50 @@ namespace gte
                 return 0;
             }
 
-            // Cell radius in OTHER's grid to cover maxDist
-            // (use other's cell size for the radius calculation since we query other's grid)
+            // cellRadius: number of cell steps needed to cover maxDist.
+            // Since we query around each endpoint of A[i] and OTHER is indexed
+            // by endpoints, this radius is sufficient to find any B[j] with an
+            // endpoint within maxDist of any endpoint of A[i].
             int32_t cellRadius = static_cast<int32_t>(
                 std::ceil(maxDist / other.mCellSize)) + 1;
 
             for (size_t i = 0; i < mEdges.size(); ++i)
             {
-                // Compute the cell of this edge's midpoint in OTHER's coordinate frame
-                // so the neighbor-cell search is directly in other's grid.
-                std::array<int32_t, 3> cellInOther = other.CellOf(mMidpoints[i]);
-
-                // Search all cells within cellRadius in the OTHER tree's grid
-                for (int32_t dx = -cellRadius; dx <= cellRadius; ++dx)
+                // Search around BOTH endpoints of edge A[i]
+                for (int32_t vi : {mEdges[i].first, mEdges[i].second})
                 {
-                    for (int32_t dy = -cellRadius; dy <= cellRadius; ++dy)
+                    std::array<int32_t, 3> endpointCell =
+                        other.CellOf(vertices[vi]);
+
+                    for (int32_t dx = -cellRadius; dx <= cellRadius; ++dx)
                     {
-                        for (int32_t dz = -cellRadius; dz <= cellRadius; ++dz)
+                        for (int32_t dy = -cellRadius; dy <= cellRadius; ++dy)
                         {
-                            std::array<int32_t, 3> neighborCell = {
-                                cellInOther[0] + dx,
-                                cellInOther[1] + dy,
-                                cellInOther[2] + dz
-                            };
-
-                            auto it = other.mGrid.find(neighborCell);
-                            if (it == other.mGrid.end())
+                            for (int32_t dz = -cellRadius; dz <= cellRadius; ++dz)
                             {
-                                continue;
-                            }
+                                std::array<int32_t, 3> neighborCell = {
+                                    endpointCell[0] + dx,
+                                    endpointCell[1] + dy,
+                                    endpointCell[2] + dz
+                                };
 
-                            for (int32_t j : it->second)
-                            {
-                                // Midpoint distance pre-filter
-                                Real midDist = Length(
-                                    mMidpoints[i] - other.mMidpoints[j]);
-                                if (midDist > maxDist * static_cast<Real>(2))
+                                auto it = other.mGrid.find(neighborCell);
+                                if (it == other.mGrid.end())
                                 {
                                     continue;
                                 }
 
-                                // Precise vertex-to-vertex distance check
-                                Real dist = MinEndpointDistance(
-                                    mEdges[i], other.mEdges[j], vertices);
-                                if (dist <= maxDist)
+                                for (int32_t j : it->second)
                                 {
-                                    result.insert(
-                                        std::make_pair(
-                                            static_cast<int32_t>(i), j));
+                                    // Ground-truth vertex-to-vertex check
+                                    Real dist = MinEndpointDistance(
+                                        mEdges[i], other.mEdges[j], vertices);
+                                    if (dist <= maxDist)
+                                    {
+                                        result.insert(
+                                            std::make_pair(
+                                                static_cast<int32_t>(i), j));
+                                    }
                                 }
                             }
                         }
@@ -183,10 +201,6 @@ namespace gte
         }
 
         std::vector<EdgeType> const& GetEdges() const { return mEdges; }
-        std::vector<Vector3<Real>> const& GetMidpoints() const
-        {
-            return mMidpoints;
-        }
 
     private:
         using GridCell = std::array<int32_t, 3>;
@@ -195,7 +209,7 @@ namespace gte
         {
             size_t operator()(GridCell const& c) const noexcept
             {
-                // Simple hash combining the three integer coordinates
+                // Hash mixing for three integer coordinates (boost::hash_combine style)
                 size_t h = static_cast<size_t>(c[0]);
                 h ^= static_cast<size_t>(c[1]) * 2654435761ULL
                     + 0x9e3779b9ULL + (h << 6) + (h >> 2);
@@ -205,12 +219,12 @@ namespace gte
             }
         };
 
-        // Map from grid cell to list of edge indices in that cell
-        // Uses unordered_map with GridCellHash for O(1) average lookup
+        // Map from grid cell to list of edge indices whose endpoints fall in
+        // that cell.  Each edge appears at most twice (once per endpoint, only
+        // if the two endpoints map to different cells).
         std::unordered_map<GridCell, std::vector<int32_t>, GridCellHash> mGrid;
 
         std::vector<EdgeType> mEdges;
-        std::vector<Vector3<Real>> mMidpoints;
         Vector3<Real> mBBoxMin{};
         Real mCellSize = static_cast<Real>(1);
 
@@ -219,9 +233,12 @@ namespace gte
         GridCell CellOf(Vector3<Real> const& pt) const
         {
             return {
-                static_cast<int32_t>(std::floor((pt[0] - mBBoxMin[0]) / mCellSize)),
-                static_cast<int32_t>(std::floor((pt[1] - mBBoxMin[1]) / mCellSize)),
-                static_cast<int32_t>(std::floor((pt[2] - mBBoxMin[2]) / mCellSize))
+                static_cast<int32_t>(
+                    std::floor((pt[0] - mBBoxMin[0]) / mCellSize)),
+                static_cast<int32_t>(
+                    std::floor((pt[1] - mBBoxMin[1]) / mCellSize)),
+                static_cast<int32_t>(
+                    std::floor((pt[2] - mBBoxMin[2]) / mCellSize))
             };
         }
 
