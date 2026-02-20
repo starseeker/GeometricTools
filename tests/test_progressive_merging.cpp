@@ -69,7 +69,6 @@ int main()
     params.verbose = true;
     params.enableIterativeBridging = true;
     params.enableHoleFilling = false;  // Disable to test bridging only
-    params.enableBallPivot = false;    // Disable Ball Pivot to use our bridging
     params.enableBallPivotHoleFiller = false;
     params.initialBridgeThreshold = 1.0;  // Start with reasonable threshold
     params.maxBridgeThreshold = 5.0;

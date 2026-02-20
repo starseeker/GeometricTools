@@ -102,7 +102,6 @@ int main()
     std::cout << "=== Running Topology-Aware Stitching ===\n";
     Co3NeManifoldStitcher<double>::Parameters stitchParams;
     stitchParams.enableHoleFilling = true;
-    stitchParams.enableBallPivot = false;  // Disable Ball Pivot, use topology bridging
     stitchParams.removeNonManifoldEdges = true;
     stitchParams.verbose = true;
     

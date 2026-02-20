@@ -40,6 +40,8 @@
 #include <map>
 #include <memory>
 #include <set>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 // The MeshHoleFilling class provides hole detection and filling operations
@@ -113,25 +115,53 @@ namespace gte
                 return;
             }
 
-            // Step 1: Build edge-to-triangle map to detect boundaries
-            std::map<std::pair<int32_t, int32_t>, std::vector<size_t>> edgeToTriangles;
+            // Step 1: Build directed-edge existence set using unordered_map for O(T) average.
+            // Key: directed edge (v0, v1) encoded as int64_t = (v0<<32)|v1.
+            // An undirected edge is a boundary edge iff its reverse (v1, v0) is absent.
+            struct DirectedEdgeHash {
+                size_t operator()(int64_t key) const noexcept {
+                    // Mix high and low halves
+                    uint64_t k = static_cast<uint64_t>(key);
+                    k ^= k >> 33;
+                    k *= 0xff51afd7ed558ccdULL;
+                    k ^= k >> 33;
+                    k *= 0xc4ceb9fe1a85ec53ULL;
+                    k ^= k >> 33;
+                    return static_cast<size_t>(k);
+                }
+            };
+            auto encodeEdge = [](int32_t v0, int32_t v1) noexcept -> int64_t {
+                return (static_cast<int64_t>(v0) << 32) | static_cast<uint32_t>(v1);
+            };
 
-            for (size_t i = 0; i < triangles.size(); ++i)
+            std::unordered_set<int64_t, DirectedEdgeHash> directedEdges;
+            directedEdges.reserve(triangles.size() * 3);
+            for (auto const& tri : triangles)
             {
-                auto const& tri = triangles[i];
                 for (int j = 0; j < 3; ++j)
                 {
-                    int32_t v0 = tri[j];
-                    int32_t v1 = tri[(j + 1) % 3];
-                    
-                    // Store directed edge
-                    edgeToTriangles[std::make_pair(v0, v1)].push_back(i);
+                    directedEdges.insert(encodeEdge(tri[j], tri[(j + 1) % 3]));
                 }
             }
 
-            // Step 2: Detect holes (boundary loops) using edge adjacency
+            // Step 2: Build boundary adjacency: for each boundary vertex v, map to its
+            // successor in the boundary half-edge ring.  O(T) total, O(1) per step.
+            // A directed edge (v0, v1) is a boundary edge iff (v1, v0) is absent.
+            std::unordered_map<int32_t, std::vector<int32_t>> boundaryNext;
+            for (int64_t de : directedEdges)
+            {
+                int32_t v0 = static_cast<int32_t>(de >> 32);
+                int32_t v1 = static_cast<int32_t>(static_cast<uint32_t>(de));
+                if (directedEdges.find(encodeEdge(v1, v0)) == directedEdges.end())
+                {
+                    // (v0, v1) is a boundary directed edge
+                    boundaryNext[v0].push_back(v1);
+                }
+            }
+
+            // Step 3: Detect holes (boundary loops) using O(1) adjacency lookups.
             std::vector<HoleBoundary> holes;
-            DetectHolesFromEdges(vertices, triangles, edgeToTriangles, holes);
+            DetectHolesFromAdjacency(vertices, boundaryNext, holes);
 
             if (holes.empty())
             {
@@ -216,7 +246,102 @@ namespace gte
         }
 
     private:
+        // Detect boundary loops using a prebuilt boundary adjacency map.
+        // Each entry boundaryNext[v] holds the list of vertices reachable from v
+        // along a boundary directed edge.  Traversal is O(1) per step.
+        static void DetectHolesFromAdjacency(
+            std::vector<Vector3<Real>> const& vertices,
+            std::unordered_map<int32_t, std::vector<int32_t>> const& boundaryNext,
+            std::vector<HoleBoundary>& holes)
+        {
+            // Track visited directed boundary edges (encoded as int64_t).
+            std::unordered_set<int64_t> visitedEdges;
+            visitedEdges.reserve(boundaryNext.size() * 2);
+
+            for (auto const& [startV, succs] : boundaryNext)
+            {
+                for (int32_t firstNext : succs)
+                {
+                    int64_t startKey = (static_cast<int64_t>(startV) << 32)
+                                     | static_cast<uint32_t>(firstNext);
+                    if (visitedEdges.count(startKey))
+                    {
+                        continue;  // Already part of a traced loop
+                    }
+
+                    // Trace the loop starting from (startV → firstNext).
+                    HoleBoundary hole;
+                    int32_t curV = startV;
+                    int32_t nxtV = firstNext;
+                    // Safety cap: a valid boundary loop cannot be longer than the number
+                    // of boundary directed edges (one edge per loop vertex).
+                    const int maxIter = static_cast<int>(boundaryNext.size()) + 1;
+                    int iter = 0;
+                    bool closed = false;
+
+                    do
+                    {
+                        int64_t edgeKey = (static_cast<int64_t>(curV) << 32)
+                                        | static_cast<uint32_t>(nxtV);
+
+                        if (visitedEdges.count(edgeKey))
+                        {
+                            // Hit a visited edge mid-trace — non-simple boundary; abort.
+                            hole.vertices.clear();
+                            break;
+                        }
+
+                        hole.vertices.push_back(curV);
+                        visitedEdges.insert(edgeKey);
+
+                        int32_t prevV = curV;
+                        curV = nxtV;
+                        nxtV = -1;
+
+                        // O(1) adjacency lookup: find successor from curV that isn't prevV.
+                        auto it = boundaryNext.find(curV);
+                        if (it != boundaryNext.end())
+                        {
+                            for (int32_t nb : it->second)
+                            {
+                                if (nb != prevV)
+                                {
+                                    nxtV = nb;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (nxtV == -1)
+                        {
+                            hole.vertices.clear();  // Dead end — broken boundary
+                            break;
+                        }
+
+                        if (++iter > maxIter)
+                        {
+                            hole.vertices.clear();  // Safety: unexpectedly long loop
+                            break;
+                        }
+
+                        if (curV == startV)
+                        {
+                            closed = true;
+                            break;
+                        }
+
+                    } while (true);
+
+                    if (closed && hole.vertices.size() >= 3)
+                    {
+                        holes.push_back(std::move(hole));
+                    }
+                }
+            }
+        }
+
         // Detect boundary loops (holes) using edge adjacency map.
+        // LEGACY: kept for reference; replaced by DetectHolesFromAdjacency above.
         static void DetectHolesFromEdges(
             std::vector<Vector3<Real>> const& vertices,
             std::vector<std::array<int32_t, 3>> const& triangles,

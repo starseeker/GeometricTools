@@ -1309,8 +1309,25 @@ namespace gte
             }
         }
         
-        // Find close boundary edges between different components
-        // Skip components that have no boundary edges (they're closed)
+        // Find close boundary edges between different components using spatial indexing
+        // (BoundaryPolygonRTree) to reduce the naive O(B_i × B_j) comparisons to
+        // O(B_i + k) where k is the number of close pairs actually found.
+        //
+        // Build one RTree per component boundary; the Overlaps() query between
+        // two RTrees returns only the edge pairs whose endpoints are within
+        // maxGapDistance of each other.
+        
+        // Build RTrees for all non-empty component boundaries
+        std::vector<BoundaryPolygonRTree<Real>> rtrees(components.size());
+        for (size_t i = 0; i < components.size(); ++i)
+        {
+            if (!componentBoundaries[i].empty())
+            {
+                rtrees[i].Build(componentBoundaries[i], vertices, maxGapDistance);
+            }
+        }
+        
+        // Query each component pair for close boundary edge pairs
         for (size_t i = 0; i < components.size(); ++i)
         {
             if (componentBoundaries[i].empty()) continue;  // Skip closed components
@@ -1319,20 +1336,14 @@ namespace gte
             {
                 if (componentBoundaries[j].empty()) continue;  // Skip closed components
                 
-                for (auto const& edge1 : componentBoundaries[i])
+                std::set<std::pair<int32_t, int32_t>> overlapPairs;
+                rtrees[i].Overlaps(rtrees[j], vertices, maxGapDistance, overlapPairs);
+                
+                for (auto const& pair : overlapPairs)
                 {
-                    Vector3<Real> mid1 = (vertices[edge1.first] + vertices[edge1.second]) / static_cast<Real>(2);
-                    
-                    for (auto const& edge2 : componentBoundaries[j])
-                    {
-                        Vector3<Real> mid2 = (vertices[edge2.first] + vertices[edge2.second]) / static_cast<Real>(2);
-                        
-                        Real dist = Length(mid2 - mid1);
-                        if (dist < maxGapDistance)
-                        {
-                            gaps.push_back(std::make_pair(edge1, edge2));
-                        }
-                    }
+                    gaps.push_back(std::make_pair(
+                        componentBoundaries[i][pair.first],
+                        componentBoundaries[j][pair.second]));
                 }
             }
         }

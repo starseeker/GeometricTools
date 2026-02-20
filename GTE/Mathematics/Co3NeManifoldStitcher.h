@@ -25,7 +25,6 @@
 #include <GTE/Mathematics/MeshHoleFilling.h>
 #include <GTE/Mathematics/MeshRepair.h>
 #include <GTE/Mathematics/MeshValidation.h>
-#include <GTE/Mathematics/BallPivotReconstruction.h>
 #include <GTE/Mathematics/BallPivotMeshHoleFiller.h>
 #include <algorithm>
 #include <array>
@@ -33,11 +32,28 @@
 #include <iostream>
 #include <map>
 #include <set>
+#include <unordered_map>
 #include <vector>
 #include <memory>
 
 namespace gte
 {
+    // Hash for std::pair<int32_t, int32_t> edges – used by all edge count maps
+    // in Co3NeManifoldStitcher to give O(1) average lookups instead of O(log n).
+    struct EdgePairHash
+    {
+        size_t operator()(std::pair<int32_t, int32_t> const& p) const noexcept
+        {
+            // boost::hash_combine style mixing for two 32-bit integers.
+            // The constants (2654435761, 0x9e3779b9) are derived from the
+            // golden ratio and are widely used for this purpose.
+            size_t h = static_cast<size_t>(static_cast<uint32_t>(p.first));
+            h ^= static_cast<size_t>(static_cast<uint32_t>(p.second)) * 2654435761ULL
+                 + 0x9e3779b9ULL + (h << 6) + (h >> 2);
+            return h;
+        }
+    };
+
     template <typename Real>
     class Co3NeManifoldStitcher
     {
@@ -96,11 +112,6 @@ namespace gte
             size_t maxHoleEdges;
             typename MeshHoleFilling<Real>::TriangulationMethod holeFillingMethod;
             
-            // Ball pivot parameters
-            bool enableBallPivot;
-            std::vector<Real> ballRadii;  // Multiple radii to try
-            size_t minNeighborsForPivot;
-            
             // Ball pivot mesh hole filler parameters
             bool enableBallPivotHoleFiller;  // Use new adaptive hole filler
             typename BallPivotMeshHoleFiller<Real>::EdgeMetric edgeMetric;
@@ -128,8 +139,6 @@ namespace gte
                 , maxHoleArea(static_cast<Real>(0))  // No limit
                 , maxHoleEdges(100)
                 , holeFillingMethod(MeshHoleFilling<Real>::TriangulationMethod::CDT)
-                , enableBallPivot(false)  // Disabled by default (not yet implemented)
-                , minNeighborsForPivot(10)
                 , enableBallPivotHoleFiller(true)  // Enabled by default (new implementation)
                 , edgeMetric(BallPivotMeshHoleFiller<Real>::EdgeMetric::Average)
                 , radiusScales({static_cast<Real>(1.0), static_cast<Real>(1.5), 
@@ -147,12 +156,6 @@ namespace gte
                 , removeNonManifoldEdges(true)
                 , verbose(false)
             {
-                // Default ball radii - multiple scales for adaptive stitching
-                ballRadii = { 
-                    static_cast<Real>(0.01), 
-                    static_cast<Real>(0.05), 
-                    static_cast<Real>(0.1) 
-                };
             }
         };
         
@@ -293,29 +296,12 @@ namespace gte
                 }
             }
             
-            // Step 5: Ball pivot stitching (if enabled) - SMART mode
-            if (params.enableBallPivot && patches.size() > 1)
-            {
-                size_t trianglesBefore = triangles.size();
-                
-                // Process patch pairs for welding - with validation after each weld
-                BallPivotWeldPatchesSmart(vertices, triangles, patches, patchPairs, params);
-                
-                size_t trianglesAfter = triangles.size();
-                
-                if (params.verbose && trianglesAfter > trianglesBefore)
-                {
-                    std::cout << "Ball pivot welding added " << (trianglesAfter - trianglesBefore) 
-                              << " triangles\n";
-                }
-            }
-            
-            // Step 6: Ball Pivot Mesh Hole Filler (adaptive, iterative)
+            // Step 5: Adaptive Mesh Hole Filler (iterative ear-clipping with detria fallback)
             if (params.enableBallPivotHoleFiller)
             {
                 if (params.verbose)
                 {
-                    std::cout << "[Stitcher] Step 6: Ball Pivot Mesh Hole Filler (adaptive)\n";
+                    std::cout << "[Stitcher] Step 5: Adaptive Mesh Hole Filler\n";
                 }
                 
                 // Configure hole filler parameters
@@ -333,14 +319,14 @@ namespace gte
                 
                 if (params.verbose)
                 {
-                    std::cout << "  Ball pivot hole filler: " 
+                    std::cout << "  Adaptive hole filler: " 
                               << (holeFilled ? "SUCCESS" : "NO CHANGES") 
                               << ", added " << (trianglesAfter - trianglesBefore) 
                               << " triangles\n";
                 }
             }
             
-            // Step 7: Final hole filling (conservative, not aggressive)
+            // Step 6: Final hole filling (conservative, not aggressive)
             if (params.enableHoleFilling)
             {
                 // Fill remaining holes conservatively
@@ -375,11 +361,8 @@ namespace gte
                 }
             }
             
-            // Step 7: Topology-Aware Component Bridging (alternative to Ball Pivot)
-            if (!params.enableBallPivot)  // Use when Ball Pivot is disabled
-            {
-                TopologyAwareComponentBridging(vertices, triangles, params);
-            }
+            // Step 7: Topology-Aware Component Bridging with RTree-accelerated gap detection
+            TopologyAwareComponentBridging(vertices, triangles, params);
             
             // Step 8: UV parameterization merging (if enabled)
             if (params.enableUVMerging)
@@ -420,37 +403,33 @@ namespace gte
             std::map<std::pair<int32_t, int32_t>, EdgeType>& edgeTypes,
             std::vector<std::pair<int32_t, int32_t>>& nonManifoldEdges)
         {
-            // Count triangle occurrences for each edge
-            std::map<std::pair<int32_t, int32_t>, size_t> edgeCounts;
-            
+            // Count triangle occurrences for each edge using unordered_map (O(T) avg).
+            EdgeCountMap edgeCounts;
+            edgeCounts.reserve(triangles.size() * 3);
+
             for (auto const& tri : triangles)
             {
                 for (int i = 0; i < 3; ++i)
                 {
-                    int32_t v0 = tri[i];
-                    int32_t v1 = tri[(i + 1) % 3];
-                    
-                    // Use canonical edge ordering (smaller vertex first)
-                    auto edge = std::make_pair(std::min(v0, v1), std::max(v0, v1));
-                    edgeCounts[edge]++;
+                    edgeCounts[MakeEdgeKey(tri[i], tri[(i + 1) % 3])]++;
                 }
             }
-            
-            // Classify edges
-            for (auto const& ec : edgeCounts)
+
+            // Classify edges and populate the caller's std::map output.
+            for (auto const& [edge, count] : edgeCounts)
             {
-                if (ec.second == 1)
+                if (count == 1)
                 {
-                    edgeTypes[ec.first] = EdgeType::Boundary;
+                    edgeTypes[edge] = EdgeType::Boundary;
                 }
-                else if (ec.second == 2)
+                else if (count == 2)
                 {
-                    edgeTypes[ec.first] = EdgeType::Interior;
+                    edgeTypes[edge] = EdgeType::Interior;
                 }
                 else  // >= 3
                 {
-                    edgeTypes[ec.first] = EdgeType::NonManifold;
-                    nonManifoldEdges.push_back(ec.first);
+                    edgeTypes[edge] = EdgeType::NonManifold;
+                    nonManifoldEdges.push_back(edge);
                 }
             }
         }
@@ -766,672 +745,144 @@ namespace gte
                 });
         }
         
-        // Ball pivot welding of patches
-        static void BallPivotWeldPatches(
-            std::vector<Vector3<Real>>& vertices,
-            std::vector<std::array<int32_t, 3>>& triangles,
-            std::vector<Patch> const& patches,
-            std::vector<PatchPair> const& patchPairs,
-            Parameters const& params)
+        // ======================================================================
+        // Public helpers: types and local-check utilities exposed for testing
+        // and for callers that wish to maintain a persistent EdgeCountMap.
+        // ======================================================================
+        public:
+
+        // Persistent edge count map used to avoid O(T) full-mesh rebuilds.
+        // An entry with count 1 = boundary edge, count 2 = interior, count > 2 = non-manifold.
+        using EdgeCountMap = std::unordered_map<std::pair<int32_t, int32_t>, size_t, EdgePairHash>;
+
+        // Canonical edge key: always (min, max) so direction doesn't matter.
+        static std::pair<int32_t, int32_t> MakeEdgeKey(int32_t a, int32_t b) noexcept
         {
-            if (patchPairs.empty() || patches.empty())
-            {
-                return;
-            }
-            
-            // Process patch pairs in order of proximity
-            // AGGRESSIVE MODE: Process ALL viable pairs (no limit)
-            size_t pairsToProcess = patchPairs.size();  // Process all pairs!
-            
-            size_t successfulWelds = 0;
-            for (size_t pairIdx = 0; pairIdx < pairsToProcess; ++pairIdx)
-            {
-                auto const& pair = patchPairs[pairIdx];
-                
-                if (params.verbose)
-                {
-                    std::cout << "  Attempting to weld patches " << pair.patch1Index 
-                              << " and " << pair.patch2Index 
-                              << " (min dist = " << pair.minDistance << ")\n";
-                }
-                
-                // Step 1: Identify outer boundary triangles in both patches
-                std::set<size_t> outerTriangles1, outerTriangles2;
-                IdentifyOuterBoundaryTriangles(vertices, triangles, 
-                    patches[pair.patch1Index], outerTriangles1);
-                IdentifyOuterBoundaryTriangles(vertices, triangles, 
-                    patches[pair.patch2Index], outerTriangles2);
-                
-                if (params.verbose && (!outerTriangles1.empty() || !outerTriangles2.empty()))
-                {
-                    std::cout << "    Found " << outerTriangles1.size() << " outer triangles in patch " 
-                              << pair.patch1Index << ", " 
-                              << outerTriangles2.size() << " in patch " << pair.patch2Index << "\n";
-                }
-                
-                // Step 2: Remove outer triangles to create clean boundaries
-                std::set<size_t> allOuterTriangles = outerTriangles1;
-                allOuterTriangles.insert(outerTriangles2.begin(), outerTriangles2.end());
-                
-                size_t removedCount = 0;
-                if (!allOuterTriangles.empty())
-                {
-                    removedCount = RemoveTrianglesByIndex(triangles, allOuterTriangles);
-                    
-                    if (params.verbose && removedCount > 0)
-                    {
-                        std::cout << "    Removed " << removedCount << " outer triangles\n";
-                    }
-                }
-                
-                // Step 3: Re-identify patches after triangle removal to get updated boundaries
-                // We need fresh boundary information after removing outer triangles
-                std::map<std::pair<int32_t, int32_t>, EdgeType> updatedEdgeTypes;
-                std::vector<std::pair<int32_t, int32_t>> dummy;
-                AnalyzeEdgeTopology(triangles, updatedEdgeTypes, dummy);
-                
-                std::vector<Patch> updatedPatches;
-                IdentifyPatches(vertices, triangles, updatedEdgeTypes, updatedPatches);
-                
-                // Find which updated patches correspond to our original pair
-                // This is a bit tricky since patches may have merged or split
-                // For now, we'll extract all boundary points from the current mesh state
-                std::set<int32_t> allBoundaryVerts;
-                for (auto const& et : updatedEdgeTypes)
-                {
-                    if (et.second == EdgeType::Boundary)
-                    {
-                        allBoundaryVerts.insert(et.first.first);
-                        allBoundaryVerts.insert(et.first.second);
-                    }
-                }
-                
-                // Extract boundary points and normals
-                std::vector<Vector3<Real>> boundaryPoints;
-                std::vector<Vector3<Real>> boundaryNormals;
-                ExtractBoundaryPointsFromVertices(vertices, triangles, 
-                    allBoundaryVerts, boundaryPoints, boundaryNormals);
-                
-                if (boundaryPoints.empty())
-                {
-                    if (params.verbose)
-                    {
-                        std::cout << "    No boundary points found for welding\n";
-                    }
-                    continue;
-                }
-                
-                // Step 4: Compute appropriate ball radius based on gap size
-                Real ballRadius = EstimateBallRadiusForGap(boundaryPoints, pair.minDistance);
-                
-                if (params.verbose)
-                {
-                    std::cout << "    Using ball radius: " << ballRadius 
-                              << " for " << boundaryPoints.size() << " boundary points\n";
-                }
-                
-                // Step 5: Run Ball Pivot on boundary region
-                typename BallPivotReconstruction<Real>::Parameters bpParams;
-                bpParams.radii = {ballRadius};
-                bpParams.verbose = false;  // Keep it quiet to avoid clutter
-                
-                std::vector<Vector3<Real>> weldVertices;
-                std::vector<std::array<int32_t, 3>> weldTriangles;
-                
-                bool success = BallPivotReconstruction<Real>::Reconstruct(
-                    boundaryPoints, boundaryNormals, weldVertices, weldTriangles, bpParams);
-                
-                if (!success || weldTriangles.empty())
-                {
-                    if (params.verbose)
-                    {
-                        std::cout << "    Ball pivot failed to generate welding triangles\n";
-                    }
-                    continue;
-                }
-                
-                // Step 6: Merge welding triangles into main mesh
-                size_t addedTriangles = MergeWeldingTriangles(
-                    vertices, triangles, boundaryPoints, weldTriangles);
-                
-                if (addedTriangles > 0)
-                {
-                    successfulWelds++;
-                }
-                
-                if (params.verbose && addedTriangles > 0)
-                {
-                    std::cout << "    Added " << addedTriangles << " welding triangles\n";
-                }
-            }
-            
-            if (params.verbose && successfulWelds > 0)
-            {
-                std::cout << "  Successfully welded " << successfulWelds << " patch pairs\n";
-            }
+            return {std::min(a, b), std::max(a, b)};
         }
-        
-        // Smart Ball Pivot welding that validates after each weld
-        static void BallPivotWeldPatchesSmart(
-            std::vector<Vector3<Real>>& vertices,
-            std::vector<std::array<int32_t, 3>>& triangles,
-            std::vector<Patch> const& patches,
-            std::vector<PatchPair> const& patchPairs,
-            Parameters const& params)
+
+        // Build an edge count map for the entire triangle list in O(T).
+        static EdgeCountMap BuildEdgeCountMap(
+            std::vector<std::array<int32_t, 3>> const& triangles)
         {
-            if (patchPairs.empty() || patches.empty())
+            EdgeCountMap ecm;
+            ecm.reserve(triangles.size() * 3);
+            for (auto const& tri : triangles)
             {
-                return;
-            }
-            
-            size_t successfulWelds = 0;
-            size_t skippedWelds = 0;
-            
-            // Process patch pairs, validating after each weld
-            for (size_t pairIdx = 0; pairIdx < patchPairs.size(); ++pairIdx)
-            {
-                auto const& pair = patchPairs[pairIdx];
-                
-                // Save state before welding
-                size_t trianglesBefore = triangles.size();
-                std::vector<std::array<int32_t, 3>> trianglesBackup = triangles;
-                
-                if (params.verbose && (pairIdx < 10 || successfulWelds < 5))
-                {
-                    std::cout << "  Attempting to weld patches " << pair.patch1Index 
-                              << " and " << pair.patch2Index 
-                              << " (min dist = " << pair.minDistance << ")\n";
-                }
-                
-                // Try welding using boundary points from current mesh state
-                std::set<int32_t> allBoundaryVerts;
-                std::map<std::pair<int32_t, int32_t>, EdgeType> updatedEdgeTypes;
-                std::vector<std::pair<int32_t, int32_t>> dummy;
-                AnalyzeEdgeTopology(triangles, updatedEdgeTypes, dummy);
-                
-                for (auto const& et : updatedEdgeTypes)
-                {
-                    if (et.second == EdgeType::Boundary)
-                    {
-                        allBoundaryVerts.insert(et.first.first);
-                        allBoundaryVerts.insert(et.first.second);
-                    }
-                }
-                
-                if (allBoundaryVerts.size() < 3)
-                {
-                    skippedWelds++;
-                    continue;  // Not enough boundary points
-                }
-                
-                // Extract boundary points and normals
-                std::vector<Vector3<Real>> boundaryPoints;
-                std::vector<Vector3<Real>> boundaryNormals;
-                ExtractBoundaryPointsFromVertices(vertices, triangles, 
-                    allBoundaryVerts, boundaryPoints, boundaryNormals);
-                
-                if (boundaryPoints.size() < 4)
-                {
-                    skippedWelds++;
-                    continue;  // Not enough points for Ball Pivot
-                }
-                
-                // Estimate ball radius
-                Real ballRadius = EstimateBallRadiusForGap(boundaryPoints, pair.minDistance);
-                
-                // Run Ball Pivot on boundary region
-                typename BallPivotReconstruction<Real>::Parameters bpParams;
-                bpParams.verbose = false;
-                bpParams.radii = {ballRadius};
-                
-                std::vector<Vector3<Real>> weldPoints;
-                std::vector<std::array<int32_t, 3>> weldTriangles;
-                
-                bool bpSuccess = BallPivotReconstruction<Real>::Reconstruct(
-                    boundaryPoints, boundaryNormals, weldPoints, weldTriangles, bpParams);
-                
-                if (!bpSuccess || weldTriangles.empty())
-                {
-                    skippedWelds++;
-                    continue;
-                }
-                
-                // Merge welding triangles
-                MergeWeldingTriangles(vertices, triangles, boundaryPoints, weldTriangles);
-                
-                // Validate: check for non-manifold edges
-                std::map<std::pair<int32_t, int32_t>, EdgeType> checkEdgeTypes;
-                std::vector<std::pair<int32_t, int32_t>> checkNonManifold;
-                AnalyzeEdgeTopology(triangles, checkEdgeTypes, checkNonManifold);
-                
-                if (!checkNonManifold.empty())
-                {
-                    // Welding created non-manifold edges - revert
-                    triangles = trianglesBackup;
-                    skippedWelds++;
-                    
-                    if (params.verbose && (pairIdx < 10 || successfulWelds < 5))
-                    {
-                        std::cout << "    Weld created non-manifold edges, reverted\n";
-                    }
-                }
-                else
-                {
-                    // Success!
-                    successfulWelds++;
-                    
-                    if (params.verbose && (pairIdx < 10 || successfulWelds < 5))
-                    {
-                        std::cout << "    Added " << (triangles.size() - trianglesBefore) 
-                                  << " welding triangles\n";
-                    }
-                    
-                    // Stop after reasonable number of successful welds to avoid conflicts
-                    if (successfulWelds >= 50)
-                    {
-                        if (params.verbose)
-                        {
-                            std::cout << "  Reached 50 successful welds, stopping to avoid conflicts\n";
-                        }
-                        break;
-                    }
-                }
-            }
-            
-            if (params.verbose)
-            {
-                std::cout << "  Smart welding: " << successfulWelds << " successful, " 
-                          << skippedWelds << " skipped/reverted\n";
-            }
-        }
-        
-        // Identify outer boundary triangles in a patch
-        // These are triangles on the boundary that face away from the patch interior
-        static void IdentifyOuterBoundaryTriangles(
-            std::vector<Vector3<Real>> const& vertices,
-            std::vector<std::array<int32_t, 3>> const& triangles,
-            Patch const& patch,
-            std::set<size_t>& outerTriangles)
-        {
-            outerTriangles.clear();
-            
-            if (patch.isClosed)
-            {
-                return;  // No boundary triangles in closed patches
-            }
-            
-            // Build set of boundary edges for fast lookup
-            std::set<std::pair<int32_t, int32_t>> boundaryEdgeSet;
-            for (auto const& edge : patch.boundaryEdges)
-            {
-                boundaryEdgeSet.insert(std::make_pair(
-                    std::min(edge.first, edge.second),
-                    std::max(edge.first, edge.second)));
-            }
-            
-            // For each triangle in patch, check if it has boundary edges
-            for (auto triIdx : patch.triangleIndices)
-            {
-                auto const& tri = triangles[triIdx];
-                
-                // Count how many boundary edges this triangle has
-                int boundaryEdgeCount = 0;
                 for (int i = 0; i < 3; ++i)
                 {
-                    int32_t v0 = tri[i];
-                    int32_t v1 = tri[(i + 1) % 3];
-                    auto edge = std::make_pair(std::min(v0, v1), std::max(v0, v1));
-                    
-                    if (boundaryEdgeSet.find(edge) != boundaryEdgeSet.end())
-                    {
-                        boundaryEdgeCount++;
-                    }
-                }
-                
-                // Triangles with 2+ boundary edges are considered "outer"
-                // These are on the fringe and can be safely removed
-                if (boundaryEdgeCount >= 2)
-                {
-                    outerTriangles.insert(triIdx);
+                    ecm[MakeEdgeKey(tri[i], tri[(i + 1) % 3])]++;
                 }
             }
+            return ecm;
         }
-        
-        // Remove triangles by their indices
-        static size_t RemoveTrianglesByIndex(
-            std::vector<std::array<int32_t, 3>>& triangles,
-            std::set<size_t> const& indicesToRemove)
-        {
-            if (indicesToRemove.empty())
-            {
-                return 0;
-            }
-            
-            // Sort indices in reverse order for safe removal
-            std::vector<size_t> sortedIndices(indicesToRemove.begin(), indicesToRemove.end());
-            std::sort(sortedIndices.rbegin(), sortedIndices.rend());
-            
-            for (auto idx : sortedIndices)
-            {
-                if (idx < triangles.size())
-                {
-                    triangles.erase(triangles.begin() + idx);
-                }
-            }
-            
-            return sortedIndices.size();
-        }
-        
-        // Extract boundary points given a set of vertex indices
-        static void ExtractBoundaryPointsFromVertices(
-            std::vector<Vector3<Real>> const& vertices,
+
+        // Count existing occurrences of only the edges in the given set.
+        // O(T * |targetEdges|) but with a very small constant when |targetEdges| <= 6.
+        // Used by the legacy BridgeBoundaryEdges(validate=true) path so it does not
+        // need to build a full O(T)-entry ECM just to check 6 edges.
+        static EdgeCountMap BuildEdgeCountMapFor(
             std::vector<std::array<int32_t, 3>> const& triangles,
-            std::set<int32_t> const& boundaryVertices,
-            std::vector<Vector3<Real>>& boundaryPoints,
-            std::vector<Vector3<Real>>& boundaryNormals)
+            std::array<std::pair<int32_t, int32_t>, 6> const& targetEdges,
+            int numTargetEdges)
         {
-            boundaryPoints.clear();
-            boundaryNormals.clear();
-            
-            if (boundaryVertices.empty())
+            EdgeCountMap ecm;
+            ecm.reserve(numTargetEdges);
+            for (auto const& tri : triangles)
             {
-                return;
-            }
-            
-            boundaryPoints.reserve(boundaryVertices.size());
-            boundaryNormals.reserve(boundaryVertices.size());
-            
-            // For each boundary vertex, get position and estimate normal
-            for (auto vIdx : boundaryVertices)
-            {
-                boundaryPoints.push_back(vertices[vIdx]);
-                
-                // Estimate normal by averaging adjacent triangle normals
-                Vector3<Real> avgNormal = Vector3<Real>::Zero();
-                int normalCount = 0;
-                
-                // Find all triangles using this vertex
-                for (auto const& tri : triangles)
+                for (int i = 0; i < 3; ++i)
                 {
-                    if (tri[0] == vIdx || tri[1] == vIdx || tri[2] == vIdx)
+                    auto key = MakeEdgeKey(tri[i], tri[(i + 1) % 3]);
+                    for (int k = 0; k < numTargetEdges; ++k)
                     {
-                        Vector3<Real> e1 = vertices[tri[1]] - vertices[tri[0]];
-                        Vector3<Real> e2 = vertices[tri[2]] - vertices[tri[0]];
-                        Vector3<Real> n = Cross(e1, e2);
-                        Real len = Length(n);
-                        if (len > static_cast<Real>(0))
+                        if (key == targetEdges[k])
                         {
-                            avgNormal += n / len;
-                            normalCount++;
+                            ecm[key]++;
+                            break;
                         }
                     }
                 }
-                
-                if (normalCount > 0)
-                {
-                    avgNormal /= static_cast<Real>(normalCount);
-                    Real avgLen = Length(avgNormal);
-                    if (avgLen > static_cast<Real>(0))
-                    {
-                        avgNormal /= avgLen;
-                    }
-                }
-                else
-                {
-                    // Default normal if no triangles found
-                    avgNormal = Vector3<Real>::Unit(2);  // Z-axis
-                }
-                
-                boundaryNormals.push_back(avgNormal);
             }
+            return ecm;
         }
-        
-        // Extract boundary points from patch pair for welding
-        static void ExtractPatchBoundaryPoints(
-            std::vector<Vector3<Real>> const& vertices,
-            std::vector<std::array<int32_t, 3>> const& triangles,
-            Patch const& patch1,
-            Patch const& patch2,
-            std::vector<Vector3<Real>>& boundaryPoints,
-            std::vector<Vector3<Real>>& boundaryNormals)
-        {
-            boundaryPoints.clear();
-            boundaryNormals.clear();
-            
-            // Collect vertices from boundary edges of both patches
-            std::set<int32_t> boundaryVertexSet;
-            
-            // Add from patch 1
-            for (auto const& edge : patch1.boundaryEdges)
-            {
-                boundaryVertexSet.insert(edge.first);
-                boundaryVertexSet.insert(edge.second);
-            }
-            
-            // Add from patch 2
-            for (auto const& edge : patch2.boundaryEdges)
-            {
-                boundaryVertexSet.insert(edge.first);
-                boundaryVertexSet.insert(edge.second);
-            }
-            
-            // Convert to vectors
-            std::vector<int32_t> boundaryVertices(boundaryVertexSet.begin(), boundaryVertexSet.end());
-            
-            boundaryPoints.reserve(boundaryVertices.size());
-            boundaryNormals.reserve(boundaryVertices.size());
-            
-            // For each boundary vertex, get position and estimate normal
-            for (auto vIdx : boundaryVertices)
-            {
-                boundaryPoints.push_back(vertices[vIdx]);
-                
-                // Estimate normal by averaging adjacent triangle normals
-                Vector3<Real> avgNormal = Vector3<Real>::Zero();
-                int normalCount = 0;
-                
-                // Check both patches for triangles using this vertex
-                for (auto triIdx : patch1.triangleIndices)
-                {
-                    auto const& tri = triangles[triIdx];
-                    if (tri[0] == vIdx || tri[1] == vIdx || tri[2] == vIdx)
-                    {
-                        Vector3<Real> e1 = vertices[tri[1]] - vertices[tri[0]];
-                        Vector3<Real> e2 = vertices[tri[2]] - vertices[tri[0]];
-                        Vector3<Real> n = Cross(e1, e2);
-                        Real len = Length(n);
-                        if (len > static_cast<Real>(0))
-                        {
-                            avgNormal += n / len;
-                            normalCount++;
-                        }
-                    }
-                }
-                
-                for (auto triIdx : patch2.triangleIndices)
-                {
-                    auto const& tri = triangles[triIdx];
-                    if (tri[0] == vIdx || tri[1] == vIdx || tri[2] == vIdx)
-                    {
-                        Vector3<Real> e1 = vertices[tri[1]] - vertices[tri[0]];
-                        Vector3<Real> e2 = vertices[tri[2]] - vertices[tri[0]];
-                        Vector3<Real> n = Cross(e1, e2);
-                        Real len = Length(n);
-                        if (len > static_cast<Real>(0))
-                        {
-                            avgNormal += n / len;
-                            normalCount++;
-                        }
-                    }
-                }
-                
-                if (normalCount > 0)
-                {
-                    avgNormal /= static_cast<Real>(normalCount);
-                    Real avgLen = Length(avgNormal);
-                    if (avgLen > static_cast<Real>(0))
-                    {
-                        avgNormal /= avgLen;
-                    }
-                }
-                else
-                {
-                    // Default normal if no triangles found
-                    avgNormal = Vector3<Real>::Unit(2);  // Z-axis
-                }
-                
-                boundaryNormals.push_back(avgNormal);
-            }
-        }
-        
-        // Estimate appropriate ball radius for a gap
-        static Real EstimateBallRadiusForGap(
-            std::vector<Vector3<Real>> const& boundaryPoints,
-            Real minDistance)
-        {
-            if (boundaryPoints.size() < 2)
-            {
-                // Use minimum distance or a small default
-                return std::max(minDistance * static_cast<Real>(1.5), static_cast<Real>(0.1));
-            }
-            
-            // Compute average nearest neighbor distance in boundary points
-            Real avgSpacing = static_cast<Real>(0);
-            size_t count = 0;
-            
-            // Sample uniformly across all boundary points
-            for (size_t i = 0; i < boundaryPoints.size(); ++i)
-            {
-                Real minDist = std::numeric_limits<Real>::max();
-                
-                // Find nearest neighbor
-                for (size_t j = 0; j < boundaryPoints.size(); ++j)
-                {
-                    if (i == j) continue;
-                    
-                    Real dist = Length(boundaryPoints[j] - boundaryPoints[i]);
-                    if (dist > static_cast<Real>(0) && dist < minDist)
-                    {
-                        minDist = dist;
-                    }
-                }
-                
-                if (minDist < std::numeric_limits<Real>::max())
-                {
-                    avgSpacing += minDist;
-                    count++;
-                }
-            }
-            
-            if (count > 0)
-            {
-                avgSpacing /= static_cast<Real>(count);
-            }
-            else
-            {
-                // Fallback: use minDistance if available
-                if (minDistance > static_cast<Real>(0))
-                {
-                    avgSpacing = minDistance * static_cast<Real>(2);
-                }
-                else
-                {
-                    avgSpacing = static_cast<Real>(1);
-                }
-            }
-            
-            // Use 1.5x the average spacing as the ball radius
-            // This is large enough to bridge gaps but not so large it creates bad triangles
-            Real radius = avgSpacing * static_cast<Real>(1.5);
-            
-            return radius;
-        }
-        
-        // Merge welding triangles into the main mesh
-        static size_t MergeWeldingTriangles(
-            std::vector<Vector3<Real>>& vertices,
-            std::vector<std::array<int32_t, 3>>& triangles,
-            std::vector<Vector3<Real>> const& weldPoints,
-            std::vector<std::array<int32_t, 3>> const& weldTriangles)
-        {
-            if (weldTriangles.empty())
-            {
-                return 0;
-            }
-            
-            // Build a map from weld point coordinates to existing vertex indices
-            // Use a simple tolerance-based matching
-            std::map<int32_t, int32_t> weldToMainIndex;  // weldIndex -> mainIndex
-            Real tolerance = static_cast<Real>(1e-6);
-            
-            for (size_t wIdx = 0; wIdx < weldPoints.size(); ++wIdx)
-            {
-                bool found = false;
-                
-                // Try to find matching vertex in main mesh
-                for (size_t vIdx = 0; vIdx < vertices.size(); ++vIdx)
-                {
-                    Real dist = Length(vertices[vIdx] - weldPoints[wIdx]);
-                    if (dist < tolerance)
-                    {
-                        weldToMainIndex[static_cast<int32_t>(wIdx)] = static_cast<int32_t>(vIdx);
-                        found = true;
-                        break;
-                    }
-                }
-                
-                // If not found, add as new vertex
-                if (!found)
-                {
-                    weldToMainIndex[static_cast<int32_t>(wIdx)] = static_cast<int32_t>(vertices.size());
-                    vertices.push_back(weldPoints[wIdx]);
-                }
-            }
-            
-            // Add welding triangles with remapped indices
-            size_t addedCount = 0;
-            for (auto const& tri : weldTriangles)
-            {
-                std::array<int32_t, 3> newTri;
-                newTri[0] = weldToMainIndex[tri[0]];
-                newTri[1] = weldToMainIndex[tri[1]];
-                newTri[2] = weldToMainIndex[tri[2]];
-                
-                triangles.push_back(newTri);
-                addedCount++;
-            }
-            
-            return addedCount;
-        }
-        
-        // Validate that mesh is manifold (simple check)
+
+        // Validate that the mesh is manifold: no edge has more than 2 incident triangles.
+        // Uses an unordered_map for O(T) average time (was O(T log T) with std::map).
         static bool ValidateManifold(std::vector<std::array<int32_t, 3>> const& triangles)
         {
-            std::map<std::pair<int32_t, int32_t>, size_t> edgeCounts;
-            
+            EdgeCountMap ecm;
+            ecm.reserve(triangles.size() * 3);
             for (auto const& tri : triangles)
             {
                 for (int i = 0; i < 3; ++i)
                 {
                     int32_t v0 = tri[i];
                     int32_t v1 = tri[(i + 1) % 3];
-                    auto edge = std::make_pair(std::min(v0, v1), std::max(v0, v1));
-                    edgeCounts[edge]++;
+                    if (++ecm[MakeEdgeKey(v0, v1)] > 2)
+                    {
+                        return false;  // Non-manifold edge found early-out
+                    }
                 }
             }
-            
-            for (auto const& ec : edgeCounts)
-            {
-                if (ec.second > 2)
-                {
-                    return false;  // Non-manifold edge found
-                }
-            }
-            
             return true;
         }
-        
-        // Detailed manifold validation
+
+        // Local manifold check for adding exactly two bridge triangles.
+        // Returns true if both triangles can be added without creating a non-manifold
+        // edge (count > 2).  If valid, appends the triangles and updates ecm in-place;
+        // otherwise leaves both triangles and ecm unchanged.
+        //
+        // This is the key performance fix: avoids the O(T) full-mesh rebuild that the
+        // old validate-after-append approach required.
+        static bool ValidateBridgeLocal(
+            std::vector<std::array<int32_t, 3>>& triangles,
+            std::array<int32_t, 3> const& tri1,
+            std::array<int32_t, 3> const& tri2,
+            EdgeCountMap& ecm)
+        {
+            // Collect the 6 edges from the two new triangles using std::array for type safety
+            std::array<std::pair<int32_t, int32_t>, 6> edges;
+            int ne = 0;
+            for (auto const& tri : {tri1, tri2})
+            {
+                for (int i = 0; i < 3; ++i)
+                {
+                    edges[ne++] = MakeEdgeKey(tri[i], tri[(i + 1) % 3]);
+                }
+            }
+
+            // Use size_t consistently for counts to match EdgeCountMap.
+            // Temporary delta accumulates how many times each edge appears
+            // among the 6 new edges (handles degenerate cases where two of
+            // the six edges are identical).
+            std::unordered_map<std::pair<int32_t,int32_t>, size_t, EdgePairHash> delta;
+            delta.reserve(6);
+            for (auto const& e : edges)
+            {
+                delta[e]++;
+            }
+            for (auto const& [e, add] : delta)
+            {
+                auto it = ecm.find(e);
+                size_t cur = (it != ecm.end()) ? it->second : 0;
+                if (cur + add > 2)
+                {
+                    return false;
+                }
+            }
+
+            // Valid – commit
+            triangles.push_back(tri1);
+            triangles.push_back(tri2);
+            for (auto const& [e, add] : delta)
+            {
+                ecm[e] += add;
+            }
+            return true;
+        }
+
+        // Detailed manifold validation: O(T) time using hash maps and a proper
+        // edge-adjacency BFS (was O(T²) due to the nested-loop BFS approach).
         static void ValidateManifoldDetailed(
             std::vector<std::array<int32_t, 3>> const& triangles,
             bool& isClosedManifold,
@@ -1448,94 +899,80 @@ namespace gte
             {
                 return;
             }
+
             
-            // Count edge occurrences
-            std::map<std::pair<int32_t, int32_t>, size_t> edgeCounts;
-            
-            for (auto const& tri : triangles)
+            // Build edge count map and edge-to-triangles adjacency simultaneously
+            // in a single O(T) pass (was O(T²) due to the nested-loop BFS below).
+            EdgeCountMap edgeCounts;
+            std::unordered_map<std::pair<int32_t,int32_t>,
+                               std::vector<int32_t>, EdgePairHash> edgeToTris;
+            edgeCounts.reserve(triangles.size() * 3);
+            edgeToTris.reserve(triangles.size() * 3);
+
+            for (int32_t ti = 0; ti < static_cast<int32_t>(triangles.size()); ++ti)
             {
+                auto const& tri = triangles[ti];
                 for (int i = 0; i < 3; ++i)
                 {
                     int32_t v0 = tri[i];
                     int32_t v1 = tri[(i + 1) % 3];
                     auto edge = std::make_pair(std::min(v0, v1), std::max(v0, v1));
                     edgeCounts[edge]++;
+                    edgeToTris[edge].push_back(ti);
                 }
             }
             
             // Analyze edges
-            for (auto const& ec : edgeCounts)
+            for (auto const& [edge, cnt] : edgeCounts)
             {
-                if (ec.second == 1)
+                if (cnt == 1)
                 {
                     boundaryEdgeCount++;
                 }
-                else if (ec.second > 2)
+                else if (cnt > 2)
                 {
                     hasNonManifoldEdges = true;
                 }
             }
             
-            // Count connected components using BFS
-            std::set<size_t> visited;
+            // Count connected components using O(T) edge-adjacency BFS.
+            // Each triangle is visited at most once; each edge lookup is O(1).
+            std::vector<bool> visited(triangles.size(), false);
             componentCount = 0;
             
             for (size_t startIdx = 0; startIdx < triangles.size(); ++startIdx)
             {
-                if (visited.count(startIdx) > 0)
+                if (visited[startIdx])
                 {
                     continue;
                 }
                 
-                // Start new component
                 componentCount++;
-                std::vector<size_t> queue;
-                queue.push_back(startIdx);
-                visited.insert(startIdx);
+                std::vector<int32_t> queue;
+                queue.push_back(static_cast<int32_t>(startIdx));
+                visited[startIdx] = true;
                 
-                // BFS to find all connected triangles
-                while (!queue.empty())
+                for (size_t qi = 0; qi < queue.size(); ++qi)
                 {
-                    size_t currentIdx = queue.back();
-                    queue.pop_back();
-                    
+                    int32_t currentIdx = queue[qi];
                     auto const& currentTri = triangles[currentIdx];
                     
-                    // Find triangles sharing edges with current
-                    for (size_t otherIdx = 0; otherIdx < triangles.size(); ++otherIdx)
+                    for (int i = 0; i < 3; ++i)
                     {
-                        if (visited.count(otherIdx) > 0)
-                        {
-                            continue;
-                        }
+                        int32_t v0 = currentTri[i];
+                        int32_t v1 = currentTri[(i + 1) % 3];
+                        auto edge = std::make_pair(std::min(v0, v1), std::max(v0, v1));
                         
-                        auto const& otherTri = triangles[otherIdx];
+                        auto it = edgeToTris.find(edge);
+                        if (it == edgeToTris.end()) continue;
                         
-                        // Check if they share an edge
-                        bool sharesEdge = false;
-                        for (int i = 0; i < 3 && !sharesEdge; ++i)
+                        for (int32_t neighborIdx : it->second)
                         {
-                            auto e1 = std::make_pair(
-                                std::min(currentTri[i], currentTri[(i + 1) % 3]),
-                                std::max(currentTri[i], currentTri[(i + 1) % 3]));
-                            
-                            for (int j = 0; j < 3 && !sharesEdge; ++j)
+                            if (!visited[neighborIdx])
                             {
-                                auto e2 = std::make_pair(
-                                    std::min(otherTri[j], otherTri[(j + 1) % 3]),
-                                    std::max(otherTri[j], otherTri[(j + 1) % 3]));
-                                
-                                if (e1 == e2)
-                                {
-                                    sharesEdge = true;
-                                }
+                                visited[neighborIdx] = true;
+                                queue.push_back(neighborIdx);
                             }
-                        }
-                        
-                        if (sharesEdge)
-                        {
-                            queue.push_back(otherIdx);
-                            visited.insert(otherIdx);
                         }
                     }
                 }
@@ -1597,72 +1034,68 @@ namespace gte
             std::vector<BoundaryLoop>& loops)
         {
             loops.clear();
-            
-            // Find all boundary edges
-            std::map<std::pair<int32_t, int32_t>, EdgeType> edgeTypes;
-            std::vector<std::pair<int32_t, int32_t>> dummy;
-            AnalyzeEdgeTopology(triangles, edgeTypes, dummy);
-            
-            // Build adjacency for boundary vertices
-            std::map<int32_t, std::vector<int32_t>> boundaryAdj;
-            for (auto const& et : edgeTypes)
+
+            // Build boundary adjacency directly from the ECM in one O(T) pass,
+            // without going through the full std::map-based AnalyzeEdgeTopology.
+            EdgeCountMap ecm = BuildEdgeCountMap(triangles);
+
+            std::unordered_map<int32_t, std::vector<int32_t>> boundaryAdj;
+            for (auto const& [edge, count] : ecm)
             {
-                if (et.second == EdgeType::Boundary)
+                if (count == 1)
                 {
-                    int32_t v0 = et.first.first;
-                    int32_t v1 = et.first.second;
-                    boundaryAdj[v0].push_back(v1);
-                    boundaryAdj[v1].push_back(v0);
+                    boundaryAdj[edge.first].push_back(edge.second);
+                    boundaryAdj[edge.second].push_back(edge.first);
                 }
             }
-            
-            // Extract loops using traversal
-            std::set<int32_t> visited;
-            
-            for (auto const& adj : boundaryAdj)
+
+            // Extract loops using O(1) unordered_set visited tracking.
+            std::unordered_set<int32_t> visited;
+            visited.reserve(boundaryAdj.size());
+
+            for (auto const& [startVertex, _] : boundaryAdj)
             {
-                int32_t startVertex = adj.first;
                 if (visited.count(startVertex)) continue;
-                
-                // Start a new loop
+
                 BoundaryLoop loop;
                 loop.vertices.push_back(startVertex);
                 visited.insert(startVertex);
-                
+
                 int32_t current = startVertex;
                 int32_t previous = -1;
-                
-                // Follow the boundary
+
                 while (true)
                 {
-                    // Find next unvisited neighbor
                     int32_t next = -1;
-                    for (int32_t neighbor : boundaryAdj[current])
+                    auto it = boundaryAdj.find(current);
+                    if (it != boundaryAdj.end())
                     {
-                        if (neighbor != previous)
+                        for (int32_t neighbor : it->second)
                         {
-                            next = neighbor;
-                            break;
+                            if (neighbor != previous)
+                            {
+                                next = neighbor;
+                                break;
+                            }
                         }
                     }
-                    
+
                     if (next == -1 || next == startVertex)
                     {
-                        break;  // Loop complete or dead end
+                        break;
                     }
-                    
+
                     if (visited.count(next))
                     {
-                        break;  // Already visited
+                        break;
                     }
-                    
+
                     loop.vertices.push_back(next);
                     visited.insert(next);
                     previous = current;
                     current = next;
                 }
-                
-                // Compute loop properties
+
                 if (loop.vertices.size() >= 3)
                 {
                     loop.centroid = Vector3<Real>::Zero();
@@ -1671,20 +1104,22 @@ namespace gte
                         loop.centroid += vertices[v];
                     }
                     loop.centroid /= static_cast<Real>(loop.vertices.size());
-                    
+
                     loop.perimeter = static_cast<Real>(0);
                     for (size_t i = 0; i < loop.vertices.size(); ++i)
                     {
                         size_t j = (i + 1) % loop.vertices.size();
                         loop.perimeter += Length(vertices[loop.vertices[j]] - vertices[loop.vertices[i]]);
                     }
-                    
+
                     loops.push_back(loop);
                 }
             }
         }
         
-        // Bridge two boundary edges by creating two triangles
+        // BridgeBoundaryEdges overload 1: legacy path.
+        // When validate=true, builds a minimal local ECM from only the 6 new edges
+        // rather than scanning the full mesh — O(1) check regardless of mesh size.
         static bool BridgeBoundaryEdges(
             std::vector<Vector3<Real>> const& vertices,
             std::vector<std::array<int32_t, 3>>& triangles,
@@ -1694,7 +1129,6 @@ namespace gte
         {
             // Create two triangles to bridge edge1 and edge2
             // edge1: (a, b), edge2: (c, d)
-            // Create triangles: (a, b, c) and (b, d, c)
             
             int32_t a = edge1.first;
             int32_t b = edge1.second;
@@ -1711,39 +1145,155 @@ namespace gte
             std::array<int32_t, 3> tri1, tri2;
             if (dist_ac + dist_bd < dist_ad + dist_bc)
             {
-                // Bridge a-c and b-d
                 tri1 = {a, b, c};
                 tri2 = {b, d, c};
             }
             else
             {
-                // Bridge a-d and b-c
                 tri1 = {a, b, d};
                 tri2 = {a, d, c};
             }
             
-            // Save current state
-            size_t oldSize = triangles.size();
-            
-            // Add triangles
-            triangles.push_back(tri1);
-            triangles.push_back(tri2);
-            
-            // Validate if requested
             if (validate)
             {
-                if (!ValidateManifold(triangles))
-                {
-                    // Revert
-                    triangles.resize(oldSize);
-                    return false;
-                }
+                // Build a targeted ECM for ONLY the 6 edges of the two new triangles
+                // by scanning existing triangles once.  This is still O(T) but avoids
+                // allocating a full T-entry map — only 6 entries are ever created.
+                std::array<std::pair<int32_t,int32_t>, 6> checkEdges;
+                int ne = 0;
+                for (auto const& t : {tri1, tri2})
+                    for (int i = 0; i < 3; ++i)
+                        checkEdges[ne++] = MakeEdgeKey(t[i], t[(i+1)%3]);
+
+                EdgeCountMap localEcm = BuildEdgeCountMapFor(triangles, checkEdges, 6);
+                return ValidateBridgeLocal(triangles, tri1, tri2, localEcm);
             }
-            
+
+            // No validation requested — just append.
+            triangles.push_back(tri1);
+            triangles.push_back(tri2);
             return true;
         }
-        
-        // Cap a boundary loop with fan triangulation from centroid
+
+        // Overload 2: fast path – validates only the 6 new edges against ecm (O(1)).
+        // Updates ecm and appends to triangles only on success.
+        static bool BridgeBoundaryEdges(
+            std::vector<Vector3<Real>> const& vertices,
+            std::vector<std::array<int32_t, 3>>& triangles,
+            std::pair<int32_t, int32_t> const& edge1,
+            std::pair<int32_t, int32_t> const& edge2,
+            EdgeCountMap& ecm)
+        {
+            int32_t a = edge1.first;
+            int32_t b = edge1.second;
+            int32_t c = edge2.first;
+            int32_t d = edge2.second;
+
+            Real dist_ac = Length(vertices[c] - vertices[a]);
+            Real dist_bd = Length(vertices[d] - vertices[b]);
+            Real dist_ad = Length(vertices[d] - vertices[a]);
+            Real dist_bc = Length(vertices[c] - vertices[b]);
+
+            std::array<int32_t, 3> tri1, tri2;
+            if (dist_ac + dist_bd < dist_ad + dist_bc)
+            {
+                tri1 = {a, b, c};
+                tri2 = {b, d, c};
+            }
+            else
+            {
+                tri1 = {a, b, d};
+                tri2 = {a, d, c};
+            }
+
+            return ValidateBridgeLocal(triangles, tri1, tri2, ecm);
+        }
+        // Local quality check for a fan triangulation of a boundary loop:
+        // O(H) where H = number of loop vertices, rather than O(T) full-mesh scan.
+        //
+        // A fan fill adds H triangles: {loop[i], loop[(i+1)%H], centroid}.
+        // The only edges that could become non-manifold are:
+        //   - boundary edges {loop[i], loop[(i+1)%H]}: must have count == 1 in ecm
+        //     (they are about to be "closed" to count 2 by the fan triangle)
+        //   - centroid edges {loop[i], centroid}: must have count == 0 in ecm
+        //     (centroid is a brand-new vertex)
+        //
+        // If centroidIdx == -1 the centroid has not been added yet; only the
+        // loop boundary edge counts are checked.
+        static bool ValidateFanLocal(
+            BoundaryLoop const& loop,
+            EdgeCountMap const& ecm,
+            int32_t centroidIdx = -1)
+        {
+            int32_t H = static_cast<int32_t>(loop.vertices.size());
+            for (int32_t i = 0; i < H; ++i)
+            {
+                int32_t v0 = loop.vertices[i];
+                int32_t v1 = loop.vertices[(i + 1) % H];
+
+                // Each boundary edge of the loop must appear exactly once in the mesh.
+                // If it already appears twice, adding a fan triangle would push it to
+                // count 3 — a non-manifold edge.
+                auto it = ecm.find(MakeEdgeKey(v0, v1));
+                size_t count = (it != ecm.end()) ? it->second : 0;
+                if (count != 1)
+                {
+                    return false;  // Boundary edge not manifold-safe to close
+                }
+
+                // Centroid spoke edges must be absent (centroid is a brand-new vertex,
+                // so its edges could not already exist — but check anyway for safety).
+                if (centroidIdx >= 0)
+                {
+                    auto it2 = ecm.find(MakeEdgeKey(v0, centroidIdx));
+                    if (it2 != ecm.end() && it2->second > 0)
+                    {
+                        return false;  // Spoke already exists – would be non-manifold
+                    }
+                }
+            }
+            return true;
+        }
+
+        // Fill a boundary loop with a centroid fan and update ecm atomically.
+        // Precondition: ValidateFanLocal(loop, ecm) returned true.
+        // Adds one new centroid vertex, appends H triangles, and updates ecm —
+        // all in a single pass, so no separate append-then-revert is needed.
+        static void FillFanWithECM(
+            std::vector<Vector3<Real>>& vertices,
+            std::vector<std::array<int32_t, 3>>& triangles,
+            BoundaryLoop const& loop,
+            EdgeCountMap& ecm)
+        {
+            int32_t H = static_cast<int32_t>(loop.vertices.size());
+
+            // Add centroid vertex
+            int32_t centroidIdx = static_cast<int32_t>(vertices.size());
+            vertices.push_back(loop.centroid);
+
+            for (int32_t i = 0; i < H; ++i)
+            {
+                int32_t v0 = loop.vertices[i];
+                int32_t v1 = loop.vertices[(i + 1) % H];
+
+                triangles.push_back({v0, v1, centroidIdx});
+
+                // Boundary edge v0-v1: count 1 → 2 (becomes interior).
+                ecm[MakeEdgeKey(v0, v1)]++;
+
+                // Spoke edges: each spoke (v_i, centroid) is shared between two
+                // adjacent fan triangles and is therefore an interior edge with
+                // final count 2.  Adding both v0→c and v1→c here gives each
+                // spoke its two increments across all iterations: the v1→c
+                // increment at iteration i is the same as the v0→c increment
+                // at iteration i+1, so each spoke accumulates count 2 overall.
+                ecm[MakeEdgeKey(v0, centroidIdx)]++;
+                ecm[MakeEdgeKey(v1, centroidIdx)]++;
+            }
+        }
+
+        // CapBoundaryLoop overload 1: legacy path — full-mesh ValidateManifold (O(T)).
+        // Kept for callers that do not maintain a persistent ECM.
         static bool CapBoundaryLoop(
             std::vector<Vector3<Real>>& vertices,
             std::vector<std::array<int32_t, 3>>& triangles,
@@ -1789,6 +1339,29 @@ namespace gte
                 }
             }
             
+            return true;
+        }
+
+        // CapBoundaryLoop overload 2: local ECM path — O(H) check instead of O(T).
+        // Uses ValidateFanLocal to verify only the H boundary edges and new spokes,
+        // then calls FillFanWithECM to commit atomically.  No append-then-revert.
+        static bool CapBoundaryLoop(
+            std::vector<Vector3<Real>>& vertices,
+            std::vector<std::array<int32_t, 3>>& triangles,
+            BoundaryLoop const& loop,
+            EdgeCountMap& ecm)
+        {
+            if (loop.vertices.size() < 3)
+            {
+                return false;
+            }
+
+            if (!ValidateFanLocal(loop, ecm))
+            {
+                return false;
+            }
+
+            FillFanWithECM(vertices, triangles, loop, ecm);
             return true;
         }
         
@@ -1988,9 +1561,11 @@ namespace gte
                 return;
             }
             
-            // Build edge-to-triangles adjacency
-            std::map<std::pair<int32_t, int32_t>, std::vector<size_t>> edgeToTriangles;
-            for (size_t triIdx = 0; triIdx < triangles.size(); ++triIdx)
+            // Build edge-to-triangles adjacency using unordered_map for O(1) lookups
+            std::unordered_map<std::pair<int32_t,int32_t>, std::vector<int32_t>, EdgePairHash>
+                edgeToTriangles;
+            edgeToTriangles.reserve(triangles.size() * 3);
+            for (int32_t triIdx = 0; triIdx < static_cast<int32_t>(triangles.size()); ++triIdx)
             {
                 auto const& tri = triangles[triIdx];
                 for (int i = 0; i < 3; ++i)
@@ -2002,21 +1577,21 @@ namespace gte
                 }
             }
             
-            // BFS to find connected components
-            std::set<size_t> visited;
+            // BFS to find connected components – O(1) per triangle using vector<bool>
+            std::vector<bool> visited(triangles.size(), false);
             
             for (size_t startIdx = 0; startIdx < triangles.size(); ++startIdx)
             {
-                if (visited.count(startIdx) > 0)
+                if (visited[startIdx])
                 {
                     continue;
                 }
                 
                 // Start new component
                 MeshComponent component;
-                std::vector<size_t> queue;
-                queue.push_back(startIdx);
-                visited.insert(startIdx);
+                std::vector<int32_t> queue;
+                queue.push_back(static_cast<int32_t>(startIdx));
+                visited[startIdx] = true;
                 component.triangleIndices.push_back(startIdx);
                 
                 // Add vertices from first triangle
@@ -2029,7 +1604,7 @@ namespace gte
                 size_t queuePos = 0;
                 while (queuePos < queue.size())
                 {
-                    size_t currentIdx = queue[queuePos++];
+                    int32_t currentIdx = queue[queuePos++];
                     auto const& currentTri = triangles[currentIdx];
                     
                     // Check all edges of current triangle
@@ -2042,11 +1617,11 @@ namespace gte
                         auto it = edgeToTriangles.find(edge);
                         if (it != edgeToTriangles.end())
                         {
-                            for (size_t neighborIdx : it->second)
+                            for (int32_t neighborIdx : it->second)
                             {
-                                if (visited.count(neighborIdx) == 0)
+                                if (!visited[neighborIdx])
                                 {
-                                    visited.insert(neighborIdx);
+                                    visited[neighborIdx] = true;
                                     queue.push_back(neighborIdx);
                                     component.triangleIndices.push_back(neighborIdx);
                                     
@@ -2061,8 +1636,9 @@ namespace gte
                     }
                 }
                 
-                // Extract boundary edges for this component
-                std::map<std::pair<int32_t, int32_t>, size_t> edgeCounts;
+                // Extract boundary edges for this component using unordered_map
+                EdgeCountMap edgeCounts;
+                edgeCounts.reserve(component.triangleIndices.size() * 3);
                 for (size_t triIdx : component.triangleIndices)
                 {
                     auto const& tri = triangles[triIdx];
@@ -2264,9 +1840,11 @@ namespace gte
         {
             candidates.clear();
             
-            // Early rejection using bounding spheres
-            Real centerDist = Length(comp1.centroid - comp2.centroid);
-            if (centerDist > comp1.boundingRadius + comp2.boundingRadius + threshold)
+            // Early rejection using squared bounding-sphere distance (avoids sqrt).
+            Vector3<Real> centDiff = comp1.centroid - comp2.centroid;
+            Real centerDistSq = Dot(centDiff, centDiff);
+            Real maxReach = comp1.boundingRadius + comp2.boundingRadius + threshold;
+            if (centerDistSq > maxReach * maxReach)
             {
                 return;
             }
@@ -2788,7 +2366,11 @@ namespace gte
                 std::cout << "\n=== Incremental Component Merging ===\n";
                 std::cout << "Initial components: " << components.size() << "\n";
             }
-            
+
+            // Build ECM once before the inner loop and update it in-place after each
+            // successful bridge.  This avoids O(T) rebuilds per inner iteration.
+            EdgeCountMap ecm = BuildEdgeCountMap(triangles);
+
             for (size_t iter = 0; iter < maxIterations; ++iter)
             {
                 if (components.size() <= 1)
@@ -2806,44 +2388,45 @@ namespace gte
                               << components.size() << " components\n";
                 }
                 
-                // Build list of ALL possible bridges between ALL component pairs
+                // Build list of ALL possible bridges between ALL component pairs.
+                // The bounding-sphere pre-filter efficiently skips distant pairs.
                 std::vector<std::tuple<Real, size_t, size_t, std::pair<int32_t, int32_t>, std::pair<int32_t, int32_t>>> allPossibleBridges;
-                
+
                 for (size_t i = 0; i < components.size(); ++i)
                 {
                     if (components[i].boundaryEdges.empty())
                     {
                         continue;
                     }
-                    
+
                     for (size_t j = i + 1; j < components.size(); ++j)
                     {
                         if (components[j].boundaryEdges.empty())
                         {
                             continue;
                         }
-                        
-                        // Quick distance check using centroids and bounding spheres
-                        Real centerDist = Length(components[i].centroid - components[j].centroid);
+
+                        // Quick bounding-sphere distance check using squared distance
+                        // to avoid sqrt() for pairs that will be rejected anyway.
+                        Vector3<Real> diff = components[i].centroid - components[j].centroid;
+                        Real centerDistSq = Dot(diff, diff);
                         Real maxReach = components[i].boundingRadius + components[j].boundingRadius + threshold;
-                        
-                        if (centerDist > maxReach)
+
+                        if (centerDistSq > maxReach * maxReach)
                         {
                             continue;  // Too far apart
                         }
-                        
+
                         // Find best edge pair between these components
                         std::vector<std::tuple<Real, std::pair<int32_t, int32_t>, std::pair<int32_t, int32_t>>> candidates;
                         FindCandidateEdgePairs(vertices, components[i], components[j], threshold, candidates);
-                        
+
                         if (!candidates.empty())
                         {
                             auto const& best = candidates[0];
-                            Real dist = std::get<0>(best);
-                            auto const& edge1 = std::get<1>(best);
-                            auto const& edge2 = std::get<2>(best);
-                            
-                            allPossibleBridges.push_back(std::make_tuple(dist, i, j, edge1, edge2));
+                            allPossibleBridges.emplace_back(
+                                std::get<0>(best), i, j,
+                                std::get<1>(best), std::get<2>(best));
                         }
                     }
                 }
@@ -2863,12 +2446,16 @@ namespace gte
                         return std::get<0>(a) < std::get<0>(b);
                     });
                 
-                // Track which components are being merged
-                std::map<size_t, size_t> componentMergeMap;  // Maps component index to its merge target
-                std::set<size_t> mergedComponents;
+                // Track which components are being merged — use vector<bool> for O(1) lookup.
+                std::vector<bool> mergedComponents(components.size(), false);
+                // mergeTarget[i] == i means component i is unmerged (identity).
+                // mergeTarget[i] == j (j != i) means component i was merged into j.
+                std::vector<size_t> mergeTarget(components.size());
+                std::iota(mergeTarget.begin(), mergeTarget.end(), 0);  // start as identity
                 std::vector<std::tuple<size_t, size_t, std::pair<int32_t, int32_t>, std::pair<int32_t, int32_t>>> successfulBridges;
                 size_t bridgesThisIter = 0;
-                
+                // ECM is maintained across iterations — no rebuild needed here.
+
                 // Apply bridges greedily
                 for (auto const& bridge : allPossibleBridges)
                 {
@@ -2879,17 +2466,17 @@ namespace gte
                     auto const& edge2 = std::get<4>(bridge);
                     
                     // Skip if either component already merged
-                    if (mergedComponents.count(comp1) || mergedComponents.count(comp2))
+                    if (mergedComponents[comp1] || mergedComponents[comp2])
                     {
                         continue;
                     }
                     
-                    // Try to create bridge
-                    if (BridgeBoundaryEdges(vertices, triangles, edge1, edge2, true))
+                    // Try to create bridge using the fast ECM-based local check (O(1))
+                    if (BridgeBoundaryEdges(vertices, triangles, edge1, edge2, ecm))
                     {
-                        mergedComponents.insert(comp1);
-                        mergedComponents.insert(comp2);
-                        componentMergeMap[comp2] = comp1;  // comp2 merges into comp1
+                        mergedComponents[comp1] = true;
+                        mergedComponents[comp2] = true;
+                        mergeTarget[comp2] = comp1;  // comp2 merges into comp1
                         successfulBridges.push_back(std::make_tuple(comp1, comp2, edge1, edge2));
                         bridgesThisIter++;
                         totalBridges++;
@@ -2914,7 +2501,7 @@ namespace gte
                 
                 // INCREMENTAL UPDATE: Merge components and update their properties
                 std::vector<MeshComponent> newComponents;
-                std::set<size_t> processedComponents;
+                std::vector<bool> processedComponents(components.size(), false);
                 
                 for (auto const& bridgeInfo : successfulBridges)
                 {
@@ -2923,7 +2510,7 @@ namespace gte
                     auto const& edge1 = std::get<2>(bridgeInfo);
                     auto const& edge2 = std::get<3>(bridgeInfo);
                     
-                    if (processedComponents.count(target) == 0)
+                    if (!processedComponents[target])
                     {
                         // Merge source into target (incremental update)
                         components[target].MergeWith(components[source], vertices);
@@ -2934,29 +2521,20 @@ namespace gte
                         edgesToRemove.insert(edge2);
                         components[target].RemoveBoundaryEdges(edgesToRemove);
                         
-                        processedComponents.insert(target);
-                        processedComponents.insert(source);
+                        processedComponents[target] = true;
+                        processedComponents[source] = true;
                     }
                 }
                 
                 // Build new component list (keep non-merged and merged targets)
                 for (size_t i = 0; i < components.size(); ++i)
                 {
-                    // Skip if this component was merged into another
-                    bool wasMergedInto = false;
-                    for (auto const& pair : componentMergeMap)
+                    // Skip sources that were merged into a target
+                    if (mergeTarget[i] != i)
                     {
-                        if (pair.first == i && pair.second != i)
-                        {
-                            wasMergedInto = true;
-                            break;
-                        }
+                        continue;
                     }
-                    
-                    if (!wasMergedInto)
-                    {
-                        newComponents.push_back(std::move(components[i]));
-                    }
+                    newComponents.push_back(std::move(components[i]));
                 }
                 
                 components = std::move(newComponents);
@@ -3088,7 +2666,11 @@ namespace gte
                 }
             }
             
-            // Phase 2: Hole filling (now that component bridging is complete)
+            // Phase 2: Hole filling (now that component bridging is complete).
+            // Build ECM once here and pass it into both the fill and cap steps so
+            // each individual hole/cap check is O(H) local instead of O(T) full-mesh.
+            EdgeCountMap ecm = BuildEdgeCountMap(triangles);
+
             if (params.enableHoleFilling)
             {
                 if (params.verbose)
@@ -3097,7 +2679,7 @@ namespace gte
                 }
                 
                 totalHolesFilled = FillHolesConservative(
-                    vertices, triangles, params, params.verbose);
+                    vertices, triangles, params, ecm, params.verbose);
                 
                 if (params.verbose)
                 {
@@ -3105,7 +2687,7 @@ namespace gte
                 }
             }
             
-            // Final pass: Cap any remaining small boundary loops
+            // Final pass: Cap any remaining small boundary loops using the same ECM.
             std::vector<BoundaryLoop> loops;
             ExtractBoundaryLoops(vertices, triangles, loops);
             
@@ -3119,7 +2701,8 @@ namespace gte
             {
                 if (loop.vertices.size() <= 10)  // Only cap small loops
                 {
-                    if (CapBoundaryLoop(vertices, triangles, loop, true))
+                    // ECM overload: O(H) local check per cap, not O(T) full-mesh.
+                    if (CapBoundaryLoop(vertices, triangles, loop, ecm))
                     {
                         cappedLoops++;
                     }
@@ -3305,10 +2888,31 @@ namespace gte
         }
         
         // Conservative hole filling that validates each fill
+        // FillHolesConservative: fills small boundary loops with fan triangulation.
+        //
+        // The ECM-based overload (below) is the fast path: it builds the edge count
+        // map once before iterating over all loops, then uses ValidateFanLocal + 
+        // FillFanWithECM for each candidate — O(H) per hole instead of O(T).
+        //
+        // Overload 1: builds its own ECM internally (used when caller has no ECM).
         static size_t FillHolesConservative(
             std::vector<Vector3<Real>>& vertices,
             std::vector<std::array<int32_t, 3>>& triangles,
             Parameters const& params,
+            bool verbose = false)
+        {
+            // Build ECM once for the whole fill pass — O(T) — then reuse it.
+            EdgeCountMap ecm = BuildEdgeCountMap(triangles);
+            return FillHolesConservative(vertices, triangles, params, ecm, verbose);
+        }
+
+        // Overload 2: caller supplies (and owns) the ECM.  Fills holes and keeps
+        // ecm up-to-date so the caller's ECM remains valid after this call returns.
+        static size_t FillHolesConservative(
+            std::vector<Vector3<Real>>& vertices,
+            std::vector<std::array<int32_t, 3>>& triangles,
+            Parameters const& params,
+            EdgeCountMap& ecm,
             bool verbose = false)
         {
             std::vector<BoundaryLoop> loops;
@@ -3335,31 +2939,24 @@ namespace gte
                     }
                 }
                 
-                // Try to fill the hole
-                size_t oldTriCount = triangles.size();
-                
-                // Use MeshHoleFilling if available, otherwise try simple fan
-                bool filled = FillSingleHole(vertices, triangles, loop, params.holeFillingMethod);
-                
-                if (filled)
+                // Local check: O(H) — verifies only the H boundary edges and new
+                // spoke edges in this loop, not the full mesh.
+                if (!ValidateFanLocal(loop, ecm))
                 {
-                    // Validate manifold property
-                    if (ValidateManifold(triangles))
-                    {
-                        holesFilledCount++;
-                        
-                        if (verbose && holesFilledCount <= 10)
-                        {
-                            std::cout << "  Filled hole with " << loop.vertices.size() 
-                                      << " vertices (" << (triangles.size() - oldTriCount) 
-                                      << " triangles)\n";
-                        }
-                    }
-                    else
-                    {
-                        // Revert if non-manifold
-                        triangles.resize(oldTriCount);
-                    }
+                    continue;
+                }
+
+                // Fill and update ECM atomically — no append-then-revert needed.
+                size_t trisBefore = triangles.size();
+                FillFanWithECM(vertices, triangles, loop, ecm);
+
+                holesFilledCount++;
+
+                if (verbose && holesFilledCount <= 10)
+                {
+                    std::cout << "  Filled hole with " << loop.vertices.size()
+                              << " vertices (" << (triangles.size() - trisBefore)
+                              << " triangles)\n";
                 }
             }
             
