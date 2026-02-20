@@ -15,7 +15,8 @@ TARGETS = test_mesh_repair test_co3ne test_full_algorithms test_rvd \
           test_enhanced_manifold test_anisotropic_remesh test_delaunay6 test_cvt6d \
           test_delaunay_n test_delaunay_nn test_rvd_n test_cvt_n test_phase4_integration \
           test_anisotropic_end_to_end test_co3ne_stitcher test_ball_pivot_hole_filler \
-          test_ball_pivot_integration test_comprehensive_manifold_analysis test_progressive_merging
+          test_ball_pivot_integration test_comprehensive_manifold_analysis test_progressive_merging \
+          test_parallel_nntree_queries
 
 all: $(TARGETS)
 
@@ -196,3 +197,7 @@ test_performance_benchmark: $(TEST_DIR)/test_performance_benchmark.cpp GTE/Mathe
 # Bottleneck analysis test
 test_bottleneck: $(TEST_DIR)/test_bottleneck.cpp GTE/Mathematics/Co3NeManifoldStitcher.h GTE/Mathematics/Co3Ne.h GTE/Mathematics/BallPivotReconstruction.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp
 	$(CXX) $(CXXFLAGS) -o test_bottleneck $(TEST_DIR)/test_bottleneck.cpp GTE/Mathematics/BallPivotReconstruction.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp $(LDFLAGS)
+
+# Parallel NNTree query correctness test
+test_parallel_nntree_queries: $(TEST_DIR)/test_parallel_nntree_queries.cpp GTE/Mathematics/Co3NeManifoldStitcher.h GTE/Mathematics/BallPivotMeshHoleFiller.cpp
+	$(CXX) $(CXXFLAGS) $(PTHREAD) -o test_parallel_nntree_queries $(TEST_DIR)/test_parallel_nntree_queries.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp $(LDFLAGS)
