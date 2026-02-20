@@ -246,7 +246,7 @@ static TierResult RunTier(std::vector<Vector3<double>> const& points,
                   << vertices.size() << " verts, " << triangles.size() << " tris)\n";
     }
 
-    // Phase 2: Manifold stitching (parameters consistent with test_performance_benchmark)
+    // Phase 2: Manifold stitching
     Co3NeManifoldStitcher<double>::Parameters stitchParams;
     stitchParams.verbose                 = false;
     stitchParams.enableIterativeBridging = true;
@@ -254,7 +254,7 @@ static TierResult RunTier(std::vector<Vector3<double>> const& points,
     stitchParams.enableBallPivotHoleFiller = false;
     stitchParams.initialBridgeThreshold  = 2.0;
     stitchParams.maxBridgeThreshold      = 10.0;
-    stitchParams.maxIterations           = 10;
+    stitchParams.maxIterations           = 20;
 
     auto t1 = Clock::now();
     Co3NeManifoldStitcher<double>::StitchPatches(vertices, triangles, stitchParams);

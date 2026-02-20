@@ -136,6 +136,8 @@ namespace gte
             
             // General parameters
             bool removeNonManifoldEdges;  // Remove triangles causing non-manifold edges
+            bool removeSmallClosedComponents;  // Remove small closed sub-meshes (artifacts)
+            size_t smallClosedComponentThreshold;  // Max triangles for "small" closed component
             bool verbose;
             
             Parameters()
@@ -153,11 +155,15 @@ namespace gte
                 , enableUVMerging(false)  // Disabled by default (not yet implemented)
                 , uvMergingThreshold(static_cast<Real>(0.1))
                 , enableIterativeBridging(true)  // Enabled by default
-                , maxIterations(10)
+                // 20 iterations handles log₂(~1M) initial components; sufficient for
+                // all tested datasets while remaining practical in runtime.
+                , maxIterations(20)
                 , initialBridgeThreshold(static_cast<Real>(2.0))
                 , maxBridgeThreshold(static_cast<Real>(10.0))
                 , targetSingleComponent(true)
                 , removeNonManifoldEdges(true)
+                , removeSmallClosedComponents(true)
+                , smallClosedComponentThreshold(20)  // Remove closed sub-meshes ≤20 triangles
                 , verbose(false)
             {
             }
@@ -272,7 +278,19 @@ namespace gte
                     }
                 }
             }  // end verbose Steps 3 & 4a
-            
+
+            // Step 3b: Remove small closed components that are Co3Ne reconstruction
+            // artifacts (e.g. the 8-triangle octahedral fragments produced for dense
+            // local point clusters).  These are identified early — before any hole
+            // filling — because genuine closed surfaces added later by the hole
+            // fillers should not be treated as artifacts.
+            if (params.removeSmallClosedComponents
+                && params.smallClosedComponentThreshold > 0)
+            {
+                RemoveSmallClosedComponents(triangles,
+                    params.smallClosedComponentThreshold, params.verbose);
+            }
+
             // Step 4: Fill holes using existing hole filling (with validation)
             if (params.enableHoleFilling)
             {
@@ -1215,6 +1233,20 @@ namespace gte
 
                 if (loop.vertices.size() >= 3)
                 {
+                    // Verify the loop is truly closed: the edge connecting the last
+                    // vertex back to the first must exist as a boundary edge (count==1
+                    // in the ECM).  A premature traversal stop (e.g. due to a shared
+                    // "pinch-point" vertex) produces an open chain whose virtual
+                    // closing edge is absent; such chains must be discarded because
+                    // ValidateFanLocal would reject them anyway.
+                    auto closingEdge = MakeEdgeKey(
+                        loop.vertices.back(), loop.vertices.front());
+                    auto itClose = ecm.find(closingEdge);
+                    if (itClose == ecm.end() || itClose->second != 1)
+                    {
+                        continue;  // Non-closed partial chain — skip
+                    }
+
                     loop.centroid = Vector3<Real>::Zero();
                     for (int32_t v : loop.vertices)
                     {
@@ -1235,8 +1267,11 @@ namespace gte
         }
         
         // BridgeBoundaryEdges overload 1: legacy path.
-        // When validate=true, builds a minimal local ECM from only the 6 new edges
-        // rather than scanning the full mesh — O(1) check regardless of mesh size.
+        // When validate=true, builds a minimal local ECM from only the new edges
+        // rather than scanning the full mesh.
+        //
+        // When edge1 and edge2 share a vertex the standard two-triangle bridge creates
+        // a degenerate triangle.  Fall back to a single fan triangle in that case.
         static bool BridgeBoundaryEdges(
             std::vector<Vector3<Real>> const& vertices,
             std::vector<std::array<int32_t, 3>>& triangles,
@@ -1251,7 +1286,50 @@ namespace gte
             int32_t b = edge1.second;
             int32_t c = edge2.first;
             int32_t d = edge2.second;
-            
+
+            // When the two edges share exactly one vertex, use a single triangle
+            // rather than the standard two-triangle quad bridge to avoid degeneracy.
+            auto TryOneTriLegacy =
+                [&](std::array<int32_t, 3> const& tri) -> bool
+            {
+                if (!validate)
+                {
+                    triangles.push_back(tri);
+                    return true;
+                }
+                std::array<std::pair<int32_t, int32_t>, 3> edges3 = {
+                    MakeEdgeKey(tri[0], tri[1]),
+                    MakeEdgeKey(tri[1], tri[2]),
+                    MakeEdgeKey(tri[0], tri[2])
+                };
+                // BuildEdgeCountMapFor accepts a 6-slot array; pad with sentinel
+                // {-1,-1} entries that cannot match any real edge.
+                EdgeCountMap localEcm =
+                    BuildEdgeCountMapFor(triangles,
+                        {edges3[0], edges3[1], edges3[2], {-1,-1}, {-1,-1}, {-1,-1}}, 3);
+                for (auto const& e : edges3)
+                {
+                    auto it = localEcm.find(e);
+                    size_t cur = (it != localEcm.end()) ? it->second : 0;
+                    if (cur + 1 > 2) return false;
+                }
+                triangles.push_back(tri);
+                return true;
+            };
+
+            // When the two edges share exactly one vertex, use a single triangle
+            // rather than the standard two-triangle quad bridge to avoid degeneracy.
+            // The shared vertex is placed in the middle position so the free endpoints
+            // of edge1 and edge2 flank it, preserving a consistent winding order:
+            //   a==c → {b, a, d}  closes (a,b) and (a,d), opens (b,d)
+            //   a==d → {b, a, c}  closes (a,b) and (a,c), opens (b,c)
+            //   b==c → {a, b, d}  closes (a,b) and (b,d), opens (a,d)
+            //   b==d → {a, b, c}  closes (a,b) and (b,c), opens (a,c)
+            if (a == c) return TryOneTriLegacy({b, a, d});
+            if (a == d) return TryOneTriLegacy({b, a, c});
+            if (b == c) return TryOneTriLegacy({a, b, d});
+            if (b == d) return TryOneTriLegacy({a, b, c});
+
             // Check edge orientations and distances
             Real dist_ac = Length(vertices[c] - vertices[a]);
             Real dist_bd = Length(vertices[d] - vertices[b]);
@@ -1294,6 +1372,14 @@ namespace gte
 
         // Overload 2: fast path – validates only the 6 new edges against ecm (O(1)).
         // Updates ecm and appends to triangles only on success.
+        //
+        // When edge1 and edge2 share a vertex (components connected at a point but
+        // not at an edge), the standard two-triangle bridge would produce a degenerate
+        // triangle with a repeated vertex, causing ValidateBridgeLocal to reject it
+        // (the shared diagonal edge appears three times, making add=3).  In that case
+        // we fall back to a single fan triangle at the shared vertex, which correctly
+        // closes both boundary edges and leaves a new boundary edge between the two
+        // free endpoints.
         static bool BridgeBoundaryEdges(
             std::vector<Vector3<Real>> const& vertices,
             std::vector<std::array<int32_t, 3>>& triangles,
@@ -1305,6 +1391,40 @@ namespace gte
             int32_t b = edge1.second;
             int32_t c = edge2.first;
             int32_t d = edge2.second;
+
+            // Helper: validate and commit a single triangle.
+            auto TryOneTri = [&](std::array<int32_t, 3> const& tri) -> bool
+            {
+                std::array<std::pair<int32_t, int32_t>, 3> edges3 = {
+                    MakeEdgeKey(tri[0], tri[1]),
+                    MakeEdgeKey(tri[1], tri[2]),
+                    MakeEdgeKey(tri[0], tri[2])
+                };
+                for (auto const& e : edges3)
+                {
+                    auto it = ecm.find(e);
+                    size_t cur = (it != ecm.end()) ? it->second : 0;
+                    if (cur + 1 > 2) return false;
+                }
+                triangles.push_back(tri);
+                for (auto const& e : edges3) ecm[e]++;
+                return true;
+            };
+
+            // When the two edges share exactly one vertex, use a single triangle
+            // rather than the two-triangle quad bridge.
+            // When the two edges share exactly one vertex, use a single triangle
+            // rather than the standard two-triangle quad bridge to avoid degeneracy.
+            // The shared vertex is placed in the middle position so the free endpoints
+            // of edge1 and edge2 flank it, preserving a consistent winding order:
+            //   a==c → {b, a, d}  closes (a,b) and (a,d), opens (b,d)
+            //   a==d → {b, a, c}  closes (a,b) and (a,c), opens (b,c)
+            //   b==c → {a, b, d}  closes (a,b) and (b,d), opens (a,d)
+            //   b==d → {a, b, c}  closes (a,b) and (b,c), opens (a,c)
+            if (a == c) return TryOneTri({b, a, d});
+            if (a == d) return TryOneTri({b, a, c});
+            if (b == c) return TryOneTri({a, b, d});
+            if (b == d) return TryOneTri({a, b, c});
 
             Real dist_ac = Length(vertices[c] - vertices[a]);
             Real dist_bd = Length(vertices[d] - vertices[b]);
@@ -2836,7 +2956,7 @@ namespace gte
             size_t cappedLoops = 0;
             for (auto const& loop : loops)
             {
-                if (loop.vertices.size() <= 10)  // Only cap small loops
+                if (loop.vertices.size() <= static_cast<size_t>(params.maxHoleEdges))
                 {
                     // ECM overload: O(H) local check per cap, not O(T) full-mesh.
                     if (CapBoundaryLoop(vertices, triangles, loop, ecm))
@@ -3134,6 +3254,101 @@ namespace gte
             return false;
         }
         
+        // Remove connected components that are closed (no boundary edges) and
+        // contain at most maxTriangles triangles.  These fragments are artifacts
+        // produced by Co3Ne for dense local regions; they have no boundary to bridge
+        // with and would prevent the final closed-manifold check from passing.
+        static void RemoveSmallClosedComponents(
+            std::vector<std::array<int32_t, 3>>& triangles,
+            size_t maxTriangles,
+            bool verbose = false)
+        {
+            if (triangles.empty()) return;
+
+            // Build edge-to-triangle adjacency.
+            std::unordered_map<std::pair<int32_t, int32_t>,
+                               std::vector<int32_t>, EdgePairHash> edgeToTri;
+            edgeToTri.reserve(triangles.size() * 3);
+            for (int32_t ti = 0; ti < static_cast<int32_t>(triangles.size()); ++ti)
+            {
+                auto const& t = triangles[ti];
+                for (int i = 0; i < 3; ++i)
+                {
+                    auto e = std::make_pair(std::min(t[i], t[(i + 1) % 3]),
+                                            std::max(t[i], t[(i + 1) % 3]));
+                    edgeToTri[e].push_back(ti);
+                }
+            }
+
+            // Identify connected components via BFS.
+            std::vector<bool> visited(triangles.size(), false);
+            std::vector<bool> toRemove(triangles.size(), false);
+            size_t removedComps = 0;
+
+            for (size_t seed = 0; seed < triangles.size(); ++seed)
+            {
+                if (visited[seed]) continue;
+
+                // DFS (stack) traversal over this component.
+                std::vector<size_t> comp;
+                std::vector<int32_t> stack = {static_cast<int32_t>(seed)};
+                visited[seed] = true;
+                size_t boundaryEdges = 0;
+
+                while (!stack.empty())
+                {
+                    int32_t cur = stack.back(); stack.pop_back();
+                    comp.push_back(static_cast<size_t>(cur));
+                    auto const& t = triangles[cur];
+                    for (int i = 0; i < 3; ++i)
+                    {
+                        auto e = std::make_pair(std::min(t[i], t[(i + 1) % 3]),
+                                                std::max(t[i], t[(i + 1) % 3]));
+                        auto it = edgeToTri.find(e);
+                        if (it == edgeToTri.end()) continue;
+                        if (it->second.size() == 1) ++boundaryEdges;  // boundary
+                        for (int32_t nb : it->second)
+                        {
+                            if (!visited[nb])
+                            {
+                                visited[nb] = true;
+                                stack.push_back(nb);
+                            }
+                        }
+                    }
+                }
+
+                // Remove if: closed (no boundary edges) AND small.
+                if (boundaryEdges == 0 && comp.size() <= maxTriangles)
+                {
+                    for (size_t ti : comp) toRemove[ti] = true;
+                    ++removedComps;
+                    if (verbose)
+                    {
+                        std::cout << "  Removing small closed component ("
+                                  << comp.size() << " triangles)\n";
+                    }
+                }
+            }
+
+            if (removedComps == 0) return;
+
+            // Compact the triangle array.
+            std::vector<std::array<int32_t, 3>> kept;
+            kept.reserve(triangles.size());
+            for (size_t i = 0; i < triangles.size(); ++i)
+            {
+                if (!toRemove[i]) kept.push_back(triangles[i]);
+            }
+            triangles = std::move(kept);
+
+            if (verbose)
+            {
+                std::cout << "Removed " << removedComps
+                          << " small closed component(s)\n";
+            }
+        }
+
         // Single-pass bridging (legacy fallback)
         static void TopologyAwareComponentBridgingSinglePass(
             std::vector<Vector3<Real>>& vertices,
