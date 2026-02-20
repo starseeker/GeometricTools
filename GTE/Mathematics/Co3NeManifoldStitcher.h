@@ -172,13 +172,15 @@ namespace gte
                 return true;  // Nothing to stitch
             }
             
-            // Step 1: Analyze mesh topology
+            // Step 1: Analyze mesh topology.
+            // For non-verbose mode we only need the non-manifold edge list (for Step 2),
+            // so avoid building the expensive std::map output in that case.
             std::map<std::pair<int32_t, int32_t>, EdgeType> edgeTypes;
             std::vector<std::pair<int32_t, int32_t>> nonManifoldEdges;
-            AnalyzeEdgeTopology(triangles, edgeTypes, nonManifoldEdges);
-            
             if (params.verbose)
             {
+                AnalyzeEdgeTopology(triangles, edgeTypes, nonManifoldEdges);
+
                 size_t boundaryEdges = 0;
                 size_t interiorEdges = 0;
                 for (auto const& et : edgeTypes)
@@ -186,11 +188,15 @@ namespace gte
                     if (et.second == EdgeType::Boundary) ++boundaryEdges;
                     if (et.second == EdgeType::Interior) ++interiorEdges;
                 }
-                
+
                 std::cout << "Topology Analysis:\n";
                 std::cout << "  Boundary edges: " << boundaryEdges << "\n";
                 std::cout << "  Interior edges: " << interiorEdges << "\n";
                 std::cout << "  Non-manifold edges: " << nonManifoldEdges.size() << "\n";
+            }
+            else
+            {
+                FindNonManifoldEdges(triangles, nonManifoldEdges);
             }
             
             // Step 2: If enabled, remove non-manifold edges first
@@ -203,65 +209,67 @@ namespace gte
                     std::cout << "Removed " << removed << " triangles to fix non-manifold edges\n";
                 }
                 
-                // Re-analyze after removal
+                // Re-analyze after removal (only need the full map when verbose)
                 edgeTypes.clear();
                 nonManifoldEdges.clear();
-                AnalyzeEdgeTopology(triangles, edgeTypes, nonManifoldEdges);
+                if (params.verbose)
+                {
+                    AnalyzeEdgeTopology(triangles, edgeTypes, nonManifoldEdges);
+                }
+                else
+                {
+                    FindNonManifoldEdges(triangles, nonManifoldEdges);
+                }
             }
             
-            // Step 3: Identify connected patches
-            std::vector<Patch> patches;
-            IdentifyPatches(vertices, triangles, edgeTypes, patches);
-            
+            // Step 3: Identify connected patches (diagnostic/verbose only — patchPairs is
+            // never used downstream, so skip entirely in non-verbose mode).
             if (params.verbose)
             {
+                std::vector<Patch> patches;
+                IdentifyPatches(vertices, triangles, edgeTypes, patches);
+
                 std::cout << "Found " << patches.size() << " connected patches\n";
                 size_t closedPatches = 0;
                 for (size_t i = 0; i < patches.size(); ++i)
                 {
-                    std::cout << "  Patch " << i << ": " 
+                    std::cout << "  Patch " << i << ": "
                               << patches[i].triangleIndices.size() << " triangles, "
                               << patches[i].boundaryEdges.size() << " boundary edges, "
                               << (patches[i].isManifold ? "manifold" : "non-manifold")
                               << (patches[i].isClosed ? ", closed" : ", open") << "\n";
-                    
-                    if (patches[i].isClosed)
-                    {
-                        closedPatches++;
-                    }
+                    if (patches[i].isClosed) closedPatches++;
                 }
                 std::cout << "  " << closedPatches << " closed patches (no boundaries)\n";
                 std::cout << "  " << (patches.size() - closedPatches) << " open patches (have boundaries)\n";
-            }
-            
-            // Step 4a: Analyze patch pairs to identify stitching opportunities
-            std::vector<PatchPair> patchPairs;
-            if (patches.size() > 1)
-            {
-                // Estimate a reasonable max distance based on mesh scale
-                Real avgEdgeLength = EstimateAverageEdgeLength(vertices, triangles);
-                Real maxPairDistance = avgEdgeLength * static_cast<Real>(3);  // 3x average edge
-                
-                AnalyzePatchPairs(vertices, patches, patchPairs, maxPairDistance);
-                
-                if (params.verbose && !patchPairs.empty())
+
+                // Step 4a: Analyze patch pairs to identify stitching opportunities
+                std::vector<PatchPair> patchPairs;
+                if (patches.size() > 1)
                 {
-                    std::cout << "\nFound " << patchPairs.size() << " patch pairs for potential stitching\n";
-                    size_t toShow = std::min(static_cast<size_t>(5), patchPairs.size());
-                    for (size_t i = 0; i < toShow; ++i)
+                    Real avgEdgeLength = EstimateAverageEdgeLength(vertices, triangles);
+                    Real maxPairDistance = avgEdgeLength * static_cast<Real>(3);
+                    AnalyzePatchPairs(vertices, patches, patchPairs, maxPairDistance);
+
+                    if (!patchPairs.empty())
                     {
-                        auto const& pair = patchPairs[i];
-                        std::cout << "  Pair " << i << ": patches " << pair.patch1Index 
-                                  << " and " << pair.patch2Index
-                                  << ", min dist = " << pair.minDistance
-                                  << ", close vertices = " << pair.closeBoundaryVertices << "\n";
-                    }
-                    if (patchPairs.size() > toShow)
-                    {
-                        std::cout << "  ... and " << (patchPairs.size() - toShow) << " more pairs\n";
+                        std::cout << "\nFound " << patchPairs.size() << " patch pairs for potential stitching\n";
+                        size_t toShow = std::min(static_cast<size_t>(5), patchPairs.size());
+                        for (size_t i = 0; i < toShow; ++i)
+                        {
+                            auto const& pair = patchPairs[i];
+                            std::cout << "  Pair " << i << ": patches " << pair.patch1Index
+                                      << " and " << pair.patch2Index
+                                      << ", min dist = " << pair.minDistance
+                                      << ", close vertices = " << pair.closeBoundaryVertices << "\n";
+                        }
+                        if (patchPairs.size() > toShow)
+                        {
+                            std::cout << "  ... and " << (patchPairs.size() - toShow) << " more pairs\n";
+                        }
                     }
                 }
-            }
+            }  // end verbose Steps 3 & 4a
             
             // Step 4: Fill holes using existing hole filling (with validation)
             if (params.enableHoleFilling)
@@ -277,9 +285,8 @@ namespace gte
                 size_t trianglesAfter = triangles.size();
                 
                 // Validate no non-manifold edges were created
-                std::map<std::pair<int32_t, int32_t>, EdgeType> checkEdgeTypes;
                 std::vector<std::pair<int32_t, int32_t>> checkNonManifold;
-                AnalyzeEdgeTopology(triangles, checkEdgeTypes, checkNonManifold);
+                FindNonManifoldEdges(triangles, checkNonManifold);
                 
                 if (!checkNonManifold.empty())
                 {
@@ -343,11 +350,10 @@ namespace gte
                 size_t trianglesAfter = triangles.size();
                 
                 // Validate no non-manifold edges were created
-                std::map<std::pair<int32_t, int32_t>, EdgeType> checkEdgeTypes;
-                std::vector<std::pair<int32_t, int32_t>> checkNonManifold;
-                AnalyzeEdgeTopology(triangles, checkEdgeTypes, checkNonManifold);
+                std::vector<std::pair<int32_t, int32_t>> checkNonManifoldFinal;
+                FindNonManifoldEdges(triangles, checkNonManifoldFinal);
                 
-                if (!checkNonManifold.empty())
+                if (!checkNonManifoldFinal.empty())
                 {
                     // Hole filling created non-manifold edges - revert
                     if (params.verbose)
@@ -433,6 +439,27 @@ namespace gte
                     edgeTypes[edge] = EdgeType::NonManifold;
                     nonManifoldEdges.push_back(edge);
                 }
+            }
+        }
+
+        // Lightweight variant that only identifies non-manifold edges (count >= 3).
+        // Avoids the expensive std::map output entirely — O(T) with hash map.
+        static void FindNonManifoldEdges(
+            std::vector<std::array<int32_t, 3>> const& triangles,
+            std::vector<std::pair<int32_t, int32_t>>& nonManifoldEdges)
+        {
+            EdgeCountMap edgeCounts;
+            edgeCounts.reserve(triangles.size() * 3);
+            for (auto const& tri : triangles)
+            {
+                for (int i = 0; i < 3; ++i)
+                {
+                    edgeCounts[MakeEdgeKey(tri[i], tri[(i + 1) % 3])]++;
+                }
+            }
+            for (auto const& [edge, count] : edgeCounts)
+            {
+                if (count >= 3) nonManifoldEdges.push_back(edge);
             }
         }
         
