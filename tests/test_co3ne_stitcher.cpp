@@ -261,7 +261,6 @@ void TestBallPivotWelding()
     stitchParams.verbose = true;
     stitchParams.enableHoleFilling = true;
     stitchParams.removeNonManifoldEdges = true;
-    stitchParams.enableBallPivot = true;  // Enable Ball Pivot welding!
     
     std::cout << "\nApplying stitching with Ball Pivot welding...\n";
     size_t trianglesBefore = triangles.size();

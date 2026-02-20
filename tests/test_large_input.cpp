@@ -79,7 +79,6 @@ int main()
     
     Co3NeManifoldStitcher<double>::Parameters stitchParams;
     stitchParams.enableHoleFilling = true;
-    stitchParams.enableBallPivot = false;
     stitchParams.removeNonManifoldEdges = true;
     stitchParams.enableIterativeBridging = true;
     stitchParams.maxIterations = 15;  // More iterations for larger input

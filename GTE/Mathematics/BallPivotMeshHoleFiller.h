@@ -30,6 +30,7 @@
 
 #include <GTE/Mathematics/Vector3.h>
 #include <GTE/Mathematics/NearestNeighborQuery.h>
+#include <GTE/Mathematics/BoundaryPolygonRTree.h>
 #include <detria.hpp>
 #include <algorithm>
 #include <array>

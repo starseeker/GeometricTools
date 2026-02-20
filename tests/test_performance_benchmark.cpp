@@ -132,7 +132,6 @@ BenchmarkResult RunBenchmark(std::vector<Vector3<double>> const& points, bool ve
     stitchParams.verbose = false;
     stitchParams.enableIterativeBridging = true;
     stitchParams.enableHoleFilling = true;
-    stitchParams.enableBallPivot = false;
     stitchParams.enableBallPivotHoleFiller = false;
     stitchParams.initialBridgeThreshold = 2.0;
     stitchParams.maxBridgeThreshold = 10.0;
