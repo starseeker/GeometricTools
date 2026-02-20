@@ -299,7 +299,7 @@ int main(int argc, char* argv[])
 
     Co3NeManifoldStitcher<double>::Parameters spParams;
     spParams.verbose                   = false;  // Reduce verbose noise for Step 4
-    spParams.enableUVMerging           = false;  // Merger already done in Step 3
+    spParams.enableUVMerging           = false;  // Cluster merge already done in Step 3
     spParams.numClusters               = numClusters;
     spParams.enableHoleFilling         = true;
     spParams.maxHoleEdges              = 100;

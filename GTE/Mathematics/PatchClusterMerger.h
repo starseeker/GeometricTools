@@ -832,12 +832,16 @@ namespace gte
                 double eps = diag * 1e-6;
                 if (eps > 0.0)
                 {
-                    // Deterministic "noise" using point index.
+                    // Deterministic perturbation using the golden angle (137.508°
+                    // in degrees ≈ 2π/φ² radians) to ensure well-distributed
+                    // pseudo-random offsets that break collinearity without
+                    // clustering the perturbations at any particular direction.
+                    constexpr double kGoldenAngleDeg = 137.508;
                     for (size_t i = 0; i < pts2D.size(); ++i)
                     {
                         double t = static_cast<double>(i) / static_cast<double>(pts2D.size());
-                        pts2D[i].x += eps * std::sin(t * 137.508);
-                        pts2D[i].y += eps * std::cos(t * 137.508);
+                        pts2D[i].x += eps * std::sin(t * kGoldenAngleDeg);
+                        pts2D[i].y += eps * std::cos(t * kGoldenAngleDeg);
                     }
                 }
             }
@@ -856,23 +860,7 @@ namespace gte
                 return false;
             }
 
-            // Collect triangles inside the outline, mapping compact indices back
-            // to local cluster indices.
-            bool cwTriangles = true;
-            tri.forEachTriangle(
-                [&](detria::Triangle<uint32_t> t)
-                {
-                    // Map compact indices back to local cluster-vertex indices.
-                    // localToCompact is a local→compact map; invert on-the-fly.
-                    // Since compact indices are assigned sequentially starting
-                    // from outline vertices, we can search localToCompact.
-                    // For efficiency build the inverse once.
-                    (void)t;  // handled via the inverse map below
-                },
-                cwTriangles);
-            outLocalTriangles.clear();
-
-            // Build compact→local inverse map.
+            // Build compact→local inverse map before collecting triangles.
             std::vector<int32_t> compactToLocal(pts2D.size(), -1);
             for (int32_t li = 0; li < numVerts; ++li)
             {
@@ -883,6 +871,9 @@ namespace gte
                 }
             }
 
+            // Collect triangles inside the outline, mapping compact indices back
+            // to local cluster vertex indices.
+            bool cwTriangles = true;
             tri.forEachTriangle(
                 [&](detria::Triangle<uint32_t> t)
                 {
