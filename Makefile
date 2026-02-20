@@ -201,3 +201,7 @@ test_bottleneck: $(TEST_DIR)/test_bottleneck.cpp GTE/Mathematics/Co3NeManifoldSt
 # Parallel NNTree query correctness test
 test_parallel_nntree_queries: $(TEST_DIR)/test_parallel_nntree_queries.cpp GTE/Mathematics/Co3NeManifoldStitcher.h GTE/Mathematics/BallPivotMeshHoleFiller.cpp
 	$(CXX) $(CXXFLAGS) $(PTHREAD) -o test_parallel_nntree_queries $(TEST_DIR)/test_parallel_nntree_queries.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp $(LDFLAGS)
+
+# Full-pipeline profiling and closed-manifold validation (r768.xyz baseline)
+test_co3ne_profile_full: $(TEST_DIR)/test_co3ne_profile_full.cpp GTE/Mathematics/Co3Ne.h GTE/Mathematics/Co3NeManifoldStitcher.h GTE/Mathematics/BallPivotReconstruction.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp
+	$(CXX) $(CXXFLAGS) -o test_co3ne_profile_full $(TEST_DIR)/test_co3ne_profile_full.cpp GTE/Mathematics/BallPivotReconstruction.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp $(LDFLAGS)
