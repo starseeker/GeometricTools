@@ -44,6 +44,9 @@ namespace gte
     {
         size_t operator()(std::pair<int32_t, int32_t> const& p) const noexcept
         {
+            // boost::hash_combine style mixing for two 32-bit integers.
+            // The constants (2654435761, 0x9e3779b9) are derived from the
+            // golden ratio and are widely used for this purpose.
             size_t h = static_cast<size_t>(static_cast<uint32_t>(p.first));
             h ^= static_cast<size_t>(static_cast<uint32_t>(p.second)) * 2654435761ULL
                  + 0x9e3779b9ULL + (h << 6) + (h >> 2);
@@ -803,8 +806,8 @@ namespace gte
             std::array<int32_t, 3> const& tri2,
             EdgeCountMap& ecm)
         {
-            // Collect the 6 edges from the two new triangles
-            std::pair<int32_t, int32_t> edges[6];
+            // Collect the 6 edges from the two new triangles using std::array for type safety
+            std::array<std::pair<int32_t, int32_t>, 6> edges;
             int ne = 0;
             for (auto const& tri : {tri1, tri2})
             {
@@ -816,9 +819,11 @@ namespace gte
                 }
             }
 
-            // Check if any edge would exceed count 2
-            // Use a temporary delta to handle duplicate edges among the 6 (rare but possible)
-            std::unordered_map<std::pair<int32_t,int32_t>, int, EdgePairHash> delta;
+            // Use size_t consistently for counts to match EdgeCountMap.
+            // Temporary delta accumulates how many times each edge appears
+            // among the 6 new edges (handles degenerate cases where two of
+            // the six edges are identical).
+            std::unordered_map<std::pair<int32_t,int32_t>, size_t, EdgePairHash> delta;
             delta.reserve(6);
             for (auto const& e : edges)
             {
@@ -828,7 +833,7 @@ namespace gte
             {
                 auto it = ecm.find(e);
                 size_t cur = (it != ecm.end()) ? it->second : 0;
-                if (cur + static_cast<size_t>(add) > 2)
+                if (cur + add > 2)
                 {
                     return false;
                 }
@@ -839,7 +844,7 @@ namespace gte
             triangles.push_back(tri2);
             for (auto const& [e, add] : delta)
             {
-                ecm[e] += static_cast<size_t>(add);
+                ecm[e] += add;
             }
             return true;
         }

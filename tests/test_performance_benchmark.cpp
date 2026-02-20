@@ -9,8 +9,11 @@
 #include <fstream>
 #include <vector>
 #include <array>
+#include <algorithm>
 #include <chrono>
 #include <iomanip>
+#include <numeric>
+#include <random>
 
 using namespace gte;
 using namespace std::chrono;
@@ -179,10 +182,18 @@ int main(int argc, char* argv[])
     }
     
     std::cout << "Loaded " << fullPoints.size() << " points from r768.xyz\n\n";
-    
+
+    // Build a shuffled index array so every subset is a spatially distributed
+    // random sample rather than a head-N geographic cluster.  A fixed seed
+    // makes results reproducible across runs.
+    std::vector<size_t> shuffledIdx(fullPoints.size());
+    std::iota(shuffledIdx.begin(), shuffledIdx.end(), 0);
+    std::mt19937 rng(42);
+    std::shuffle(shuffledIdx.begin(), shuffledIdx.end(), rng);
+
     // Test sizes: 100, 500, 1k, 2k, 5k, 10k, 20k, 40k (and full if small enough)
     std::vector<size_t> testSizes = {100, 500, 1000, 2000, 5000, 10000};
-    
+
     if (fullPoints.size() <= 50000)
     {
         testSizes.push_back(fullPoints.size());
@@ -196,23 +207,25 @@ int main(int argc, char* argv[])
             testSizes.push_back(fullPoints.size());
         }
     }
-    
+
     std::vector<BenchmarkResult> results;
-    
+
     std::cout << "Running benchmarks...\n";
     std::cout << std::string(80, '=') << "\n";
-    
+
     for (size_t testSize : testSizes)
     {
         if (testSize > fullPoints.size())
         {
             continue;
         }
-        
-        // Extract subset
-        std::vector<Vector3<double>> testPoints(
-            fullPoints.begin(),
-            fullPoints.begin() + testSize);
+
+        // Build a spatially distributed random subset (not a geographic head slice)
+        std::vector<Vector3<double>> testPoints(testSize);
+        for (size_t i = 0; i < testSize; ++i)
+        {
+            testPoints[i] = fullPoints[shuffledIdx[i]];
+        }
         
         // Run benchmark
         auto result = RunBenchmark(testPoints, true);
