@@ -27,6 +27,7 @@
 #include <GTE/Mathematics/MeshValidation.h>
 #include <GTE/Mathematics/BallPivotMeshHoleFiller.h>
 #include <GTE/Mathematics/NearestNeighborQuery.h>
+#include <GTE/Mathematics/PatchClusterMerger.h>
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -123,9 +124,12 @@ namespace gte
             int32_t maxHoleFillerIterations;
             bool removeEdgeTrianglesOnFailure;
             
-            // UV parameterization parameters
+            // UV parameterization parameters: cluster patches spatially,
+            // re-triangulate each cluster via concave-hull + Steiner
+            // triangulation to reduce patch count before stitching.
             bool enableUVMerging;
             Real uvMergingThreshold;
+            int32_t numClusters;  // Target number of merged patches (default: 6)
             
             // Topology bridging parameters
             bool enableIterativeBridging;  // Multi-pass bridging with hole filling
@@ -150,8 +154,9 @@ namespace gte
                                static_cast<Real>(5.0)})
                 , maxHoleFillerIterations(10)
                 , removeEdgeTrianglesOnFailure(true)
-                , enableUVMerging(false)  // Disabled by default (not yet implemented)
+                , enableUVMerging(false)  // Disabled by default
                 , uvMergingThreshold(static_cast<Real>(0.1))
+                , numClusters(6)
                 , enableIterativeBridging(true)  // Enabled by default
                 , maxIterations(10)
                 , initialBridgeThreshold(static_cast<Real>(2.0))
@@ -404,10 +409,22 @@ namespace gte
             // Step 8: UV parameterization merging (if enabled)
             if (params.enableUVMerging)
             {
-                // TODO: Implement UV-based patch merging
+                auto t8start = std::chrono::steady_clock::now();
+
+                typename PatchClusterMerger<Real>::Parameters mergeParams;
+                mergeParams.numClusters = params.numClusters;
+                mergeParams.verbose    = params.verbose;
+
+                int32_t merged = PatchClusterMerger<Real>::MergeClusteredPatches(
+                    vertices, triangles, mergeParams);
+
                 if (params.verbose)
                 {
-                    std::cout << "UV-based patch merging not yet implemented\n";
+                    auto t8ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - t8start).count();
+                    std::cout << "  [Profiling] Step 8 (UV cluster merge, "
+                              << merged << " clusters merged): "
+                              << t8ms << " ms\n";
                 }
             }
             
