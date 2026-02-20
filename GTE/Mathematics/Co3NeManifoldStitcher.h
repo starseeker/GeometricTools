@@ -403,37 +403,33 @@ namespace gte
             std::map<std::pair<int32_t, int32_t>, EdgeType>& edgeTypes,
             std::vector<std::pair<int32_t, int32_t>>& nonManifoldEdges)
         {
-            // Count triangle occurrences for each edge
-            std::map<std::pair<int32_t, int32_t>, size_t> edgeCounts;
-            
+            // Count triangle occurrences for each edge using unordered_map (O(T) avg).
+            EdgeCountMap edgeCounts;
+            edgeCounts.reserve(triangles.size() * 3);
+
             for (auto const& tri : triangles)
             {
                 for (int i = 0; i < 3; ++i)
                 {
-                    int32_t v0 = tri[i];
-                    int32_t v1 = tri[(i + 1) % 3];
-                    
-                    // Use canonical edge ordering (smaller vertex first)
-                    auto edge = std::make_pair(std::min(v0, v1), std::max(v0, v1));
-                    edgeCounts[edge]++;
+                    edgeCounts[MakeEdgeKey(tri[i], tri[(i + 1) % 3])]++;
                 }
             }
-            
-            // Classify edges
-            for (auto const& ec : edgeCounts)
+
+            // Classify edges and populate the caller's std::map output.
+            for (auto const& [edge, count] : edgeCounts)
             {
-                if (ec.second == 1)
+                if (count == 1)
                 {
-                    edgeTypes[ec.first] = EdgeType::Boundary;
+                    edgeTypes[edge] = EdgeType::Boundary;
                 }
-                else if (ec.second == 2)
+                else if (count == 2)
                 {
-                    edgeTypes[ec.first] = EdgeType::Interior;
+                    edgeTypes[edge] = EdgeType::Interior;
                 }
                 else  // >= 3
                 {
-                    edgeTypes[ec.first] = EdgeType::NonManifold;
-                    nonManifoldEdges.push_back(ec.first);
+                    edgeTypes[edge] = EdgeType::NonManifold;
+                    nonManifoldEdges.push_back(edge);
                 }
             }
         }
@@ -1038,72 +1034,68 @@ namespace gte
             std::vector<BoundaryLoop>& loops)
         {
             loops.clear();
-            
-            // Find all boundary edges
-            std::map<std::pair<int32_t, int32_t>, EdgeType> edgeTypes;
-            std::vector<std::pair<int32_t, int32_t>> dummy;
-            AnalyzeEdgeTopology(triangles, edgeTypes, dummy);
-            
-            // Build adjacency for boundary vertices
-            std::map<int32_t, std::vector<int32_t>> boundaryAdj;
-            for (auto const& et : edgeTypes)
+
+            // Build boundary adjacency directly from the ECM in one O(T) pass,
+            // without going through the full std::map-based AnalyzeEdgeTopology.
+            EdgeCountMap ecm = BuildEdgeCountMap(triangles);
+
+            std::unordered_map<int32_t, std::vector<int32_t>> boundaryAdj;
+            for (auto const& [edge, count] : ecm)
             {
-                if (et.second == EdgeType::Boundary)
+                if (count == 1)
                 {
-                    int32_t v0 = et.first.first;
-                    int32_t v1 = et.first.second;
-                    boundaryAdj[v0].push_back(v1);
-                    boundaryAdj[v1].push_back(v0);
+                    boundaryAdj[edge.first].push_back(edge.second);
+                    boundaryAdj[edge.second].push_back(edge.first);
                 }
             }
-            
-            // Extract loops using traversal
-            std::set<int32_t> visited;
-            
-            for (auto const& adj : boundaryAdj)
+
+            // Extract loops using O(1) unordered_set visited tracking.
+            std::unordered_set<int32_t> visited;
+            visited.reserve(boundaryAdj.size());
+
+            for (auto const& [startVertex, _] : boundaryAdj)
             {
-                int32_t startVertex = adj.first;
                 if (visited.count(startVertex)) continue;
-                
-                // Start a new loop
+
                 BoundaryLoop loop;
                 loop.vertices.push_back(startVertex);
                 visited.insert(startVertex);
-                
+
                 int32_t current = startVertex;
                 int32_t previous = -1;
-                
-                // Follow the boundary
+
                 while (true)
                 {
-                    // Find next unvisited neighbor
                     int32_t next = -1;
-                    for (int32_t neighbor : boundaryAdj[current])
+                    auto it = boundaryAdj.find(current);
+                    if (it != boundaryAdj.end())
                     {
-                        if (neighbor != previous)
+                        for (int32_t neighbor : it->second)
                         {
-                            next = neighbor;
-                            break;
+                            if (neighbor != previous)
+                            {
+                                next = neighbor;
+                                break;
+                            }
                         }
                     }
-                    
+
                     if (next == -1 || next == startVertex)
                     {
-                        break;  // Loop complete or dead end
+                        break;
                     }
-                    
+
                     if (visited.count(next))
                     {
-                        break;  // Already visited
+                        break;
                     }
-                    
+
                     loop.vertices.push_back(next);
                     visited.insert(next);
                     previous = current;
                     current = next;
                 }
-                
-                // Compute loop properties
+
                 if (loop.vertices.size() >= 3)
                 {
                     loop.centroid = Vector3<Real>::Zero();
@@ -1112,14 +1104,14 @@ namespace gte
                         loop.centroid += vertices[v];
                     }
                     loop.centroid /= static_cast<Real>(loop.vertices.size());
-                    
+
                     loop.perimeter = static_cast<Real>(0);
                     for (size_t i = 0; i < loop.vertices.size(); ++i)
                     {
                         size_t j = (i + 1) % loop.vertices.size();
                         loop.perimeter += Length(vertices[loop.vertices[j]] - vertices[loop.vertices[i]]);
                     }
-                    
+
                     loops.push_back(loop);
                 }
             }
@@ -1848,9 +1840,11 @@ namespace gte
         {
             candidates.clear();
             
-            // Early rejection using bounding spheres
-            Real centerDist = Length(comp1.centroid - comp2.centroid);
-            if (centerDist > comp1.boundingRadius + comp2.boundingRadius + threshold)
+            // Early rejection using squared bounding-sphere distance (avoids sqrt).
+            Vector3<Real> centDiff = comp1.centroid - comp2.centroid;
+            Real centerDistSq = Dot(centDiff, centDiff);
+            Real maxReach = comp1.boundingRadius + comp2.boundingRadius + threshold;
+            if (centerDistSq > maxReach * maxReach)
             {
                 return;
             }
@@ -2372,7 +2366,11 @@ namespace gte
                 std::cout << "\n=== Incremental Component Merging ===\n";
                 std::cout << "Initial components: " << components.size() << "\n";
             }
-            
+
+            // Build ECM once before the inner loop and update it in-place after each
+            // successful bridge.  This avoids O(T) rebuilds per inner iteration.
+            EdgeCountMap ecm = BuildEdgeCountMap(triangles);
+
             for (size_t iter = 0; iter < maxIterations; ++iter)
             {
                 if (components.size() <= 1)
@@ -2390,44 +2388,45 @@ namespace gte
                               << components.size() << " components\n";
                 }
                 
-                // Build list of ALL possible bridges between ALL component pairs
+                // Build list of ALL possible bridges between ALL component pairs.
+                // The bounding-sphere pre-filter efficiently skips distant pairs.
                 std::vector<std::tuple<Real, size_t, size_t, std::pair<int32_t, int32_t>, std::pair<int32_t, int32_t>>> allPossibleBridges;
-                
+
                 for (size_t i = 0; i < components.size(); ++i)
                 {
                     if (components[i].boundaryEdges.empty())
                     {
                         continue;
                     }
-                    
+
                     for (size_t j = i + 1; j < components.size(); ++j)
                     {
                         if (components[j].boundaryEdges.empty())
                         {
                             continue;
                         }
-                        
-                        // Quick distance check using centroids and bounding spheres
-                        Real centerDist = Length(components[i].centroid - components[j].centroid);
+
+                        // Quick bounding-sphere distance check using squared distance
+                        // to avoid sqrt() for pairs that will be rejected anyway.
+                        Vector3<Real> diff = components[i].centroid - components[j].centroid;
+                        Real centerDistSq = Dot(diff, diff);
                         Real maxReach = components[i].boundingRadius + components[j].boundingRadius + threshold;
-                        
-                        if (centerDist > maxReach)
+
+                        if (centerDistSq > maxReach * maxReach)
                         {
                             continue;  // Too far apart
                         }
-                        
+
                         // Find best edge pair between these components
                         std::vector<std::tuple<Real, std::pair<int32_t, int32_t>, std::pair<int32_t, int32_t>>> candidates;
                         FindCandidateEdgePairs(vertices, components[i], components[j], threshold, candidates);
-                        
+
                         if (!candidates.empty())
                         {
                             auto const& best = candidates[0];
-                            Real dist = std::get<0>(best);
-                            auto const& edge1 = std::get<1>(best);
-                            auto const& edge2 = std::get<2>(best);
-                            
-                            allPossibleBridges.push_back(std::make_tuple(dist, i, j, edge1, edge2));
+                            allPossibleBridges.emplace_back(
+                                std::get<0>(best), i, j,
+                                std::get<1>(best), std::get<2>(best));
                         }
                     }
                 }
@@ -2447,15 +2446,15 @@ namespace gte
                         return std::get<0>(a) < std::get<0>(b);
                     });
                 
-                // Track which components are being merged
-                std::map<size_t, size_t> componentMergeMap;  // Maps component index to its merge target
-                std::set<size_t> mergedComponents;
+                // Track which components are being merged — use vector<bool> for O(1) lookup.
+                std::vector<bool> mergedComponents(components.size(), false);
+                // mergeTarget[i] == i means component i is unmerged (identity).
+                // mergeTarget[i] == j (j != i) means component i was merged into j.
+                std::vector<size_t> mergeTarget(components.size());
+                std::iota(mergeTarget.begin(), mergeTarget.end(), 0);  // start as identity
                 std::vector<std::tuple<size_t, size_t, std::pair<int32_t, int32_t>, std::pair<int32_t, int32_t>>> successfulBridges;
                 size_t bridgesThisIter = 0;
-                
-                // Build a persistent edge count map once per iteration so that each
-                // bridge attempt is O(1) instead of O(T log T).
-                EdgeCountMap ecm = BuildEdgeCountMap(triangles);
+                // ECM is maintained across iterations — no rebuild needed here.
 
                 // Apply bridges greedily
                 for (auto const& bridge : allPossibleBridges)
@@ -2467,7 +2466,7 @@ namespace gte
                     auto const& edge2 = std::get<4>(bridge);
                     
                     // Skip if either component already merged
-                    if (mergedComponents.count(comp1) || mergedComponents.count(comp2))
+                    if (mergedComponents[comp1] || mergedComponents[comp2])
                     {
                         continue;
                     }
@@ -2475,9 +2474,9 @@ namespace gte
                     // Try to create bridge using the fast ECM-based local check (O(1))
                     if (BridgeBoundaryEdges(vertices, triangles, edge1, edge2, ecm))
                     {
-                        mergedComponents.insert(comp1);
-                        mergedComponents.insert(comp2);
-                        componentMergeMap[comp2] = comp1;  // comp2 merges into comp1
+                        mergedComponents[comp1] = true;
+                        mergedComponents[comp2] = true;
+                        mergeTarget[comp2] = comp1;  // comp2 merges into comp1
                         successfulBridges.push_back(std::make_tuple(comp1, comp2, edge1, edge2));
                         bridgesThisIter++;
                         totalBridges++;
@@ -2502,7 +2501,7 @@ namespace gte
                 
                 // INCREMENTAL UPDATE: Merge components and update their properties
                 std::vector<MeshComponent> newComponents;
-                std::set<size_t> processedComponents;
+                std::vector<bool> processedComponents(components.size(), false);
                 
                 for (auto const& bridgeInfo : successfulBridges)
                 {
@@ -2511,7 +2510,7 @@ namespace gte
                     auto const& edge1 = std::get<2>(bridgeInfo);
                     auto const& edge2 = std::get<3>(bridgeInfo);
                     
-                    if (processedComponents.count(target) == 0)
+                    if (!processedComponents[target])
                     {
                         // Merge source into target (incremental update)
                         components[target].MergeWith(components[source], vertices);
@@ -2522,29 +2521,20 @@ namespace gte
                         edgesToRemove.insert(edge2);
                         components[target].RemoveBoundaryEdges(edgesToRemove);
                         
-                        processedComponents.insert(target);
-                        processedComponents.insert(source);
+                        processedComponents[target] = true;
+                        processedComponents[source] = true;
                     }
                 }
                 
                 // Build new component list (keep non-merged and merged targets)
                 for (size_t i = 0; i < components.size(); ++i)
                 {
-                    // Skip if this component was merged into another
-                    bool wasMergedInto = false;
-                    for (auto const& pair : componentMergeMap)
+                    // Skip sources that were merged into a target
+                    if (mergeTarget[i] != i)
                     {
-                        if (pair.first == i && pair.second != i)
-                        {
-                            wasMergedInto = true;
-                            break;
-                        }
+                        continue;
                     }
-                    
-                    if (!wasMergedInto)
-                    {
-                        newComponents.push_back(std::move(components[i]));
-                    }
+                    newComponents.push_back(std::move(components[i]));
                 }
                 
                 components = std::move(newComponents);

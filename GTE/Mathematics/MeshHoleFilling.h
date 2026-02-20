@@ -151,7 +151,7 @@ namespace gte
             for (int64_t de : directedEdges)
             {
                 int32_t v0 = static_cast<int32_t>(de >> 32);
-                int32_t v1 = static_cast<int32_t>(de & 0xFFFFFFFF);
+                int32_t v1 = static_cast<int32_t>(static_cast<uint32_t>(de));
                 if (directedEdges.find(encodeEdge(v1, v0)) == directedEdges.end())
                 {
                     // (v0, v1) is a boundary directed edge
@@ -273,7 +273,9 @@ namespace gte
                     HoleBoundary hole;
                     int32_t curV = startV;
                     int32_t nxtV = firstNext;
-                    const int maxIter = 100000;
+                    // Safety cap: a valid boundary loop cannot be longer than the number
+                    // of boundary directed edges (one edge per loop vertex).
+                    const int maxIter = static_cast<int>(boundaryNext.size()) + 1;
                     int iter = 0;
                     bool closed = false;
 
