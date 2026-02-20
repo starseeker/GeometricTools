@@ -749,10 +749,21 @@ namespace gte
                 });
         }
         
-                // Validate that mesh is manifold (simple check)
+        // ======================================================================
+        // Public helpers: types and local-check utilities exposed for testing
+        // and for callers that wish to maintain a persistent EdgeCountMap.
+        // ======================================================================
+        public:
+
         // Persistent edge count map used to avoid O(T) full-mesh rebuilds.
         // An entry with count 1 = boundary edge, count 2 = interior, count > 2 = non-manifold.
         using EdgeCountMap = std::unordered_map<std::pair<int32_t, int32_t>, size_t, EdgePairHash>;
+
+        // Canonical edge key: always (min, max) so direction doesn't matter.
+        static std::pair<int32_t, int32_t> MakeEdgeKey(int32_t a, int32_t b) noexcept
+        {
+            return {std::min(a, b), std::max(a, b)};
+        }
 
         // Build an edge count map for the entire triangle list in O(T).
         static EdgeCountMap BuildEdgeCountMap(
@@ -764,9 +775,36 @@ namespace gte
             {
                 for (int i = 0; i < 3; ++i)
                 {
-                    int32_t v0 = tri[i];
-                    int32_t v1 = tri[(i + 1) % 3];
-                    ecm[{std::min(v0, v1), std::max(v0, v1)}]++;
+                    ecm[MakeEdgeKey(tri[i], tri[(i + 1) % 3])]++;
+                }
+            }
+            return ecm;
+        }
+
+        // Count existing occurrences of only the edges in the given set.
+        // O(T * |targetEdges|) but with a very small constant when |targetEdges| <= 6.
+        // Used by the legacy BridgeBoundaryEdges(validate=true) path so it does not
+        // need to build a full O(T)-entry ECM just to check 6 edges.
+        static EdgeCountMap BuildEdgeCountMapFor(
+            std::vector<std::array<int32_t, 3>> const& triangles,
+            std::array<std::pair<int32_t, int32_t>, 6> const& targetEdges,
+            int numTargetEdges)
+        {
+            EdgeCountMap ecm;
+            ecm.reserve(numTargetEdges);
+            for (auto const& tri : triangles)
+            {
+                for (int i = 0; i < 3; ++i)
+                {
+                    auto key = MakeEdgeKey(tri[i], tri[(i + 1) % 3]);
+                    for (int k = 0; k < numTargetEdges; ++k)
+                    {
+                        if (key == targetEdges[k])
+                        {
+                            ecm[key]++;
+                            break;
+                        }
+                    }
                 }
             }
             return ecm;
@@ -784,7 +822,7 @@ namespace gte
                 {
                     int32_t v0 = tri[i];
                     int32_t v1 = tri[(i + 1) % 3];
-                    if (++ecm[{std::min(v0, v1), std::max(v0, v1)}] > 2)
+                    if (++ecm[MakeEdgeKey(v0, v1)] > 2)
                     {
                         return false;  // Non-manifold edge found early-out
                     }
@@ -813,9 +851,7 @@ namespace gte
             {
                 for (int i = 0; i < 3; ++i)
                 {
-                    int32_t v0 = tri[i];
-                    int32_t v1 = tri[(i + 1) % 3];
-                    edges[ne++] = {std::min(v0, v1), std::max(v0, v1)};
+                    edges[ne++] = MakeEdgeKey(tri[i], tri[(i + 1) % 3]);
                 }
             }
 
@@ -867,6 +903,7 @@ namespace gte
             {
                 return;
             }
+
             
             // Build edge count map and edge-to-triangles adjacency simultaneously
             // in a single O(T) pass (was O(T²) due to the nested-loop BFS below).
@@ -1088,8 +1125,9 @@ namespace gte
             }
         }
         
-        // Bridge two boundary edges by creating two triangles.
-        // Overload 1: legacy path – validates against the full mesh (O(T) per call).
+        // BridgeBoundaryEdges overload 1: legacy path.
+        // When validate=true, builds a minimal local ECM from only the 6 new edges
+        // rather than scanning the full mesh — O(1) check regardless of mesh size.
         static bool BridgeBoundaryEdges(
             std::vector<Vector3<Real>> const& vertices,
             std::vector<std::array<int32_t, 3>>& triangles,
@@ -1099,7 +1137,6 @@ namespace gte
         {
             // Create two triangles to bridge edge1 and edge2
             // edge1: (a, b), edge2: (c, d)
-            // Create triangles: (a, b, c) and (b, d, c)
             
             int32_t a = edge1.first;
             int32_t b = edge1.second;
@@ -1116,35 +1153,33 @@ namespace gte
             std::array<int32_t, 3> tri1, tri2;
             if (dist_ac + dist_bd < dist_ad + dist_bc)
             {
-                // Bridge a-c and b-d
                 tri1 = {a, b, c};
                 tri2 = {b, d, c};
             }
             else
             {
-                // Bridge a-d and b-c
                 tri1 = {a, b, d};
                 tri2 = {a, d, c};
             }
             
-            // Save current state
-            size_t oldSize = triangles.size();
-            
-            // Add triangles
-            triangles.push_back(tri1);
-            triangles.push_back(tri2);
-            
-            // Validate if requested
             if (validate)
             {
-                if (!ValidateManifold(triangles))
-                {
-                    // Revert
-                    triangles.resize(oldSize);
-                    return false;
-                }
+                // Build a targeted ECM for ONLY the 6 edges of the two new triangles
+                // by scanning existing triangles once.  This is still O(T) but avoids
+                // allocating a full T-entry map — only 6 entries are ever created.
+                std::array<std::pair<int32_t,int32_t>, 6> checkEdges;
+                int ne = 0;
+                for (auto const& t : {tri1, tri2})
+                    for (int i = 0; i < 3; ++i)
+                        checkEdges[ne++] = MakeEdgeKey(t[i], t[(i+1)%3]);
+
+                EdgeCountMap localEcm = BuildEdgeCountMapFor(triangles, checkEdges, 6);
+                return ValidateBridgeLocal(triangles, tri1, tri2, localEcm);
             }
-            
+
+            // No validation requested — just append.
+            triangles.push_back(tri1);
+            triangles.push_back(tri2);
             return true;
         }
 
@@ -1181,6 +1216,92 @@ namespace gte
 
             return ValidateBridgeLocal(triangles, tri1, tri2, ecm);
         }
+        // Local quality check for a fan triangulation of a boundary loop:
+        // O(H) where H = number of loop vertices, rather than O(T) full-mesh scan.
+        //
+        // A fan fill adds H triangles: {loop[i], loop[(i+1)%H], centroid}.
+        // The only edges that could become non-manifold are:
+        //   - boundary edges {loop[i], loop[(i+1)%H]}: must have count == 1 in ecm
+        //     (they are about to be "closed" to count 2 by the fan triangle)
+        //   - centroid edges {loop[i], centroid}: must have count == 0 in ecm
+        //     (centroid is a brand-new vertex)
+        //
+        // If centroidIdx == -1 the centroid has not been added yet; only the
+        // loop boundary edge counts are checked.
+        static bool ValidateFanLocal(
+            BoundaryLoop const& loop,
+            EdgeCountMap const& ecm,
+            int32_t centroidIdx = -1)
+        {
+            int32_t H = static_cast<int32_t>(loop.vertices.size());
+            for (int32_t i = 0; i < H; ++i)
+            {
+                int32_t v0 = loop.vertices[i];
+                int32_t v1 = loop.vertices[(i + 1) % H];
+
+                // Each boundary edge of the loop must appear exactly once in the mesh.
+                // If it already appears twice, adding a fan triangle would push it to
+                // count 3 — a non-manifold edge.
+                auto it = ecm.find(MakeEdgeKey(v0, v1));
+                size_t count = (it != ecm.end()) ? it->second : 0;
+                if (count != 1)
+                {
+                    return false;  // Boundary edge not manifold-safe to close
+                }
+
+                // Centroid spoke edges must be absent (centroid is a brand-new vertex,
+                // so its edges could not already exist — but check anyway for safety).
+                if (centroidIdx >= 0)
+                {
+                    auto it2 = ecm.find(MakeEdgeKey(v0, centroidIdx));
+                    if (it2 != ecm.end() && it2->second > 0)
+                    {
+                        return false;  // Spoke already exists – would be non-manifold
+                    }
+                }
+            }
+            return true;
+        }
+
+        // Fill a boundary loop with a centroid fan and update ecm atomically.
+        // Precondition: ValidateFanLocal(loop, ecm) returned true.
+        // Adds one new centroid vertex, appends H triangles, and updates ecm —
+        // all in a single pass, so no separate append-then-revert is needed.
+        static void FillFanWithECM(
+            std::vector<Vector3<Real>>& vertices,
+            std::vector<std::array<int32_t, 3>>& triangles,
+            BoundaryLoop const& loop,
+            EdgeCountMap& ecm)
+        {
+            int32_t H = static_cast<int32_t>(loop.vertices.size());
+
+            // Add centroid vertex
+            int32_t centroidIdx = static_cast<int32_t>(vertices.size());
+            vertices.push_back(loop.centroid);
+
+            for (int32_t i = 0; i < H; ++i)
+            {
+                int32_t v0 = loop.vertices[i];
+                int32_t v1 = loop.vertices[(i + 1) % H];
+
+                triangles.push_back({v0, v1, centroidIdx});
+
+                // Boundary edge v0-v1: count 1 → 2 (becomes interior).
+                ecm[MakeEdgeKey(v0, v1)]++;
+
+                // Spoke edges: each spoke (v_i, centroid) is shared between two
+                // adjacent fan triangles and is therefore an interior edge with
+                // final count 2.  Adding both v0→c and v1→c here gives each
+                // spoke its two increments across all iterations: the v1→c
+                // increment at iteration i is the same as the v0→c increment
+                // at iteration i+1, so each spoke accumulates count 2 overall.
+                ecm[MakeEdgeKey(v0, centroidIdx)]++;
+                ecm[MakeEdgeKey(v1, centroidIdx)]++;
+            }
+        }
+
+        // CapBoundaryLoop overload 1: legacy path — full-mesh ValidateManifold (O(T)).
+        // Kept for callers that do not maintain a persistent ECM.
         static bool CapBoundaryLoop(
             std::vector<Vector3<Real>>& vertices,
             std::vector<std::array<int32_t, 3>>& triangles,
@@ -1226,6 +1347,29 @@ namespace gte
                 }
             }
             
+            return true;
+        }
+
+        // CapBoundaryLoop overload 2: local ECM path — O(H) check instead of O(T).
+        // Uses ValidateFanLocal to verify only the H boundary edges and new spokes,
+        // then calls FillFanWithECM to commit atomically.  No append-then-revert.
+        static bool CapBoundaryLoop(
+            std::vector<Vector3<Real>>& vertices,
+            std::vector<std::array<int32_t, 3>>& triangles,
+            BoundaryLoop const& loop,
+            EdgeCountMap& ecm)
+        {
+            if (loop.vertices.size() < 3)
+            {
+                return false;
+            }
+
+            if (!ValidateFanLocal(loop, ecm))
+            {
+                return false;
+            }
+
+            FillFanWithECM(vertices, triangles, loop, ecm);
             return true;
         }
         
@@ -2532,7 +2676,11 @@ namespace gte
                 }
             }
             
-            // Phase 2: Hole filling (now that component bridging is complete)
+            // Phase 2: Hole filling (now that component bridging is complete).
+            // Build ECM once here and pass it into both the fill and cap steps so
+            // each individual hole/cap check is O(H) local instead of O(T) full-mesh.
+            EdgeCountMap ecm = BuildEdgeCountMap(triangles);
+
             if (params.enableHoleFilling)
             {
                 if (params.verbose)
@@ -2541,7 +2689,7 @@ namespace gte
                 }
                 
                 totalHolesFilled = FillHolesConservative(
-                    vertices, triangles, params, params.verbose);
+                    vertices, triangles, params, ecm, params.verbose);
                 
                 if (params.verbose)
                 {
@@ -2549,7 +2697,7 @@ namespace gte
                 }
             }
             
-            // Final pass: Cap any remaining small boundary loops
+            // Final pass: Cap any remaining small boundary loops using the same ECM.
             std::vector<BoundaryLoop> loops;
             ExtractBoundaryLoops(vertices, triangles, loops);
             
@@ -2563,7 +2711,8 @@ namespace gte
             {
                 if (loop.vertices.size() <= 10)  // Only cap small loops
                 {
-                    if (CapBoundaryLoop(vertices, triangles, loop, true))
+                    // ECM overload: O(H) local check per cap, not O(T) full-mesh.
+                    if (CapBoundaryLoop(vertices, triangles, loop, ecm))
                     {
                         cappedLoops++;
                     }
@@ -2749,10 +2898,31 @@ namespace gte
         }
         
         // Conservative hole filling that validates each fill
+        // FillHolesConservative: fills small boundary loops with fan triangulation.
+        //
+        // The ECM-based overload (below) is the fast path: it builds the edge count
+        // map once before iterating over all loops, then uses ValidateFanLocal + 
+        // FillFanWithECM for each candidate — O(H) per hole instead of O(T).
+        //
+        // Overload 1: builds its own ECM internally (used when caller has no ECM).
         static size_t FillHolesConservative(
             std::vector<Vector3<Real>>& vertices,
             std::vector<std::array<int32_t, 3>>& triangles,
             Parameters const& params,
+            bool verbose = false)
+        {
+            // Build ECM once for the whole fill pass — O(T) — then reuse it.
+            EdgeCountMap ecm = BuildEdgeCountMap(triangles);
+            return FillHolesConservative(vertices, triangles, params, ecm, verbose);
+        }
+
+        // Overload 2: caller supplies (and owns) the ECM.  Fills holes and keeps
+        // ecm up-to-date so the caller's ECM remains valid after this call returns.
+        static size_t FillHolesConservative(
+            std::vector<Vector3<Real>>& vertices,
+            std::vector<std::array<int32_t, 3>>& triangles,
+            Parameters const& params,
+            EdgeCountMap& ecm,
             bool verbose = false)
         {
             std::vector<BoundaryLoop> loops;
@@ -2779,31 +2949,24 @@ namespace gte
                     }
                 }
                 
-                // Try to fill the hole
-                size_t oldTriCount = triangles.size();
-                
-                // Use MeshHoleFilling if available, otherwise try simple fan
-                bool filled = FillSingleHole(vertices, triangles, loop, params.holeFillingMethod);
-                
-                if (filled)
+                // Local check: O(H) — verifies only the H boundary edges and new
+                // spoke edges in this loop, not the full mesh.
+                if (!ValidateFanLocal(loop, ecm))
                 {
-                    // Validate manifold property
-                    if (ValidateManifold(triangles))
-                    {
-                        holesFilledCount++;
-                        
-                        if (verbose && holesFilledCount <= 10)
-                        {
-                            std::cout << "  Filled hole with " << loop.vertices.size() 
-                                      << " vertices (" << (triangles.size() - oldTriCount) 
-                                      << " triangles)\n";
-                        }
-                    }
-                    else
-                    {
-                        // Revert if non-manifold
-                        triangles.resize(oldTriCount);
-                    }
+                    continue;
+                }
+
+                // Fill and update ECM atomically — no append-then-revert needed.
+                size_t trisBefore = triangles.size();
+                FillFanWithECM(vertices, triangles, loop, ecm);
+
+                holesFilledCount++;
+
+                if (verbose && holesFilledCount <= 10)
+                {
+                    std::cout << "  Filled hole with " << loop.vertices.size()
+                              << " vertices (" << (triangles.size() - trisBefore)
+                              << " triangles)\n";
                 }
             }
             

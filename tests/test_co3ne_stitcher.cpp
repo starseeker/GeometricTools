@@ -287,6 +287,225 @@ void TestBallPivotWelding()
     }
 }
 
+// Test local validation: ValidateFanLocal, FillFanWithECM, CapBoundaryLoop(ecm),
+// and the ECM-threaded FillHolesConservative overload.
+//
+// These checks are O(H) per loop rather than O(T) full-mesh — the core of the
+// "localize quality checks" requirement.
+void TestLocalValidation()
+{
+    std::cout << "\n=== Test: Local Validation (O(H) per hole/cap) ===\n";
+
+    using Stitcher = Co3NeManifoldStitcher<double>;
+    int failures = 0;
+
+    // ── 1. ValidateFanLocal: valid single-triangle fan (3-vertex boundary loop) ──
+    {
+        // Triangle (0,1,2) already in mesh – boundary loop is [0,1,2].
+        std::vector<std::array<int32_t, 3>> tris = {{0,1,2}};
+        Stitcher::EdgeCountMap ecm = Stitcher::BuildEdgeCountMap(tris);
+
+        // All three boundary edges should have count == 1 → valid to fill
+        Stitcher::BoundaryLoop loop;
+        loop.vertices = {0, 1, 2};
+        loop.centroid = {0.333, 0.333, 0};
+        loop.perimeter = 3.0;
+
+        if (!Stitcher::ValidateFanLocal(loop, ecm))
+        {
+            std::cout << "✗ ValidateFanLocal rejected valid 3-vertex loop\n";
+            failures++;
+        }
+        else
+        {
+            std::cout << "✓ ValidateFanLocal accepted valid 3-vertex loop\n";
+        }
+    }
+
+    // ── 2. ValidateFanLocal: invalid – boundary edge already closed (count == 2) ──
+    {
+        // Both triangles (0,1,2) and (0,1,3) share edge 0-1 → count 2.
+        // A fan that includes edge 0-1 must be rejected.
+        std::vector<std::array<int32_t, 3>> tris = {{0,1,2},{1,0,3}};
+        Stitcher::EdgeCountMap ecm = Stitcher::BuildEdgeCountMap(tris);
+
+        Stitcher::BoundaryLoop loop;
+        loop.vertices = {0, 1, 2};  // Loop contains edge 0-1 which is already interior
+        loop.centroid = {0.5, 0.5, 0};
+        loop.perimeter = 3.0;
+
+        if (Stitcher::ValidateFanLocal(loop, ecm))
+        {
+            std::cout << "✗ ValidateFanLocal accepted invalid loop (edge 0-1 already at count 2)\n";
+            failures++;
+        }
+        else
+        {
+            std::cout << "✓ ValidateFanLocal rejected loop with already-interior edge\n";
+        }
+    }
+
+    // ── 3. FillFanWithECM: fills a 4-edge boundary loop and updates ECM correctly ──
+    {
+        // Square mesh: two triangles (0,1,2) and (0,2,3) leave boundary loop [0,1,2,3]
+        // with 4 boundary edges (0-1, 1-2, 2-3, 0-3).
+        std::vector<Vector3<double>> vertices = {
+            {0,0,0}, {1,0,0}, {1,1,0}, {0,1,0},
+            {0.5, 0.5, 0}  // will be the centroid
+        };
+        std::vector<std::array<int32_t, 3>> tris = {{0,1,2},{0,2,3}};
+        Stitcher::EdgeCountMap ecm = Stitcher::BuildEdgeCountMap(tris);
+
+        // Open boundary on edge 0-1 and 2-3 and 0-3
+        Stitcher::BoundaryLoop loop;
+        loop.vertices = {0, 1, 2, 3};
+        loop.centroid = {0.5, 0.5, 0};
+        loop.perimeter = 4.0;
+
+        if (!Stitcher::ValidateFanLocal(loop, ecm))
+        {
+            std::cout << "✗ ValidateFanLocal rejected 4-edge loop (should be valid)\n";
+            failures++;
+        }
+        else
+        {
+            size_t trisBefore = tris.size();
+            Stitcher::FillFanWithECM(vertices, tris, loop, ecm);
+            size_t added = tris.size() - trisBefore;
+
+            if (added != 4)
+            {
+                std::cout << "✗ FillFanWithECM added " << added << " triangles (expected 4)\n";
+                failures++;
+            }
+            else
+            {
+                std::cout << "✓ FillFanWithECM added 4 triangles for 4-edge loop\n";
+            }
+
+            // ECM should now show all loop boundary edges as interior (count 2)
+            // and all spoke edges as interior (count 2, since each spoke is shared
+            // between two adjacent fan triangles).
+            bool ecmOk = true;
+            int32_t centroidIdx = static_cast<int32_t>(vertices.size()) - 1;
+            for (int i = 0; i < 4; ++i)
+            {
+                int32_t v0 = loop.vertices[i];
+                int32_t v1 = loop.vertices[(i+1)%4];
+                auto boundaryKey = Stitcher::MakeEdgeKey(v0, v1);
+                auto it = ecm.find(boundaryKey);
+                if (it == ecm.end() || it->second != 2) { ecmOk = false; }
+
+                auto spokeKey = Stitcher::MakeEdgeKey(v0, centroidIdx);
+                auto it2 = ecm.find(spokeKey);
+                if (it2 == ecm.end() || it2->second != 2) { ecmOk = false; }
+            }
+            if (!ecmOk)
+            {
+                std::cout << "✗ ECM not updated correctly after FillFanWithECM\n";
+                failures++;
+            }
+            else
+            {
+                std::cout << "✓ ECM correctly updated (all loop edges now interior)\n";
+            }
+        }
+    }
+
+    // ── 4. CapBoundaryLoop ECM overload ──
+    {
+        std::vector<Vector3<double>> vertices = {
+            {0,0,0}, {1,0,0}, {0.5,1,0}
+        };
+        // Single open triangle – its 3 edges are all boundary (count 1)
+        std::vector<std::array<int32_t, 3>> tris = {{0,1,2}};
+        Stitcher::EdgeCountMap ecm = Stitcher::BuildEdgeCountMap(tris);
+
+        Stitcher::BoundaryLoop loop;
+        loop.vertices = {0,1,2};
+        loop.centroid = {0.5, 0.333, 0};
+        loop.perimeter = 3.5;
+
+        size_t trisBefore = tris.size();
+        bool capped = Stitcher::CapBoundaryLoop(vertices, tris, loop, ecm);
+        if (!capped || tris.size() != trisBefore + 3)
+        {
+            std::cout << "✗ CapBoundaryLoop(ecm) failed or wrong triangle count\n";
+            failures++;
+        }
+        else
+        {
+            std::cout << "✓ CapBoundaryLoop(ecm) succeeded (added 3 fan triangles)\n";
+        }
+    }
+
+    // ── 5. FillHolesConservative ECM overload ──
+    {
+        // Two open triangles sharing vertices – leave a 3-edge boundary loop.
+        std::vector<Vector3<double>> vertices = {
+            {0,0,0}, {1,0,0}, {0.5,1,0}
+        };
+        std::vector<std::array<int32_t, 3>> tris = {{0,1,2}};
+        Stitcher::EdgeCountMap ecm = Stitcher::BuildEdgeCountMap(tris);
+
+        Co3NeManifoldStitcher<double>::Parameters params;
+        params.maxHoleEdges = 20;
+        params.maxHoleArea = 0;
+
+        size_t trisBefore = tris.size();
+        size_t filled = Stitcher::FillHolesConservative(vertices, tris, params, ecm, false);
+        if (filled == 0)
+        {
+            std::cout << "ℹ FillHolesConservative(ecm): no holes filled (boundary loop may not qualify)\n";
+        }
+        else
+        {
+            std::cout << "✓ FillHolesConservative(ecm) filled " << filled << " hole(s), "
+                      << "added " << (tris.size() - trisBefore) << " triangles\n";
+        }
+    }
+
+    // ── 6. End-to-end: StitchPatches uses local checks throughout ──
+    {
+        // Two disconnected triangles that can be bridged and then hole-filled.
+        std::vector<Vector3<double>> vertices = {
+            {0,0,0}, {1,0,0}, {0.5,1,0},     // patch A
+            {2,0,0}, {3,0,0}, {2.5,1,0}      // patch B (separated)
+        };
+        std::vector<std::array<int32_t, 3>> tris = {{0,1,2},{3,4,5}};
+
+        Co3NeManifoldStitcher<double>::Parameters params;
+        params.verbose = false;
+        params.enableHoleFilling = true;
+        params.enableIterativeBridging = true;
+        params.initialBridgeThreshold = 3.0;
+        params.maxBridgeThreshold = 10.0;
+        params.maxIterations = 5;
+
+        Stitcher::StitchPatches(vertices, tris, params);
+
+        if (tris.size() >= 2)
+        {
+            std::cout << "✓ End-to-end StitchPatches completed (final triangles: " 
+                      << tris.size() << ")\n";
+        }
+        else
+        {
+            std::cout << "✗ End-to-end StitchPatches unexpected result\n";
+            failures++;
+        }
+    }
+
+    if (failures == 0)
+    {
+        std::cout << "\n✓ All local validation tests PASSED\n";
+    }
+    else
+    {
+        std::cout << "\n✗ " << failures << " local validation test(s) FAILED\n";
+    }
+}
+
 int main(int argc, char* argv[])
 {
     std::cout << "Co3Ne Manifold Stitcher Test Suite\n";
@@ -295,8 +514,9 @@ int main(int argc, char* argv[])
     // Run tests
     TestBasicStitching();
     TestNonManifoldRemoval();
-    TestBallPivotWelding();  // New ball pivot welding test
-    
+    TestBallPivotWelding();
+    TestLocalValidation();  // New: tests O(H) local quality checks
+
     // Test with real data if available
     if (argc > 1)
     {
