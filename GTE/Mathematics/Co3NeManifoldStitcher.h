@@ -37,6 +37,7 @@
 #include <set>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <memory>
 
@@ -137,6 +138,7 @@ namespace gte
             // General parameters
             bool removeNonManifoldEdges;  // Remove triangles causing non-manifold edges
             bool removeSmallClosedComponents;  // Remove small closed sub-meshes (artifacts)
+            bool absorbSmallClosedComponents;  // Insert artifact vertices into main mesh
             size_t smallClosedComponentThreshold;  // Max triangles for "small" closed component
             bool verbose;
             
@@ -163,6 +165,7 @@ namespace gte
                 , targetSingleComponent(true)
                 , removeNonManifoldEdges(true)
                 , removeSmallClosedComponents(true)
+                , absorbSmallClosedComponents(true)
                 , smallClosedComponentThreshold(20)  // Remove closed sub-meshes ≤20 triangles
                 , verbose(false)
             {
@@ -279,16 +282,29 @@ namespace gte
                 }
             }  // end verbose Steps 3 & 4a
 
-            // Step 3b: Remove small closed components that are Co3Ne reconstruction
+            // Step 3b: Process small closed components that are Co3Ne reconstruction
             // artifacts (e.g. the 8-triangle octahedral fragments produced for dense
             // local point clusters).  These are identified early — before any hole
             // filling — because genuine closed surfaces added later by the hole
             // fillers should not be treated as artifacts.
+            //
+            // If absorption is enabled (default), each artifact vertex is inserted
+            // into the closest normal-aligned triangle of the main mesh via triangle
+            // splitting (Steiner point insertion).  Otherwise the component is simply
+            // discarded.
             if (params.removeSmallClosedComponents
                 && params.smallClosedComponentThreshold > 0)
             {
-                RemoveSmallClosedComponents(triangles,
-                    params.smallClosedComponentThreshold, params.verbose);
+                if (params.absorbSmallClosedComponents)
+                {
+                    AbsorbSmallClosedComponents(vertices, triangles,
+                        params.smallClosedComponentThreshold, params.verbose);
+                }
+                else
+                {
+                    RemoveSmallClosedComponents(triangles,
+                        params.smallClosedComponentThreshold, params.verbose);
+                }
             }
 
             // Step 4: Fill holes using existing hole filling (with validation)
@@ -3258,6 +3274,341 @@ namespace gte
         // contain at most maxTriangles triangles.  These fragments are artifacts
         // produced by Co3Ne for dense local regions; they have no boundary to bridge
         // with and would prevent the final closed-manifold check from passing.
+        // AbsorbSmallClosedComponents:
+        // Instead of discarding small closed artifact sub-meshes, insert their
+        // vertices into the main mesh via triangle splitting (Steiner point
+        // insertion).  For each artifact vertex P:
+        //   1. Compute P's normal from its incident artifact triangles.
+        //   2. Find the nearest-centroid triangle in the main mesh whose normal
+        //      aligns with P's normal (dot product > 0).
+        //   3. Split that triangle {A,B,C} into {A,B,P}, {B,C,P}, {C,A,P},
+        //      replacing the original triangle in-place.
+        // After all artifact vertices are absorbed the artifact triangles are
+        // discarded.  Vertices referenced only by artifact triangles (i.e. the
+        // artifact's interior vertices that were NOT absorbed) are left orphaned
+        // in the vertex array; they are harmless and will be compacted later if
+        // the caller calls RemoveIsolatedVertices.
+        static void AbsorbSmallClosedComponents(
+            std::vector<Vector3<Real>>& vertices,
+            std::vector<std::array<int32_t, 3>>& triangles,
+            size_t maxTriangles,
+            bool verbose = false)
+        {
+            if (triangles.empty()) return;
+
+            // ---------------------------------------------------------------
+            // Step 1: Identify small closed components (same logic as Remove).
+            // ---------------------------------------------------------------
+            std::unordered_map<std::pair<int32_t, int32_t>,
+                               std::vector<int32_t>, EdgePairHash> edgeToTri;
+            edgeToTri.reserve(triangles.size() * 3);
+            for (int32_t ti = 0; ti < static_cast<int32_t>(triangles.size()); ++ti)
+            {
+                auto const& t = triangles[ti];
+                for (int i = 0; i < 3; ++i)
+                {
+                    auto e = std::make_pair(std::min(t[i], t[(i + 1) % 3]),
+                                            std::max(t[i], t[(i + 1) % 3]));
+                    edgeToTri[e].push_back(ti);
+                }
+            }
+
+            std::vector<bool> visited(triangles.size(), false);
+
+            // artifact triangles: indices to discard after absorption
+            std::vector<bool> isArtifact(triangles.size(), false);
+
+            // Per-vertex normal accumulator for artifact vertices
+            std::unordered_map<int32_t, Vector3<Real>> vertNormalAcc;
+            std::unordered_map<int32_t, int32_t>       vertNormalCnt;
+
+            size_t numArtifactComps = 0;
+            size_t numArtifactVerts = 0;
+
+            for (size_t seed = 0; seed < triangles.size(); ++seed)
+            {
+                if (visited[seed]) continue;
+
+                std::vector<size_t> comp;
+                std::vector<int32_t> stack = {static_cast<int32_t>(seed)};
+                visited[seed] = true;
+                size_t boundaryEdges = 0;
+
+                while (!stack.empty())
+                {
+                    int32_t cur = stack.back(); stack.pop_back();
+                    comp.push_back(static_cast<size_t>(cur));
+                    auto const& t = triangles[cur];
+                    for (int i = 0; i < 3; ++i)
+                    {
+                        auto e = std::make_pair(std::min(t[i], t[(i + 1) % 3]),
+                                                std::max(t[i], t[(i + 1) % 3]));
+                        auto it = edgeToTri.find(e);
+                        if (it == edgeToTri.end()) continue;
+                        if (it->second.size() == 1) ++boundaryEdges;
+                        for (int32_t nb : it->second)
+                        {
+                            if (!visited[nb])
+                            {
+                                visited[nb] = true;
+                                stack.push_back(nb);
+                            }
+                        }
+                    }
+                }
+
+                if (boundaryEdges != 0 || comp.size() > maxTriangles)
+                    continue;
+
+                // This is a small closed artifact component.
+                ++numArtifactComps;
+                for (size_t ti : comp)
+                {
+                    isArtifact[ti] = true;
+                    auto const& t = triangles[ti];
+                    // Accumulate triangle normal contribution onto each vertex.
+                    Vector3<Real> edge0 = vertices[t[1]] - vertices[t[0]];
+                    Vector3<Real> edge1 = vertices[t[2]] - vertices[t[0]];
+                    Vector3<Real> triNormal = Cross(edge0, edge1);
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        vertNormalAcc[t[k]] += triNormal;
+                        vertNormalCnt[t[k]]++;
+                    }
+                }
+            }
+
+            if (numArtifactComps == 0) return;
+
+            // Collect unique artifact vertex indices and normalise their normals.
+            std::vector<int32_t> artifactVerts;
+            artifactVerts.reserve(vertNormalAcc.size());
+            for (auto& [vi, nrm] : vertNormalAcc)
+            {
+                Normalize(nrm);
+                artifactVerts.push_back(vi);
+            }
+            numArtifactVerts = artifactVerts.size();
+
+            // Build set of vertices already present in the main mesh so we can
+            // quickly skip artifact vertices that are pinch-point shared vertices
+            // (inserting such a vertex would create non-manifold spoke edges).
+            std::unordered_set<int32_t> mainMeshVerts;
+            mainMeshVerts.reserve(triangles.size() * 3);
+            for (int32_t ti = 0; ti < static_cast<int32_t>(triangles.size()); ++ti)
+            {
+                if (isArtifact[ti]) continue;
+                for (int k = 0; k < 3; ++k)
+                    mainMeshVerts.insert(triangles[ti][k]);
+            }
+
+            if (verbose)
+            {
+                std::cout << "AbsorbSmallClosedComponents: " << numArtifactComps
+                          << " artifact component(s), "
+                          << numArtifactVerts << " vertex(es) to absorb\n";
+            }
+
+            // ---------------------------------------------------------------
+            // Step 2: Build centroid NNTree over non-artifact triangles.
+            // ---------------------------------------------------------------
+            // Record the mapping: NNTree index → original triangle index.
+            std::vector<PositionSite<3, Real>> triCentroidSites;
+            std::vector<int32_t>               triCentroidIdx;
+            triCentroidSites.reserve(triangles.size());
+            triCentroidIdx.reserve(triCentroidSites.capacity());
+
+            for (int32_t ti = 0; ti < static_cast<int32_t>(triangles.size()); ++ti)
+            {
+                if (isArtifact[ti]) continue;
+                auto const& t = triangles[ti];
+                Vector3<Real> centroid =
+                    (vertices[t[0]] + vertices[t[1]] + vertices[t[2]])
+                    / static_cast<Real>(3);
+                triCentroidSites.emplace_back(centroid);
+                triCentroidIdx.push_back(ti);
+            }
+
+            if (triCentroidSites.empty())
+            {
+                // No main-mesh triangles — fall back to simple removal.
+                RemoveSmallClosedComponents(triangles, maxTriangles, verbose);
+                return;
+            }
+
+            static constexpr int32_t MaxLeafSz = 10;
+            static constexpr int32_t MaxLvl    = 24;
+            NearestNeighborQuery<3, Real, PositionSite<3, Real>> centTree(
+                triCentroidSites, MaxLeafSz, MaxLvl);
+
+            // Pre-compute normals for non-artifact triangles (needed for alignment check).
+            // Stored indexed by original triangle index.
+            std::vector<Vector3<Real>> triNormals(triangles.size(),
+                Vector3<Real>{static_cast<Real>(0), static_cast<Real>(0), static_cast<Real>(0)});
+            for (int32_t ti = 0; ti < static_cast<int32_t>(triangles.size()); ++ti)
+            {
+                if (isArtifact[ti]) continue;
+                auto const& t = triangles[ti];
+                Vector3<Real> e0 = vertices[t[1]] - vertices[t[0]];
+                Vector3<Real> e1 = vertices[t[2]] - vertices[t[0]];
+                triNormals[ti] = Cross(e0, e1);
+                // Keep unnormalised for now – we only need direction.
+            }
+
+            // ---------------------------------------------------------------
+            // Step 3: For each artifact vertex, find best triangle and split.
+            // We query K nearest centroids and pick the best normal-aligned one.
+            // ---------------------------------------------------------------
+            static constexpr int32_t K = 16;
+            std::array<int32_t, K> nearbyBuf;
+
+            // Track which triangles have already been split so we do not try to
+            // split the same triangle twice in this pass (after splitting, the
+            // original index no longer names a single triangle — the first
+            // replacement was already put there in-place, but the NNTree still
+            // refers to the pre-split centroid).
+            std::unordered_set<int32_t> splitTriangles;
+
+            size_t absorbed = 0;
+            size_t discarded = 0;
+
+            for (int32_t vi : artifactVerts)
+            {
+                // If vi already appears in the main mesh (pinch-point vertex),
+                // inserting it again would create non-manifold spoke edges.
+                if (mainMeshVerts.count(vi))
+                {
+                    ++discarded;
+                    continue;
+                }
+
+                Vector3<Real> const& P   = vertices[vi];
+                Vector3<Real> const& Pnrm = vertNormalAcc[vi];  // already normalised
+
+                // Query K nearest triangle centroids.
+                int32_t found = centTree.template FindNeighbors<K>(
+                    P, std::numeric_limits<Real>::max(), nearbyBuf);
+
+                int32_t bestTri = -1;
+                Real    bestDist = std::numeric_limits<Real>::max();
+
+                for (int32_t k = 0; k < found; ++k)
+                {
+                    int32_t siteIdx = nearbyBuf[k];
+                    int32_t ti = triCentroidIdx[siteIdx];
+
+                    if (splitTriangles.count(ti)) continue;
+
+                    // Normal alignment: require dot > 0 (same hemisphere).
+                    Vector3<Real> const& tnrm = triNormals[ti];
+                    Real dot = Dot(Pnrm, tnrm);
+                    if (dot <= static_cast<Real>(0)) continue;
+
+                    // Distance from P to triangle centroid.
+                    Real d = Length(triCentroidSites[siteIdx].position - P);
+                    if (d < bestDist)
+                    {
+                        bestDist = d;
+                        bestTri  = ti;
+                    }
+                }
+
+                if (bestTri < 0)
+                {
+                    // No normal-aligned triangle found — simply discard this vertex.
+                    ++discarded;
+                    continue;
+                }
+
+                // Split triangle bestTri = {A, B, C} into three triangles by
+                // inserting P: {A,B,P}, {B,C,P}, {C,A,P}.
+                //
+                // Manifold safety: each spoke edge {A,P}, {B,P}, {C,P} must not
+                // already appear in the main mesh.  If vi is already referenced by
+                // a main-mesh triangle (e.g. it was a pinch-point vertex shared with
+                // the main surface) the spoke edges would create non-manifold
+                // configurations.  In that case skip the split.
+                auto const& origTri = triangles[bestTri];
+                int32_t A = origTri[0];
+                int32_t B = origTri[1];
+                int32_t C = origTri[2];
+
+                bool spokeConflict = false;
+                for (int32_t endpoint : {A, B, C})
+                {
+                    auto e = std::make_pair(std::min(endpoint, vi),
+                                            std::max(endpoint, vi));
+                    if (edgeToTri.count(e))
+                    {
+                        spokeConflict = true;
+                        break;
+                    }
+                }
+                if (spokeConflict)
+                {
+                    ++discarded;
+                    continue;
+                }
+
+                // Perform the split.
+                int32_t ti1 = static_cast<int32_t>(triangles.size());     // {B,C,vi}
+                int32_t ti2 = static_cast<int32_t>(triangles.size()) + 1; // {C,A,vi}
+
+                triangles[bestTri] = {A, B, vi};
+                triangles.push_back({B, C, vi});
+                triangles.push_back({C, A, vi});
+
+                // Register spoke edges: each spoke appears in exactly 2 sub-triangles.
+                // {A,vi}: bestTri ({A,B,vi}) and ti2 ({C,A,vi})
+                // {B,vi}: bestTri ({A,B,vi}) and ti1 ({B,C,vi})
+                // {C,vi}: ti1 ({B,C,vi}) and ti2 ({C,A,vi})
+                auto eAvi = std::make_pair(std::min(A, vi), std::max(A, vi));
+                auto eBvi = std::make_pair(std::min(B, vi), std::max(B, vi));
+                auto eCvi = std::make_pair(std::min(C, vi), std::max(C, vi));
+                edgeToTri[eAvi].push_back(bestTri);
+                edgeToTri[eAvi].push_back(ti2);
+                edgeToTri[eBvi].push_back(bestTri);
+                edgeToTri[eBvi].push_back(ti1);
+                edgeToTri[eCvi].push_back(ti1);
+                edgeToTri[eCvi].push_back(ti2);
+
+                // The vertex now belongs to the main mesh — update isArtifact and
+                // triNormals for the two new triangles so subsequent vertices can
+                // also target them (they are appended, so always non-artifact).
+                isArtifact.push_back(false);
+                isArtifact.push_back(false);
+
+                Vector3<Real> e0, e1;
+                e0 = vertices[B] - vertices[A];
+                e1 = vertices[vi] - vertices[A];
+                triNormals[bestTri] = Cross(e0, e1);
+                triNormals.push_back(Cross(vertices[C] - vertices[B], vertices[vi] - vertices[B]));
+                triNormals.push_back(Cross(vertices[A] - vertices[C], vertices[vi] - vertices[C]));
+
+                splitTriangles.insert(bestTri);
+                mainMeshVerts.insert(vi);  // vertex is now in the main mesh
+                ++absorbed;
+            }
+
+            if (verbose)
+            {
+                std::cout << "  Absorbed " << absorbed
+                          << " vertex(es), discarded " << discarded << "\n";
+            }
+
+            // ---------------------------------------------------------------
+            // Step 4: Discard all artifact triangles.
+            // ---------------------------------------------------------------
+            std::vector<std::array<int32_t, 3>> kept;
+            kept.reserve(triangles.size());
+            for (size_t i = 0; i < triangles.size(); ++i)
+            {
+                if (!isArtifact[i]) kept.push_back(triangles[i]);
+            }
+            triangles = std::move(kept);
+        }
+
+        // RemoveSmallClosedComponents: discard without absorption.
         static void RemoveSmallClosedComponents(
             std::vector<std::array<int32_t, 3>>& triangles,
             size_t maxTriangles,
