@@ -434,6 +434,17 @@ namespace gte
                     std::cout << "  [Profiling] Step 7 (component bridging): " << t7ms << " ms\n";
                 }
             }
+
+            // Step 7b: Post-bridging closed-component cleanup.
+            // Bridging can create or reveal small closed components (e.g. a bridging
+            // triangle that closes off a tiny fragment).  Remove small closed
+            // components that are NOT the largest component in the mesh.
+            if (params.removeSmallClosedComponents
+                && params.smallClosedComponentThreshold > 0)
+            {
+                RemoveSmallClosedComponentsExceptLargest(triangles,
+                    params.smallClosedComponentThreshold, params.verbose);
+            }
             
             // Step 8: UV parameterization merging (if enabled)
             if (params.enableUVMerging)
@@ -3606,6 +3617,99 @@ namespace gte
                 if (!isArtifact[i]) kept.push_back(triangles[i]);
             }
             triangles = std::move(kept);
+        }
+
+        // RemoveSmallClosedComponentsExceptLargest:
+        // Same as RemoveSmallClosedComponents but always preserves the largest
+        // component (by triangle count).  This is safe to call after bridging
+        // because the main surface is expected to be the largest component.
+        static void RemoveSmallClosedComponentsExceptLargest(
+            std::vector<std::array<int32_t, 3>>& triangles,
+            size_t maxTriangles,
+            bool verbose = false)
+        {
+            if (triangles.empty()) return;
+
+            // Build edge-to-triangle adjacency.
+            std::unordered_map<std::pair<int32_t, int32_t>,
+                               std::vector<int32_t>, EdgePairHash> edgeToTri;
+            edgeToTri.reserve(triangles.size() * 3);
+            for (int32_t ti = 0; ti < static_cast<int32_t>(triangles.size()); ++ti)
+            {
+                auto const& t = triangles[ti];
+                for (int i = 0; i < 3; ++i)
+                {
+                    auto e = std::make_pair(std::min(t[i], t[(i + 1) % 3]),
+                                            std::max(t[i], t[(i + 1) % 3]));
+                    edgeToTri[e].push_back(ti);
+                }
+            }
+
+            // Identify all components.
+            std::vector<bool> visited(triangles.size(), false);
+            std::vector<std::vector<size_t>> allComps;
+            std::vector<size_t>              compBoundary;  // boundary edge count
+
+            for (size_t seed = 0; seed < triangles.size(); ++seed)
+            {
+                if (visited[seed]) continue;
+                allComps.push_back({});
+                std::vector<int32_t> stack = {static_cast<int32_t>(seed)};
+                visited[seed] = true;
+                size_t boundaryEdgeCount = 0;
+                while (!stack.empty())
+                {
+                    int32_t cur = stack.back(); stack.pop_back();
+                    allComps.back().push_back(cur);
+                    auto const& t = triangles[cur];
+                    for (int i = 0; i < 3; ++i)
+                    {
+                        auto e = std::make_pair(std::min(t[i], t[(i + 1) % 3]),
+                                                std::max(t[i], t[(i + 1) % 3]));
+                        auto it = edgeToTri.find(e);
+                        if (it == edgeToTri.end()) continue;
+                        if (it->second.size() == 1) ++boundaryEdgeCount;
+                        for (int32_t nb : it->second)
+                            if (!visited[nb]) { visited[nb] = true; stack.push_back(nb); }
+                    }
+                }
+                compBoundary.push_back(boundaryEdgeCount);
+            }
+
+            if (allComps.empty()) return;
+
+            // Find largest component.
+            size_t largestIdx = 0;
+            for (size_t i = 1; i < allComps.size(); ++i)
+                if (allComps[i].size() > allComps[largestIdx].size()) largestIdx = i;
+
+            // Mark small closed components (excluding the largest) for removal.
+            std::vector<bool> toRemove(triangles.size(), false);
+            size_t removedComps = 0;
+            for (size_t compIndex = 0; compIndex < allComps.size(); ++compIndex)
+            {
+                if (compIndex == largestIdx) continue;
+                if (compBoundary[compIndex] == 0 && allComps[compIndex].size() <= maxTriangles)
+                {
+                    for (size_t ti : allComps[compIndex]) toRemove[ti] = true;
+                    ++removedComps;
+                    if (verbose)
+                        std::cout << "  Removing small closed component ("
+                                  << allComps[compIndex].size() << " triangles)\n";
+                }
+            }
+
+            if (removedComps == 0) return;
+
+            std::vector<std::array<int32_t, 3>> kept;
+            kept.reserve(triangles.size());
+            for (size_t i = 0; i < triangles.size(); ++i)
+                if (!toRemove[i]) kept.push_back(triangles[i]);
+            triangles = std::move(kept);
+
+            if (verbose)
+                std::cout << "Removed " << removedComps
+                          << " small closed component(s)\n";
         }
 
         // RemoveSmallClosedComponents: discard without absorption.
