@@ -334,7 +334,7 @@ namespace gte
             int32_t N = static_cast<int32_t>(patches.size());
             numClusters = std::min(numClusters, N);
 
-            // Initialise cluster centres by spreading evenly over sorted patches.
+            // Initialize cluster centres by spreading evenly over sorted patches.
             std::vector<Vector3<Real>> centres(numClusters);
             for (int32_t k = 0; k < numClusters; ++k)
             {
@@ -616,7 +616,7 @@ namespace gte
             uAxis = Vector3<Real>{evec[1][0], evec[1][1], evec[1][2]};
             vAxis = Vector3<Real>{evec[2][0], evec[2][1], evec[2][2]};
 
-            // Normalise (should already be unit, but be safe).
+            // Normalize (should already be unit, but be safe).
             Real uLen = Length(uAxis);
             Real vLen = Length(vAxis);
             if (uLen < static_cast<Real>(1e-10) || vLen < static_cast<Real>(1e-10))
