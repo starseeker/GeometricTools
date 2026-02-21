@@ -430,6 +430,11 @@ namespace gte
                 }
             }
             
+            // Step 8: UV parameterization merging (handled in Step 3.5 above).
+            // Kept as a no-op for backward compatibility with callers that set
+            // enableUVMerging=true; the merge runs early (Step 3.5) before
+            // hole-filling and bridging so the pipeline sees fewer patches.
+            
             // Step 9: Final validation with detailed reporting
             bool isClosedManifold = false;
             bool hasNonManifoldEdges = false;

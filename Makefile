@@ -16,8 +16,8 @@ TARGETS = test_mesh_repair test_co3ne test_full_algorithms test_rvd \
           test_delaunay_n test_delaunay_nn test_rvd_n test_cvt_n test_phase4_integration \
           test_anisotropic_end_to_end test_co3ne_stitcher test_ball_pivot_hole_filler \
           test_ball_pivot_integration test_comprehensive_manifold_analysis test_progressive_merging \
-          test_parallel_nntree_queries test_patch_cluster_merger \
-          test_patch_cluster_xyz
+          test_parallel_nntree_queries test_co3ne_manifold_constrained \
+          test_patch_cluster_merger test_patch_cluster_xyz
 
 all: $(TARGETS)
 
@@ -202,6 +202,10 @@ test_bottleneck: $(TEST_DIR)/test_bottleneck.cpp GTE/Mathematics/Co3NeManifoldSt
 # Parallel NNTree query correctness test
 test_parallel_nntree_queries: $(TEST_DIR)/test_parallel_nntree_queries.cpp GTE/Mathematics/Co3NeManifoldStitcher.h GTE/Mathematics/BallPivotMeshHoleFiller.cpp
 	$(CXX) $(CXXFLAGS) $(PTHREAD) -o test_parallel_nntree_queries $(TEST_DIR)/test_parallel_nntree_queries.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp $(LDFLAGS)
+
+# Manifold-constrained triangle generation test
+test_co3ne_manifold_constrained: $(TEST_DIR)/test_co3ne_manifold_constrained.cpp GTE/Mathematics/Co3Ne.h
+	$(CXX) $(CXXFLAGS) -o test_co3ne_manifold_constrained $(TEST_DIR)/test_co3ne_manifold_constrained.cpp $(LDFLAGS)
 
 # Patch cluster merger test
 test_patch_cluster_merger: $(TEST_DIR)/test_patch_cluster_merger.cpp GTE/Mathematics/PatchClusterMerger.h GTE/Mathematics/Co3NeManifoldStitcher.h GTE/Mathematics/Co3Ne.h GTE/Mathematics/BallPivotReconstruction.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp
