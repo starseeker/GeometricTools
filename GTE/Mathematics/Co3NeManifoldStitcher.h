@@ -27,6 +27,7 @@
 #include <GTE/Mathematics/MeshValidation.h>
 #include <GTE/Mathematics/BallPivotMeshHoleFiller.h>
 #include <GTE/Mathematics/NearestNeighborQuery.h>
+#include <GTE/Mathematics/PatchClusterMerger.h>
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -124,9 +125,12 @@ namespace gte
             int32_t maxHoleFillerIterations;
             bool removeEdgeTrianglesOnFailure;
             
-            // UV parameterization parameters
+            // UV parameterization parameters: cluster patches spatially,
+            // re-triangulate each cluster via concave-hull + Steiner
+            // triangulation to reduce patch count before stitching.
             bool enableUVMerging;
             Real uvMergingThreshold;
+            int32_t numClusters;  // Target number of merged patches (default: 6)
             
             // Topology bridging parameters
             bool enableIterativeBridging;  // Multi-pass bridging with hole filling
@@ -154,8 +158,9 @@ namespace gte
                                static_cast<Real>(5.0)})
                 , maxHoleFillerIterations(10)
                 , removeEdgeTrianglesOnFailure(true)
-                , enableUVMerging(false)  // Disabled by default (not yet implemented)
+                , enableUVMerging(false)  // Disabled by default
                 , uvMergingThreshold(static_cast<Real>(0.1))
+                , numClusters(6)
                 , enableIterativeBridging(true)  // Enabled by default
                 // 20 iterations handles log₂(~1M) initial components; sufficient for
                 // all tested datasets while remaining practical in runtime.
@@ -281,6 +286,30 @@ namespace gte
                     }
                 }
             }  // end verbose Steps 3 & 4a
+
+            // Step 3.5: UV-based cluster merge (if enabled).
+            // Run BEFORE hole filling and component bridging so that the
+            // pipeline works on a smaller number of larger patches.
+            if (params.enableUVMerging)
+            {
+                auto t35start = std::chrono::steady_clock::now();
+
+                typename PatchClusterMerger<Real>::Parameters mergeParams;
+                mergeParams.numClusters = params.numClusters;
+                mergeParams.verbose    = params.verbose;
+
+                int32_t merged = PatchClusterMerger<Real>::MergeClusteredPatches(
+                    vertices, triangles, mergeParams);
+
+                if (params.verbose)
+                {
+                    auto t35ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - t35start).count();
+                    std::cout << "  [Profiling] Step 3.5 (UV cluster merge, "
+                              << merged << " clusters merged): "
+                              << t35ms << " ms\n";
+                }
+            }
 
             // Step 3b: Process small closed components that are Co3Ne reconstruction
             // artifacts (e.g. the 8-triangle octahedral fragments produced for dense
@@ -445,16 +474,11 @@ namespace gte
                 RemoveSmallClosedComponentsExceptLargest(triangles,
                     params.smallClosedComponentThreshold, params.verbose);
             }
-            
-            // Step 8: UV parameterization merging (if enabled)
-            if (params.enableUVMerging)
-            {
-                // TODO: Implement UV-based patch merging
-                if (params.verbose)
-                {
-                    std::cout << "UV-based patch merging not yet implemented\n";
-                }
-            }
+
+            // Step 8: UV parameterization merging (handled in Step 3.5 above).
+            // Kept as a no-op for backward compatibility with callers that set
+            // enableUVMerging=true; the merge runs early (Step 3.5) before
+            // hole-filling and bridging so the pipeline sees fewer patches.
             
             // Step 9: Final validation with detailed reporting
             bool isClosedManifold = false;
@@ -1316,6 +1340,12 @@ namespace gte
 
             // When the two edges share exactly one vertex, use a single triangle
             // rather than the standard two-triangle quad bridge to avoid degeneracy.
+            // The shared vertex is placed in the middle position so the free endpoints
+            // of edge1 and edge2 flank it, preserving a consistent winding order:
+            //   a==c → {b, a, d}  closes (a,b) and (a,d), opens (b,d)
+            //   a==d → {b, a, c}  closes (a,b) and (a,c), opens (b,c)
+            //   b==c → {a, b, d}  closes (a,b) and (b,d), opens (a,d)
+            //   b==d → {a, b, c}  closes (a,b) and (b,c), opens (a,c)
             auto TryOneTriLegacy =
                 [&](std::array<int32_t, 3> const& tri) -> bool
             {
@@ -1344,19 +1374,11 @@ namespace gte
                 return true;
             };
 
-            // When the two edges share exactly one vertex, use a single triangle
-            // rather than the standard two-triangle quad bridge to avoid degeneracy.
-            // The shared vertex is placed in the middle position so the free endpoints
-            // of edge1 and edge2 flank it, preserving a consistent winding order:
-            //   a==c → {b, a, d}  closes (a,b) and (a,d), opens (b,d)
-            //   a==d → {b, a, c}  closes (a,b) and (a,c), opens (b,c)
-            //   b==c → {a, b, d}  closes (a,b) and (b,d), opens (a,d)
-            //   b==d → {a, b, c}  closes (a,b) and (b,c), opens (a,c)
             if (a == c) return TryOneTriLegacy({b, a, d});
             if (a == d) return TryOneTriLegacy({b, a, c});
             if (b == c) return TryOneTriLegacy({a, b, d});
             if (b == d) return TryOneTriLegacy({a, b, c});
-
+            
             // Check edge orientations and distances
             Real dist_ac = Length(vertices[c] - vertices[a]);
             Real dist_bd = Length(vertices[d] - vertices[b]);
@@ -1397,16 +1419,10 @@ namespace gte
             return true;
         }
 
-        // Overload 2: fast path – validates only the 6 new edges against ecm (O(1)).
+        // Overload 2: fast path – validates only the new edges against ecm (O(1)).
         // Updates ecm and appends to triangles only on success.
-        //
-        // When edge1 and edge2 share a vertex (components connected at a point but
-        // not at an edge), the standard two-triangle bridge would produce a degenerate
-        // triangle with a repeated vertex, causing ValidateBridgeLocal to reject it
-        // (the shared diagonal edge appears three times, making add=3).  In that case
-        // we fall back to a single fan triangle at the shared vertex, which correctly
-        // closes both boundary edges and leaves a new boundary edge between the two
-        // free endpoints.
+        // When edge1 and edge2 share a vertex the standard two-triangle bridge creates
+        // a degenerate triangle.  Fall back to a single fan triangle in that case.
         static bool BridgeBoundaryEdges(
             std::vector<Vector3<Real>> const& vertices,
             std::vector<std::array<int32_t, 3>>& triangles,
@@ -1419,35 +1435,23 @@ namespace gte
             int32_t c = edge2.first;
             int32_t d = edge2.second;
 
-            // Helper: validate and commit a single triangle.
-            auto TryOneTri = [&](std::array<int32_t, 3> const& tri) -> bool
+            // Shared-vertex fan-triangle shortcut (same winding rationale as overload 1).
+            auto TryOneTri =
+                [&](std::array<int32_t, 3> const& tri) -> bool
             {
-                std::array<std::pair<int32_t, int32_t>, 3> edges3 = {
-                    MakeEdgeKey(tri[0], tri[1]),
-                    MakeEdgeKey(tri[1], tri[2]),
-                    MakeEdgeKey(tri[0], tri[2])
-                };
-                for (auto const& e : edges3)
+                for (int i = 0; i < 3; ++i)
                 {
+                    auto e = MakeEdgeKey(tri[i], tri[(i + 1) % 3]);
                     auto it = ecm.find(e);
                     size_t cur = (it != ecm.end()) ? it->second : 0;
                     if (cur + 1 > 2) return false;
                 }
                 triangles.push_back(tri);
-                for (auto const& e : edges3) ecm[e]++;
+                for (int i = 0; i < 3; ++i)
+                    ecm[MakeEdgeKey(tri[i], tri[(i + 1) % 3])]++;
                 return true;
             };
 
-            // When the two edges share exactly one vertex, use a single triangle
-            // rather than the two-triangle quad bridge.
-            // When the two edges share exactly one vertex, use a single triangle
-            // rather than the standard two-triangle quad bridge to avoid degeneracy.
-            // The shared vertex is placed in the middle position so the free endpoints
-            // of edge1 and edge2 flank it, preserving a consistent winding order:
-            //   a==c → {b, a, d}  closes (a,b) and (a,d), opens (b,d)
-            //   a==d → {b, a, c}  closes (a,b) and (a,c), opens (b,c)
-            //   b==c → {a, b, d}  closes (a,b) and (b,d), opens (a,d)
-            //   b==d → {a, b, c}  closes (a,b) and (b,c), opens (a,c)
             if (a == c) return TryOneTri({b, a, d});
             if (a == d) return TryOneTri({b, a, c});
             if (b == c) return TryOneTri({a, b, d});
@@ -2983,7 +2987,7 @@ namespace gte
             size_t cappedLoops = 0;
             for (auto const& loop : loops)
             {
-                if (loop.vertices.size() <= static_cast<size_t>(params.maxHoleEdges))
+                if (loop.vertices.size() <= params.maxHoleEdges)  // Only cap loops within the hole-edge limit
                 {
                     // ECM overload: O(H) local check per cap, not O(T) full-mesh.
                     if (CapBoundaryLoop(vertices, triangles, loop, ecm))
@@ -3281,10 +3285,6 @@ namespace gte
             return false;
         }
         
-        // Remove connected components that are closed (no boundary edges) and
-        // contain at most maxTriangles triangles.  These fragments are artifacts
-        // produced by Co3Ne for dense local regions; they have no boundary to bridge
-        // with and would prevent the final closed-manifold check from passing.
         // AbsorbSmallClosedComponents:
         // Instead of discarding small closed artifact sub-meshes, insert their
         // vertices into the main mesh via triangle splitting (Steiner point
