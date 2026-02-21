@@ -196,6 +196,85 @@ namespace gte
             return !outTriangles.empty();
         }
 
+        // Reconstruction using caller-supplied precomputed normals.
+        // Useful when normals are already available (e.g., from an XYZ file
+        // with 6 columns: x y z nx ny nz) and PCA estimation is unnecessary.
+        // Steps 1 (ComputeNormals) and 2 (OrientNormalsConsistently) are
+        // skipped; the provided normals are used directly.
+        static bool ReconstructWithNormals(
+            std::vector<Vector3<Real>> const& points,
+            std::vector<Vector3<Real>> const& normals,
+            std::vector<Vector3<Real>>& outVertices,
+            std::vector<std::array<int32_t, 3>>& outTriangles,
+            Parameters const& params = Parameters())
+        {
+            if (points.empty() || normals.size() != points.size())
+            {
+                return false;
+            }
+
+            using Site = PositionSite<3, Real>;
+            std::vector<Site> sites;
+            sites.reserve(points.size());
+            for (auto const& p : points)
+            {
+                sites.emplace_back(p);
+            }
+
+            static constexpr int32_t maxLeafSize = 10;
+            static constexpr int32_t maxLevel = 20;
+            NearestNeighborQuery<3, Real, Site> nnQuery(sites, maxLeafSize, maxLevel);
+
+            Real searchRadius = params.searchRadius;
+            if (searchRadius == static_cast<Real>(0))
+            {
+                searchRadius = ComputeAutomaticSearchRadius(points);
+            }
+
+            // Use the caller-supplied normals directly (skip PCA estimation).
+            std::vector<Vector3<Real>> workNormals = normals;
+
+            // Optionally re-orient normals for consistency.
+            if (params.orientNormals)
+            {
+                OrientNormalsConsistently(points, workNormals, params, nnQuery, searchRadius);
+            }
+
+            std::vector<std::array<int32_t, 3>> candidateTriangles;
+            GenerateTriangles(points, workNormals, candidateTriangles, params, nnQuery, searchRadius);
+
+            if (candidateTriangles.empty())
+            {
+                return false;
+            }
+
+            ExtractManifold(points, workNormals, candidateTriangles, outTriangles, params);
+
+            if (params.autoFixNonManifold && !outTriangles.empty())
+            {
+                AutoFixNonManifoldEdges(outTriangles);
+            }
+
+            if (params.fixWindingOrder && !outTriangles.empty())
+            {
+                FixWindingOrder(points, outTriangles);
+            }
+
+            if (params.preventSelfIntersections && !outTriangles.empty())
+            {
+                RemoveSelfIntersectingTriangles(points, outTriangles);
+            }
+
+            outVertices = points;
+
+            if (params.smoothWithRVD && params.rvdSmoothIterations > 0 && !outTriangles.empty())
+            {
+                SmoothWithRVD(outVertices, outTriangles, params);
+            }
+
+            return !outTriangles.empty();
+        }
+
     protected:
         static constexpr int32_t NO_VERTEX = -1;
         static constexpr int32_t NO_CORNER = -1;

@@ -59,3 +59,6 @@ perf.data.old
 gmon.out
 build/
 test_performance_benchmark
+
+# Allow test source files in the tests/ subdirectory to be tracked
+!tests/test_*.cpp

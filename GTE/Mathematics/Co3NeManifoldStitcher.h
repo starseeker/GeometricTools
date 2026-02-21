@@ -27,6 +27,7 @@
 #include <GTE/Mathematics/MeshValidation.h>
 #include <GTE/Mathematics/BallPivotMeshHoleFiller.h>
 #include <GTE/Mathematics/NearestNeighborQuery.h>
+#include <GTE/Mathematics/PatchClusterMerger.h>
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -123,9 +124,12 @@ namespace gte
             int32_t maxHoleFillerIterations;
             bool removeEdgeTrianglesOnFailure;
             
-            // UV parameterization parameters
+            // UV parameterization parameters: cluster patches spatially,
+            // re-triangulate each cluster via concave-hull + Steiner
+            // triangulation to reduce patch count before stitching.
             bool enableUVMerging;
             Real uvMergingThreshold;
+            int32_t numClusters;  // Target number of merged patches (default: 6)
             
             // Topology bridging parameters
             bool enableIterativeBridging;  // Multi-pass bridging with hole filling
@@ -150,8 +154,9 @@ namespace gte
                                static_cast<Real>(5.0)})
                 , maxHoleFillerIterations(10)
                 , removeEdgeTrianglesOnFailure(true)
-                , enableUVMerging(false)  // Disabled by default (not yet implemented)
+                , enableUVMerging(false)  // Disabled by default
                 , uvMergingThreshold(static_cast<Real>(0.1))
+                , numClusters(6)
                 , enableIterativeBridging(true)  // Enabled by default
                 , maxIterations(10)
                 , initialBridgeThreshold(static_cast<Real>(2.0))
@@ -272,7 +277,31 @@ namespace gte
                     }
                 }
             }  // end verbose Steps 3 & 4a
-            
+
+            // Step 3.5: UV-based cluster merge (if enabled).
+            // Run BEFORE hole filling and component bridging so that the
+            // pipeline works on a smaller number of larger patches.
+            if (params.enableUVMerging)
+            {
+                auto t35start = std::chrono::steady_clock::now();
+
+                typename PatchClusterMerger<Real>::Parameters mergeParams;
+                mergeParams.numClusters = params.numClusters;
+                mergeParams.verbose    = params.verbose;
+
+                int32_t merged = PatchClusterMerger<Real>::MergeClusteredPatches(
+                    vertices, triangles, mergeParams);
+
+                if (params.verbose)
+                {
+                    auto t35ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - t35start).count();
+                    std::cout << "  [Profiling] Step 3.5 (UV cluster merge, "
+                              << merged << " clusters merged): "
+                              << t35ms << " ms\n";
+                }
+            }
+
             // Step 4: Fill holes using existing hole filling (with validation)
             if (params.enableHoleFilling)
             {
@@ -401,15 +430,10 @@ namespace gte
                 }
             }
             
-            // Step 8: UV parameterization merging (if enabled)
-            if (params.enableUVMerging)
-            {
-                // TODO: Implement UV-based patch merging
-                if (params.verbose)
-                {
-                    std::cout << "UV-based patch merging not yet implemented\n";
-                }
-            }
+            // Step 8: UV parameterization merging (handled in Step 3.5 above).
+            // Kept as a no-op for backward compatibility with callers that set
+            // enableUVMerging=true; the merge runs early (Step 3.5) before
+            // hole-filling and bridging so the pipeline sees fewer patches.
             
             // Step 9: Final validation with detailed reporting
             bool isClosedManifold = false;
