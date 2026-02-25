@@ -918,7 +918,6 @@ namespace gte
             // Process facets in order of decreasing distance from border
             // This heuristic minimizes Moebius strip artifacts
             std::vector<bool> visited(mTriangles.size(), false);
-            int32_t moebius_count = 0;
             size_t nb_visited = 0;
             
             for (int dist = MAX_BORDER_DISTANCE; dist >= 0; --dist)
@@ -949,7 +948,7 @@ namespace gte
                                     nb_visited++;
                                     
                                     // Propagate orientation from already-visited neighbors
-                                    PropagateOrientation(f2, visited, removeTriangle, moebius_count);
+                                    PropagateOrientation(f2, visited);
                                     
                                     Q.push(f2);
                                 }
@@ -1032,13 +1031,8 @@ namespace gte
         // treated as "no flip".
         void PropagateOrientation(
             int32_t f,
-            std::vector<bool> const& visited,
-            std::vector<bool>& removeTriangle,
-            int32_t& moebius_count)
+            std::vector<bool> const& visited)
         {
-            (void)removeTriangle;
-            (void)moebius_count;
-
             // Count neighbors with compatible (+1) vs incompatible (-1) orientations
             int nb_plus = 0;
             int nb_minus = 0;
@@ -1098,30 +1092,6 @@ namespace gte
                 }
             }
             return 0;
-        }
-        
-        // Remove adjacency between two facets
-        void Dissociate(int32_t f1, int32_t f2)
-        {
-            // Remove f1 -> f2 adjacency
-            for (int i = 0; i < 3; ++i)
-            {
-                int32_t c = f1 * 3 + i;
-                if (mCornerToAdjacentFacet[c] == f2)
-                {
-                    mCornerToAdjacentFacet[c] = NO_FACET;
-                }
-            }
-            
-            // Remove f2 -> f1 adjacency
-            for (int i = 0; i < 3; ++i)
-            {
-                int32_t c = f2 * 3 + i;
-                if (mCornerToAdjacentFacet[c] == f1)
-                {
-                    mCornerToAdjacentFacet[c] = NO_FACET;
-                }
-            }
         }
         
     public:
