@@ -222,7 +222,6 @@ static TierResult RunTier(std::vector<Vector3<double>> const& points,
     // Phase 1: Co3Ne reconstruction
     Co3Ne<double>::Parameters co3neParams;
     co3neParams.kNeighbors               = 20;
-    co3neParams.relaxedManifoldExtraction = true;
     co3neParams.orientNormals             = true;
 
     std::vector<Vector3<double>>      vertices;

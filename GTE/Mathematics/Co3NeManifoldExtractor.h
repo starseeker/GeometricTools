@@ -604,7 +604,8 @@ namespace gte
                     MergeConnectedComponent(
                         GetConnectedComponent(adj[i]),
                         comp,
-                        adjOri[i]
+                        adjOri[i],
+                        adj[i]
                     );
                 }
             }
@@ -639,22 +640,43 @@ namespace gte
             return true;  // No common edge
         }
         
-        void MergeConnectedComponent(int32_t fromComp, int32_t toComp, int32_t ori)
+        void MergeConnectedComponent(int32_t fromComp, int32_t toComp, int32_t ori, int32_t startTri)
         {
             if (fromComp == toComp) return;
-            
-            for (int32_t t = 0; t < static_cast<int32_t>(mTriangles.size()); ++t)
+
+            // BFS/DFS traversal via the adjacency structure.  Starting from startTri
+            // (which must belong to fromComp) we visit only triangles in fromComp so
+            // that the corner circular-lists are updated in adjacency order rather
+            // than arbitrary linear-scan order, avoiding topology corruption.
+            std::stack<int32_t> stk;
+            stk.push(startTri);
+            // Use the component array as a visited marker: as we reassign triangles
+            // to toComp they won't be re-visited (GetConnectedComponent(t) != fromComp).
+
+            while (!stk.empty())
             {
-                if (GetConnectedComponent(t) == fromComp)
+                int32_t t = stk.top();
+                stk.pop();
+
+                // Guard against double-push via multiple adjacency edges
+                if (GetConnectedComponent(t) != fromComp) continue;
+
+                mConnectedComponent[t] = toComp;
+                if (ori == -1)
                 {
-                    mConnectedComponent[t] = toComp;
-                    if (ori == -1)
+                    FlipTriangle(t);
+                }
+
+                for (int i = 0; i < 3; ++i)
+                {
+                    int32_t adj = mCornerToAdjacentFacet[t * 3 + i];
+                    if (adj != NO_FACET && GetConnectedComponent(adj) == fromComp)
                     {
-                        FlipTriangle(t);
+                        stk.push(adj);
                     }
                 }
             }
-            
+
             mComponentSize[toComp] += mComponentSize[fromComp];
             mComponentSize[fromComp] = 0;
         }

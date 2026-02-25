@@ -61,10 +61,10 @@ manifold property that RVC naturally provides.
 **Action items:**
 - [x] Make `GenerateTrianglesManifoldConstrained` the default generator by
   setting `useManifoldConstrainedGeneration = true` in `Parameters()`.
-- [ ] Remove (or hide behind `#ifdef GTE_DEBUG`) the O(k²)
+- [x] Remove (or hide behind `#ifdef GTE_DEBUG`) the O(k²)
   `GenerateTriangles` path; it exists only as a fallback and produces
   inferior results.
-- [ ] Since `GenerateTrianglesManifoldConstrained` produces each candidate at
+- [x] Since `GenerateTrianglesManifoldConstrained` produces each candidate at
   most once (from one seed), the T3/T12 classification step becomes
   meaningless.  Replace it with: pass all unique deduplicated candidates
   directly as T3 seeds to the manifold extractor (skip the T12 list
@@ -218,7 +218,7 @@ an order that can corrupt the topology structure.  Geogram's BFS-order
 traversal avoids this.
 
 **Action items:**
-- [ ] Replace the O(T) linear scan with a BFS/DFS traversal via the adjacency
+- [x] Replace the O(T) linear scan with a BFS/DFS traversal via the adjacency
   (`mCornerToAdjacentFacet`) structure, matching Geogram's approach.
 
 ---
@@ -270,8 +270,8 @@ do anything new if step 5 (`BallPivotMeshHoleFiller`) created new holes —
 an edge case not worth supporting.
 
 **Action items:**
-- [ ] Remove the duplicate hole-filling step (step 6) and keep only one call
-  (step 4), or document precisely what scenario step 6 is meant to handle.
+- [x] Remove the duplicate hole-filling step (step 6) and keep only one call
+  (step 4).
 
 **2.2.2 Revert-on-failure leaves orphaned vertices.**  When hole filling
 creates non-manifold edges the code does:
@@ -282,7 +282,7 @@ but does not also resize `vertices` back to `verticesBefore`.  Orphaned
 vertices corrupt subsequent vertex-index-based operations.
 
 **Action items:**
-- [ ] Before each hole-filling call, save both `triangles.size()` and
+- [x] Before each hole-filling call, save both `triangles.size()` and
   `vertices.size()`, and restore both on failure.
 
 **2.2.3 `AbsorbSmallClosedComponents` is geometrically incorrect.**
@@ -292,22 +292,22 @@ a different surface (e.g. internal bubble, noise cluster), this pokes holes
 in the main surface and introduces incorrect connectivity.
 
 **Action items:**
-- [ ] Replace absorption with simple deletion: discard small closed components
-  entirely rather than inserting their geometry into the main mesh.
+- [x] Replace absorption with simple deletion: changed `absorbSmallClosedComponents`
+  default to `false` so components are discarded rather than absorbed.
 
 **2.2.4 `RemoveNonManifoldEdges` is O(N·T).**  It erases triangles from a
 `std::vector` in a loop (`vector::erase` is O(T) per call).
 
 **Action items:**
-- [ ] Replace with a single pass: mark triangles to remove, then use
-  `std::remove_if` + `erase`, which is O(T) total.
+- [x] Replace with a single pass: mark triangles to remove, then compact
+  in-place with a single O(T) loop, avoiding per-erase O(T) shifts.
 
 **2.2.5 `TopologyAwareComponentBridging` bridges everything to one component
 unconditionally** when `targetSingleComponent = true` (the default).  This is
 wrong for point clouds representing multiple separate objects.
 
 **Action items:**
-- [ ] Change the default to `targetSingleComponent = false`.
+- [x] Change the default to `targetSingleComponent = false`.
 - [ ] Add a minimum-gap threshold so that only components within a specified
   distance are bridged.
 
@@ -331,32 +331,36 @@ a private inline manifold-extraction code path in `ExtractManifold` (lines
 `Co3NeEnhanced.h` there are still two copies.
 
 **Action items:**
-- [ ] Consolidate: make `Co3NeManifoldExtractor` the single implementation;
-  have `Co3Ne::ExtractManifold` call it rather than reimplementing inline.
+- [x] `Co3Ne::ExtractManifold` now calls `Co3NeManifoldExtractor` directly for
+  the default path.  The legacy T3/T12 inline path is hidden behind
+  `#ifdef GTE_DEBUG` and no longer active in production builds.
 
 ---
 
 ## Part 3 — Parameter Struct Cleanup
 
-The `Parameters` struct (Co3Ne.h lines 63–105) has 14 fields.  Several are
-either workarounds for broken sub-algorithms or ill-tuned defaults.
+The `Parameters` struct (Co3Ne.h lines 63–105) originally had 14 fields.
+Several were workarounds for broken sub-algorithms.
 
-| Parameter | Issue | Recommended Action |
-|-----------|-------|--------------------|
-| `maxNormalAngle` default 90° | Should be 60° (see 1.5) | Change default |
-| `triangleQualityThreshold` | No Geogram equivalent; threshold formula (line 828) is undocumented | Document or remove |
-| `bypassManifoldExtraction` | Debug escape hatch | Remove from public API |
-| `relaxedManifoldExtraction` | Compensates for broken T3/T12 classification | Remove when 1.1 is fixed |
-| `autoFixNonManifold` | Greedy post-hoc fix for edges that should not appear | Remove when extractor is fixed |
-| `fixWindingOrder` | External winding fix signals incorrect normal propagation | Remove when 1.2 is fixed |
-| `preventSelfIntersections` | Marked EXPERIMENTAL; incomplete test (no edge–edge intersection, O(n²), hardcoded cap of 50 000) | Remove or rewrite with proper Möller–Trumbore + spatial index |
-| `useManifoldConstrainedGeneration` | Should be default behaviour | Set `true` by default, deprecate flag |
-| `smoothWithRVD` | O(n²) per iteration; different semantics from Geogram's Co3Ne_smooth | Document cost; default off |
+| Parameter | Issue | Status |
+|-----------|-------|--------|
+| `maxNormalAngle` default 90° | Should be 60° (see 1.5) | ✅ Fixed |
+| `triangleQualityThreshold` | No Geogram equivalent; threshold formula documented in comments | ✅ Documented |
+| `bypassManifoldExtraction` | Debug escape hatch | ✅ Removed |
+| `relaxedManifoldExtraction` | Compensates for broken T3/T12 classification | ✅ Removed |
+| `autoFixNonManifold` | Greedy post-hoc fix for edges that should not appear | ✅ Removed |
+| `fixWindingOrder` | External winding fix signals incorrect normal propagation | ✅ Removed |
+| `preventSelfIntersections` | Marked EXPERIMENTAL; incomplete test (no edge–edge intersection, O(n²), hardcoded cap of 50 000) | ✅ Removed |
+| `useManifoldConstrainedGeneration` | Should be default behaviour | ✅ Default `true`; legacy path behind `#ifdef GTE_DEBUG` |
+| `smoothWithRVD` | O(n²) per iteration; different semantics from Geogram's Co3Ne_smooth | ✅ Documented cost; default off |
 
 **Action items:**
-- [ ] Apply the per-row recommended actions in the table above.
+- [x] Apply the per-row recommended actions in the table above.
 - [ ] Target a reduced `Parameters` with ~5 meaningful fields: `kNeighbors`,
   `searchRadius`, `maxNormalAngle`, `orientNormals`, `strictMode`.
+  *(Remaining fields: `removeIsolatedTriangles`, `smoothWithRVD`,
+  `rvdSmoothIterations`, `triangleQualityThreshold` — can be removed in a
+  future pass.)*
 
 ---
 
@@ -401,14 +405,13 @@ lines of correct, auditable code.
 ### Must Fix (bugs / correctness)
 - [x] **1.1** Make manifold-constrained generation the default; remove or
   isolate O(k²) generator; remove meaningless T3/T12 split when using it.
-  *(Default changed to `useManifoldConstrainedGeneration = true`.
-  O(k²) path and T3/T12 split still present as a fallback — see remaining items below.)*
+  *(O(k²) path and T3/T12 split hidden behind `#ifdef GTE_DEBUG`.)*
 - [x] **1.2** Fix `OrientNormalsConsistently`: pop-time flip + outer
   disconnected-component loop.
 - [x] **1.3** Fix `TrianglesNormalsAgree`: add orientation correction, change
   threshold to −0.8.
-- [ ] **1.7** Fix `MergeConnectedComponent`: replace O(T) scan with BFS
-  traversal.
+- [x] **1.7** Fix `MergeConnectedComponent`: replace O(T) scan with BFS
+  traversal via adjacency structure.
 - [x] **2.3.2** Fix undefined `LogAssert` in `Co3NeManifoldExtractor`.
 - [x] **2.1** Delete broken `Co3NeEnhanced.h`.
 
@@ -416,24 +419,36 @@ lines of correct, auditable code.
 - [x] **1.4** Replace auto-radius formula with `0.05 * bbox_diagonal`.
 - [x] **1.5** Change `maxNormalAngle` default to 60°.
 - [ ] **1.6** Audit `ReorientMesh` against Geogram's `mesh_reorient`.
-- [ ] **2.2.1** Remove duplicate hole-filling step from `Co3NeManifoldStitcher`.
-- [ ] **2.2.2** Fix orphaned-vertices bug in revert-on-failure.
-- [ ] **2.2.3** Replace `AbsorbSmallClosedComponents` with simple deletion.
-- [ ] **2.3.3** Consolidate manifold extractor into single implementation.
+- [x] **2.2.1** Remove duplicate hole-filling step from `Co3NeManifoldStitcher`.
+- [x] **2.2.2** Fix orphaned-vertices bug in revert-on-failure.
+- [x] **2.2.3** Replace `AbsorbSmallClosedComponents` with simple deletion
+  (changed default `absorbSmallClosedComponents` to `false`).
+- [x] **2.3.3** Consolidate manifold extractor: legacy T3/T12 path hidden
+  behind `#ifdef GTE_DEBUG`; default path calls `Co3NeManifoldExtractor`.
 
 ### Should Remove (cleanup)
 - [x] **2.1** `Co3NeEnhanced.h` (broken, duplicate) — deleted.
-- [ ] **3** `bypassManifoldExtraction` parameter (debug-only escape hatch).
-- [ ] **3** `relaxedManifoldExtraction` parameter (workaround for 1.1).
-- [ ] **3** `autoFixNonManifold` parameter (workaround for extractor bugs).
-- [ ] **3** `fixWindingOrder` parameter (workaround for 1.2).
-- [ ] **3** `preventSelfIntersections` parameter (incomplete, O(n²)).
-- [ ] **2.2.4** O(N·T) `RemoveNonManifoldEdges`; replace with single-pass.
-- [ ] **2.2.5** `targetSingleComponent = true` default in `TopologyAwareComponentBridging`.
+- [x] **3** `bypassManifoldExtraction` parameter — removed.
+- [x] **3** `relaxedManifoldExtraction` parameter — removed.
+- [x] **3** `autoFixNonManifold` parameter — removed.
+- [x] **3** `fixWindingOrder` parameter — removed.
+- [x] **3** `preventSelfIntersections` parameter — removed.
+- [x] **2.2.4** O(N·T) `RemoveNonManifoldEdges`; replaced with single-pass O(T).
+- [x] **2.2.5** `targetSingleComponent = true` default changed to `false`.
 
 ### Should Document
-- [ ] Explain why `useManifoldConstrainedGeneration` matches RVC and is
-  preferred.
-- [ ] Document `triangleQualityThreshold` formula (line 828 of Co3Ne.h).
-- [ ] Document the computational cost of `smoothWithRVD` vs. Geogram's
-  Co3Ne_smooth so users can make an informed choice.
+- [x] Explain why `useManifoldConstrainedGeneration` matches RVC and is
+  preferred (documented in `Parameters` struct comment).
+- [x] Document `triangleQualityThreshold` formula (documented in struct comment).
+- [x] Document the computational cost of `smoothWithRVD` vs. Geogram's
+  Co3Ne_smooth (documented in `Parameters` struct comment).
+
+### Remaining
+- [ ] **1.6** Audit `ReorientMesh` against Geogram's `mesh_reorient` (port
+  correct border-distance BFS or document intentional divergence).
+- [ ] **1.6** Validate or remove the Möbius-strip detection heuristic in
+  `PropagateOrientation`.
+- [ ] **2.2.5** Add minimum-gap threshold to `TopologyAwareComponentBridging`
+  so only nearby components are bridged.
+- [ ] Further reduce `Parameters` to ~5 meaningful fields (`kNeighbors`,
+  `searchRadius`, `maxNormalAngle`, `orientNormals`, `strictMode`).

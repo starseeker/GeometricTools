@@ -63,7 +63,6 @@ namespace gte
                 co3neParams.kNeighbors = 20;
                 co3neParams.triangleQualityThreshold = static_cast<Real>(0.3);
                 co3neParams.orientNormals = true;
-                co3neParams.relaxedManifoldExtraction = false;
                 
                 // Configure Poisson for global connectivity
                 poissonParams.depth = 8;

@@ -65,23 +65,25 @@ namespace gte
             size_t kNeighbors;              // Number of neighbors for PCA (default: 20)
             Real searchRadius;              // Search radius (0 = auto)
             Real maxNormalAngle;            // Max angle for normal agreement (degrees)
-            Real triangleQualityThreshold;  // Minimum triangle quality (0-1)
+            // Minimum triangle quality (0-1). Computed as the ratio of the triangle's
+            // area to the area of an equilateral triangle with the same longest edge.
+            // Effectively filters very thin "sliver" triangles (quality < 0.3 * 0.433).
+            Real triangleQualityThreshold;
             bool orientNormals;             // Orient normals consistently via propagation
             bool strictMode;                // Strict manifold extraction (more conservative)
             bool removeIsolatedTriangles;   // Remove isolated triangles
-            bool smoothWithRVD;             // Post-process with RVD-based smoothing (improves quality)
+            // Post-process with RVD-based smoothing (improves quality).
+            // NOTE: O(n²) per iteration.  Disabled by default.  Only use for
+            // small meshes (n < ~2000 vertices).  See SmoothWithRVD for details.
+            bool smoothWithRVD;
             size_t rvdSmoothIterations;     // Number of RVD smoothing iterations
-            bool relaxedManifoldExtraction; // Use relaxed manifold extraction (accept more triangles)
-            bool bypassManifoldExtraction;  // Skip manifold extraction entirely (output all unique triangles)
-            bool autoFixNonManifold;        // Automatically fix non-manifold edges (guarantees manifold output)
-            bool fixWindingOrder;           // Fix triangle winding to be consistent (outward-facing)
-            bool preventSelfIntersections;  // Reject triangles that would cause self-intersections (EXPERIMENTAL - can be too aggressive)
-            // Manifold-constrained generation: enforces manifold topology during triangle
-            // production using tangent-plane angular ordering (approximating Voronoi polygon
-            // order). Instead of generating all O(k²) neighbor pairs, only angularly-
-            // consecutive pairs are triangulated and each undirected edge is allowed in at
-            // most 2 triangles. Winding is aligned with the point normal at generation
-            // time, eliminating the need for the post-hoc FixWindingOrder step.
+            // Use manifold-constrained triangle generation (recommended, default: true).
+            // Projects k-NN onto the tangent plane, sorts by angle, and triangulates
+            // only angularly-consecutive pairs — O(k) candidates per seed, equivalent
+            // to Geogram's Restricted Voronoi Cell polygon traversal.  Each undirected
+            // edge is used in at most 2 triangles, and winding is aligned with the
+            // PCA normal at generation time.  The legacy O(k²) fan generator remains
+            // available as a fallback when GTE_DEBUG is defined.
             bool useManifoldConstrainedGeneration;
             
             Parameters()
@@ -92,14 +94,9 @@ namespace gte
                 , orientNormals(true)
                 , strictMode(false)
                 , removeIsolatedTriangles(true)
-                , smoothWithRVD(false)      // Disabled by default: O(n²)/iter; see SmoothWithRVD for full analysis
-                , rvdSmoothIterations(3)    // 3 iterations usually sufficient
-                , relaxedManifoldExtraction(false)  // Default to original behavior
-                , bypassManifoldExtraction(false)   // Default to standard manifold extraction
-                , autoFixNonManifold(false)         // Default: don't auto-fix
-                , fixWindingOrder(true)             // Default: fix winding (important for BRL-CAD)
-                , preventSelfIntersections(false)   // Default: DISABLED (too aggressive, experimental)
-                , useManifoldConstrainedGeneration(true) // Default: angular-consecutive generation (O(k), matches RVC order)
+                , smoothWithRVD(false)
+                , rvdSmoothIterations(3)
+                , useManifoldConstrainedGeneration(true)
             {
             }
         };
@@ -163,31 +160,12 @@ namespace gte
 
             // Step 4: Extract manifold surface
             ExtractManifold(points, normals, candidateTriangles, outTriangles, params);
-            
-            // Step 4.5: Auto-fix non-manifold edges if requested
-            if (params.autoFixNonManifold && !outTriangles.empty())
-            {
-                AutoFixNonManifoldEdges(outTriangles);
-            }
-            
-            // Step 4.6: Fix winding order to be consistent (outward-facing)
-            if (params.fixWindingOrder && !outTriangles.empty())
-            {
-                FixWindingOrder(points, outTriangles);
-            }
-            
-            // Step 4.7: Remove self-intersecting triangles if requested
-            if (params.preventSelfIntersections && !outTriangles.empty())
-            {
-                RemoveSelfIntersectingTriangles(points, outTriangles);
-            }
 
             // Copy vertices
             outVertices = points;
 
             // Step 5: Optional RVD-based smoothing for improved quality
-            // NOTE: This is O(n²) per iteration and should only be used for
-            // small meshes (n < ~2000 vertices).  Disabled by default.
+            // NOTE: O(n²) per iteration; disabled by default.  See SmoothWithRVD.
             if (params.smoothWithRVD && params.rvdSmoothIterations > 0 && !outTriangles.empty())
             {
                 SmoothWithRVD(outVertices, outTriangles, params);
@@ -249,21 +227,6 @@ namespace gte
             }
 
             ExtractManifold(points, workNormals, candidateTriangles, outTriangles, params);
-
-            if (params.autoFixNonManifold && !outTriangles.empty())
-            {
-                AutoFixNonManifoldEdges(outTriangles);
-            }
-
-            if (params.fixWindingOrder && !outTriangles.empty())
-            {
-                FixWindingOrder(points, outTriangles);
-            }
-
-            if (params.preventSelfIntersections && !outTriangles.empty())
-            {
-                RemoveSelfIntersectingTriangles(points, outTriangles);
-            }
 
             outVertices = points;
 
@@ -499,48 +462,35 @@ namespace gte
                 return;
             }
 
+#ifdef GTE_DEBUG
+            // Legacy O(k²) fan generator — inferior results, kept for debugging only.
+            // Each seed generates all pairs of consistent k-NN as candidates.
+            // The "exactly 3 appearances" invariant from Geogram's RVC polygon does NOT
+            // hold here, making the T3/T12 classification in ExtractManifold meaningless.
             Real maxCosAngle = std::cos(params.maxNormalAngle * static_cast<Real>(3.14159265358979323846) / static_cast<Real>(180));
 
-            // For each point, generate local triangles
             for (size_t i = 0; i < points.size(); ++i)
             {
-                // Find k-nearest neighbors
                 constexpr int32_t MaxNeighbors = 100;
                 std::array<int32_t, MaxNeighbors> indices;
                 int32_t numFound = nnQuery.template FindNeighbors<MaxNeighbors>(
                     points[i], searchRadius, indices);
 
-                if (numFound < 3)
-                {
-                    continue;
-                }
+                if (numFound < 3) continue;
 
                 int32_t k = std::min(numFound, static_cast<int32_t>(params.kNeighbors));
 
-                // Filter by normal consistency (co-cone criterion)
                 std::vector<int32_t> consistentNeighbors;
                 for (int32_t j = 0; j < k; ++j)
                 {
                     int32_t nIdx = indices[j];
-                    if (nIdx == static_cast<int32_t>(i))
-                    {
-                        continue;
-                    }
-
-                    Real dot = Dot(normals[i], normals[nIdx]);
-                    if (dot >= maxCosAngle)
-                    {
+                    if (nIdx == static_cast<int32_t>(i)) continue;
+                    if (Dot(normals[i], normals[nIdx]) >= maxCosAngle)
                         consistentNeighbors.push_back(nIdx);
-                    }
                 }
 
-                if (consistentNeighbors.size() < 2)
-                {
-                    continue;
-                }
+                if (consistentNeighbors.size() < 2) continue;
 
-                // Generate triangles from local neighbors
-                // Using a simple fan triangulation for each neighbor pair
                 for (size_t j = 0; j < consistentNeighbors.size(); ++j)
                 {
                     for (size_t kk = j + 1; kk < consistentNeighbors.size(); ++kk)
@@ -549,23 +499,13 @@ namespace gte
                         int32_t v1 = consistentNeighbors[j];
                         int32_t v2 = consistentNeighbors[kk];
 
-                        // Check triangle quality
-                        if (!IsTriangleValid(points, v0, v1, v2, params))
-                        {
-                            continue;
-                        }
+                        if (!IsTriangleValid(points, v0, v1, v2, params)) continue;
 
-                        // Create triangle - DON'T normalize yet!
-                        // We want to keep duplicates so they can be counted
-                        std::array<int32_t, 3> tri = { v0, v1, v2 };
-                        
-                        // Add the triangle directly (with duplicates)
-                        // This is critical: Geogram's algorithm relies on counting
-                        // how many times each triangle appears from different Voronoi cells
-                        triangles.push_back(tri);
+                        triangles.push_back({ v0, v1, v2 });
                     }
                 }
             }
+#endif  // GTE_DEBUG
         }
 
         // Manifold-constrained triangle generation.
@@ -589,7 +529,7 @@ namespace gte
         //    we swap v1 and v2 in-place. Winding is therefore consistent with
         //    the estimated surface normal at generation time.
         //
-        // 3. Non-manifold edges requiring post-hoc autoFixNonManifold
+        // 3. Non-manifold edges requiring post-hoc fixing
         //    Standard: every O(k²) candidate is added unconditionally, so an
         //    edge can appear in arbitrarily many triangles.
         //    Fix: maintain a global edge-use counter. Each undirected edge
@@ -599,7 +539,7 @@ namespace gte
         // Trade-off: because we enforce a global greedy constraint, the result
         // depends on processing order, and the output is a subset of the surface
         // rather than the full set of plausible triangles. The subsequent
-        // ExtractManifold / AutoFixNonManifold steps are still available and can
+        // ExtractManifold step is still available and can
         // be applied to this already-clean candidate set.
         static void GenerateTrianglesManifoldConstrained(
             std::vector<Vector3<Real>> const& points,
@@ -842,8 +782,13 @@ namespace gte
 
         // ===== MANIFOLD EXTRACTION =====
 
-        // Extract manifold surface from candidate triangles
-        // NOW USES FULL GEOGRAM-EQUIVALENT MANIFOLD EXTRACTION
+        // Extract manifold surface from candidate triangles.
+        // When manifold-constrained generation was used (the default), every
+        // candidate appears exactly once and the edge-budget constraint was
+        // already enforced during generation.  All unique candidates are passed
+        // directly as "good" triangles to Co3NeManifoldExtractor, skipping the
+        // legacy T3/T12 Voronoi-count classification (which is only meaningful
+        // for the O(k²) fan generator, available in GTE_DEBUG builds).
         static void ExtractManifold(
             std::vector<Vector3<Real>> const& points,
             std::vector<Vector3<Real>> const& normals,
@@ -851,43 +796,9 @@ namespace gte
             std::vector<std::array<int32_t, 3>>& outTriangles,
             Parameters const& params)
         {
-            // Option: Bypass manifold extraction entirely and output unique triangles
-            if (params.bypassManifoldExtraction)
-            {
-                // Deduplicate triangles while preserving the original winding order.
-                // Use sorted vertex triples as the canonical key for identity, but
-                // keep the first-seen (original winding) copy in the output.
-                std::unordered_map<std::array<int32_t, 3>, std::array<int32_t, 3>,
-                                   TriangleArrayHash> seen;
-                seen.reserve(candidateTriangles.size());
-
-                for (auto const& tri : candidateTriangles)
-                {
-                    std::array<int32_t, 3> key = tri;
-                    std::sort(key.begin(), key.end());
-                    // try_emplace inserts only if the key is absent; the first-seen
-                    // triangle (with its original winding) therefore wins.
-                    seen.try_emplace(key, tri);
-                }
-
-                outTriangles.clear();
-                outTriangles.reserve(seen.size());
-                for (auto const& [key, tri] : seen)
-                {
-                    outTriangles.push_back(tri);
-                }
-
-                return;
-            }
-
-            // When manifold-constrained generation was used, every candidate triangle
-            // appears exactly once and the edge-manifold constraint was already enforced
-            // during generation.  Skip the Voronoi-count (T3/T12) classification and
-            // pass all candidates directly as "good" triangles into the extractor, which
-            // will still remove any Moebius / orientation inconsistencies.
             if (params.useManifoldConstrainedGeneration)
             {
-                // Deduplicate (defensive, candidates should already be unique)
+                // Deduplicate (defensive — candidates should already be unique)
                 std::set<std::array<int32_t, 3>> seen;
                 std::vector<std::array<int32_t, 3>> uniqueCandidates;
                 uniqueCandidates.reserve(candidateTriangles.size());
@@ -911,71 +822,45 @@ namespace gte
                 extractor.Extract(uniqueCandidates, empty, outTriangles);
                 return;
             }
-            
-            // Standard manifold extraction follows...
-            
-            // Separate triangles into "good" and "not-so-good" categories
-            // Good triangles: appear exactly 3 times (seen from 3 Voronoi cells)
-            // These form a reliable manifold seed
+
+#ifdef GTE_DEBUG
+            // Legacy T3/T12 Voronoi-count classification — only meaningful for the
+            // O(k²) fan generator (GTE_DEBUG builds).  With the constrained generator
+            // each triangle appears exactly once, so counting occurrences is useless.
+            //
+            // Triangles appearing exactly 3 times → T3 (good, reliable manifold seed)
+            // Triangles appearing 1–2 times        → T12 (not-so-good, added later)
+            // Triangles appearing > 3 times        → discarded
             std::vector<std::array<int32_t, 3>> goodTriangles;
             std::vector<std::array<int32_t, 3>> notSoGoodTriangles;
-            
-            // Build triangle count map.
-            // Use unordered_map for O(1) average insertion/lookup vs O(log T) for
-            // std::map.  With O(n·k²) candidate triangles this matters at scale.
+
             std::unordered_map<std::array<int32_t, 3>, int, TriangleArrayHash> triangleCounts;
-            triangleCounts.reserve(candidateTriangles.size() / 3);  // rough estimate
+            triangleCounts.reserve(candidateTriangles.size() / 3);
             for (auto const& tri : candidateTriangles)
             {
-                // Normalize triangle (sort vertices for comparison)
                 std::array<int32_t, 3> normalized = tri;
                 std::sort(normalized.begin(), normalized.end());
                 triangleCounts[normalized]++;
             }
-            
-            // Categorize triangles based on frequency
-            // Following Geogram's logic exactly:
-            // - Triangles appearing exactly 3 times → good (reliable manifold seed)
-            // - Triangles appearing 1-2 times → not-so-good (added incrementally)
-            // - Triangles appearing > 3 times → discarded (overly constrained)
-            // In relaxed mode, triangles appearing 2-3 times are considered good
-            
-            int minGoodCount = params.relaxedManifoldExtraction ? 2 : 3;
-            int maxGoodCount = 3;
-            
-            // Add each UNIQUE triangle once based on its count
+
             for (auto const& pair : triangleCounts)
             {
-                std::array<int32_t, 3> const& normalized = pair.first;
                 int count = pair.second;
-                
-                if (count >= minGoodCount && count <= maxGoodCount)
-                {
-                    // Good triangles (appear 2-3 times depending on mode)
-                    goodTriangles.push_back(normalized);
-                }
-                else if (count <= 2 && count >= 1)
-                {
-                    // Not-so-good triangles (appear 1-2 times)
-                    // Only add if not already in good triangles
-                    if (count < minGoodCount)
-                    {
-                        notSoGoodTriangles.push_back(normalized);
-                    }
-                }
-                // Triangles appearing > 3 times are discarded (like Geogram)
+                if (count == 3)
+                    goodTriangles.push_back(pair.first);
+                else if (count < 3)
+                    notSoGoodTriangles.push_back(pair.first);
+                // count > 3: discard
             }
-            
-            // Use full manifold extraction
+
             typename Co3NeManifoldExtractor<Real>::Parameters extractorParams;
-            extractorParams.strictMode = params.strictMode;
-            extractorParams.maxIterations = 50;  // Default from geogram
-            extractorParams.verbose = false;
-            
+            extractorParams.strictMode    = params.strictMode;
+            extractorParams.maxIterations = 50;
+            extractorParams.verbose       = false;
+
             Co3NeManifoldExtractor<Real> extractor(points, extractorParams);
-            
-            // Extract manifold with incremental insertion
             extractor.Extract(goodTriangles, notSoGoodTriangles, outTriangles);
+#endif  // GTE_DEBUG
         }
 
         // ===== UTILITY FUNCTIONS =====
@@ -1091,246 +976,6 @@ namespace gte
 
             // Use 5% of the bounding-box diagonal, matching Geogram / BRL-CAD.
             return static_cast<Real>(0.05) * diagonal;
-        }
-        
-        // Automatically fix non-manifold edges by removing offending triangles
-        // Uses greedy strategy: for each edge with >2 triangles, keep first 2
-        static void AutoFixNonManifoldEdges(
-            std::vector<std::array<int32_t, 3>>& triangles)
-        {
-            // Build edge to triangles map
-            std::map<std::pair<int32_t, int32_t>, std::vector<int32_t>> edgeToTriangles;
-            
-            for (size_t t = 0; t < triangles.size(); ++t)
-            {
-                auto const& tri = triangles[t];
-                for (int i = 0; i < 3; ++i)
-                {
-                    int32_t v0 = tri[i];
-                    int32_t v1 = tri[(i + 1) % 3];
-                    auto edge = std::make_pair(std::min(v0, v1), std::max(v0, v1));
-                    edgeToTriangles[edge].push_back(static_cast<int32_t>(t));
-                }
-            }
-            
-            // Find triangles to remove
-            std::set<int32_t> trianglesToRemove;
-            for (auto const& pair : edgeToTriangles)
-            {
-                size_t count = pair.second.size();
-                if (count > 2)
-                {
-                    // Keep first 2 triangles, remove the rest
-                    for (size_t i = 2; i < count; ++i)
-                    {
-                        trianglesToRemove.insert(pair.second[i]);
-                    }
-                }
-            }
-            
-            // Build new triangle list without removed triangles
-            if (!trianglesToRemove.empty())
-            {
-                std::vector<std::array<int32_t, 3>> fixedTriangles;
-                fixedTriangles.reserve(triangles.size() - trianglesToRemove.size());
-                
-                for (size_t t = 0; t < triangles.size(); ++t)
-                {
-                    if (trianglesToRemove.find(static_cast<int32_t>(t)) == trianglesToRemove.end())
-                    {
-                        fixedTriangles.push_back(triangles[t]);
-                    }
-                }
-                
-                triangles = std::move(fixedTriangles);
-            }
-        }
-        
-        // Fix triangle winding order to be consistent (outward-facing from centroid)
-        static void FixWindingOrder(
-            std::vector<Vector3<Real>> const& vertices,
-            std::vector<std::array<int32_t, 3>>& triangles)
-        {
-            if (triangles.empty() || vertices.empty())
-            {
-                return;
-            }
-            
-            // Compute centroid
-            Vector3<Real> centroid = vertices[0];
-            for (size_t i = 1; i < vertices.size(); ++i)
-            {
-                centroid += vertices[i];
-            }
-            centroid /= static_cast<Real>(vertices.size());
-            
-            // Fix each triangle's winding
-            for (auto& tri : triangles)
-            {
-                Vector3<Real> const& p0 = vertices[tri[0]];
-                Vector3<Real> const& p1 = vertices[tri[1]];
-                Vector3<Real> const& p2 = vertices[tri[2]];
-                
-                // Compute triangle normal
-                Vector3<Real> e1 = p1 - p0;
-                Vector3<Real> e2 = p2 - p0;
-                Vector3<Real> normal = Cross(e1, e2);
-                
-                // Vector from centroid to triangle center
-                Vector3<Real> triCenter = (p0 + p1 + p2) / static_cast<Real>(3);
-                Vector3<Real> outward = triCenter - centroid;
-                
-                // If normal points inward (dot < 0), flip triangle
-                if (Dot(normal, outward) < static_cast<Real>(0))
-                {
-                    std::swap(tri[1], tri[2]);  // Reverse winding
-                }
-            }
-        }
-        
-        // Remove self-intersecting triangles
-        // Uses greedy approach: check each triangle against all others, remove if intersects
-        static void RemoveSelfIntersectingTriangles(
-            std::vector<Vector3<Real>> const& vertices,
-            std::vector<std::array<int32_t, 3>>& triangles)
-        {
-            if (triangles.size() < 2)
-            {
-                return;
-            }
-            
-            std::set<int32_t> trianglesToRemove;
-            
-            // For large meshes, use spatial partitioning
-            // For now, use simple O(n^2) check with early termination
-            size_t maxChecks = 50000;  // Limit to prevent excessive runtime
-            size_t numChecks = 0;
-            
-            for (size_t i = 0; i < triangles.size() && numChecks < maxChecks; ++i)
-            {
-                if (trianglesToRemove.find(static_cast<int32_t>(i)) != trianglesToRemove.end())
-                {
-                    continue;  // Already marked for removal
-                }
-                
-                auto const& tri1 = triangles[i];
-                Vector3<Real> const& p0 = vertices[tri1[0]];
-                Vector3<Real> const& p1 = vertices[tri1[1]];
-                Vector3<Real> const& p2 = vertices[tri1[2]];
-                
-                for (size_t j = i + 1; j < triangles.size() && numChecks < maxChecks; ++j)
-                {
-                    if (trianglesToRemove.find(static_cast<int32_t>(j)) != trianglesToRemove.end())
-                    {
-                        continue;
-                    }
-                    
-                    auto const& tri2 = triangles[j];
-                    
-                    // Skip if triangles share vertices (adjacent)
-                    bool adjacent = false;
-                    for (int vi = 0; vi < 3 && !adjacent; ++vi)
-                    {
-                        for (int vj = 0; vj < 3; ++vj)
-                        {
-                            if (tri1[vi] == tri2[vj])
-                            {
-                                adjacent = true;
-                                break;
-                            }
-                        }
-                    }
-                    
-                    if (adjacent)
-                    {
-                        continue;
-                    }
-                    
-                    Vector3<Real> const& q0 = vertices[tri2[0]];
-                    Vector3<Real> const& q1 = vertices[tri2[1]];
-                    Vector3<Real> const& q2 = vertices[tri2[2]];
-                    
-                    numChecks++;
-                    
-                    // Simple triangle-triangle intersection test
-                    // Check if any edge of tri1 intersects tri2 or vice versa
-                    if (TrianglesIntersect(p0, p1, p2, q0, q1, q2))
-                    {
-                        // Mark the larger-index triangle for removal (greedy)
-                        trianglesToRemove.insert(static_cast<int32_t>(j));
-                    }
-                }
-            }
-            
-            // Remove marked triangles
-            if (!trianglesToRemove.empty())
-            {
-                std::vector<std::array<int32_t, 3>> cleanTriangles;
-                cleanTriangles.reserve(triangles.size() - trianglesToRemove.size());
-                
-                for (size_t t = 0; t < triangles.size(); ++t)
-                {
-                    if (trianglesToRemove.find(static_cast<int32_t>(t)) == trianglesToRemove.end())
-                    {
-                        cleanTriangles.push_back(triangles[t]);
-                    }
-                }
-                
-                triangles = std::move(cleanTriangles);
-            }
-        }
-        
-        // Simple triangle-triangle intersection test
-        static bool TrianglesIntersect(
-            Vector3<Real> const& p0, Vector3<Real> const& p1, Vector3<Real> const& p2,
-            Vector3<Real> const& q0, Vector3<Real> const& q1, Vector3<Real> const& q2)
-        {
-            // Simplified intersection test using separating axis theorem
-            // Check if triangles are on opposite sides of each other's planes
-            
-            // Compute normals
-            Vector3<Real> n1 = Cross(p1 - p0, p2 - p0);
-            Vector3<Real> n2 = Cross(q1 - q0, q2 - q0);
-            
-            Real epsilon = static_cast<Real>(1e-10);
-            Real len1 = Length(n1);
-            Real len2 = Length(n2);
-            
-            if (len1 < epsilon || len2 < epsilon)
-            {
-                return false;  // Degenerate triangle
-            }
-            
-            n1 /= len1;
-            n2 /= len2;
-            
-            // Check if tri2 vertices are all on same side of tri1's plane
-            Real d0 = Dot(q0 - p0, n1);
-            Real d1 = Dot(q1 - p0, n1);
-            Real d2 = Dot(q2 - p0, n1);
-            
-            Real thresh = static_cast<Real>(1e-6);
-            if ((d0 > thresh && d1 > thresh && d2 > thresh) ||
-                (d0 < -thresh && d1 < -thresh && d2 < -thresh))
-            {
-                return false;  // All on same side
-            }
-            
-            // Check if tri1 vertices are all on same side of tri2's plane
-            d0 = Dot(p0 - q0, n2);
-            d1 = Dot(p1 - q0, n2);
-            d2 = Dot(p2 - q0, n2);
-            
-            if ((d0 > thresh && d1 > thresh && d2 > thresh) ||
-                (d0 < -thresh && d1 < -thresh && d2 < -thresh))
-            {
-                return false;  // All on same side
-            }
-            
-            // If we get here, triangles potentially intersect
-            // For a complete test we'd need edge-edge checks, but this is
-            // good enough for filtering obvious non-intersecting cases
-            return true;
         }
     };
 }

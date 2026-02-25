@@ -167,10 +167,10 @@ namespace gte
                 , maxIterations(20)
                 , initialBridgeThreshold(static_cast<Real>(2.0))
                 , maxBridgeThreshold(static_cast<Real>(10.0))
-                , targetSingleComponent(true)
+                , targetSingleComponent(false)
                 , removeNonManifoldEdges(true)
                 , removeSmallClosedComponents(true)
-                , absorbSmallClosedComponents(true)
+                , absorbSmallClosedComponents(false)
                 , smallClosedComponentThreshold(20)  // Remove closed sub-meshes ≤20 triangles
                 , verbose(false)
             {
@@ -346,6 +346,7 @@ namespace gte
                 holeParams.method = params.holeFillingMethod;
                 holeParams.repair = true;
                 
+                size_t verticesBefore = vertices.size();
                 size_t trianglesBefore = triangles.size();
                 MeshHoleFilling<Real>::FillHoles(vertices, triangles, holeParams);
                 size_t trianglesAfter = triangles.size();
@@ -356,13 +357,15 @@ namespace gte
                 
                 if (!checkNonManifold.empty())
                 {
-                    // Hole filling created non-manifold edges - revert
+                    // Hole filling created non-manifold edges - revert both triangles
+                    // and vertices to avoid orphaned vertices in the vertex array.
                     if (params.verbose)
                     {
                         std::cout << "  Warning: Hole filling created " << checkNonManifold.size() 
                                   << " non-manifold edges, reverting\n";
                     }
                     triangles.resize(trianglesBefore);
+                    vertices.resize(verticesBefore);
                 }
                 else if (params.verbose && trianglesAfter > trianglesBefore)
                 {
@@ -408,47 +411,6 @@ namespace gte
                     auto t5ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - t5start).count();
                     std::cout << "  [Profiling] Step 5 (ball pivot hole fill): " << t5ms << " ms\n";
-                }
-            }
-            
-            // Step 6: Final hole filling (conservative, not aggressive)
-            if (params.enableHoleFilling)
-            {
-                auto t6start = std::chrono::steady_clock::now();
-                // Fill remaining holes conservatively
-                typename MeshHoleFilling<Real>::Parameters holeParams;
-                holeParams.maxArea = params.maxHoleArea;
-                holeParams.maxEdges = params.maxHoleEdges;
-                holeParams.method = params.holeFillingMethod;
-                holeParams.repair = true;
-                
-                size_t trianglesBefore = triangles.size();
-                MeshHoleFilling<Real>::FillHoles(vertices, triangles, holeParams);
-                size_t trianglesAfter = triangles.size();
-                
-                // Validate no non-manifold edges were created
-                std::vector<std::pair<int32_t, int32_t>> checkNonManifoldFinal;
-                FindNonManifoldEdges(triangles, checkNonManifoldFinal);
-                
-                if (!checkNonManifoldFinal.empty())
-                {
-                    // Hole filling created non-manifold edges - revert
-                    if (params.verbose)
-                    {
-                        std::cout << "  Warning: Final hole filling created non-manifold edges, reverting\n";
-                    }
-                    triangles.resize(trianglesBefore);
-                }
-                else if (params.verbose && trianglesAfter > trianglesBefore)
-                {
-                    std::cout << "Final hole filling added " 
-                              << (trianglesAfter - trianglesBefore) << " triangles\n";
-                }
-                if (params.verbose)
-                {
-                    auto t6ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - t6start).count();
-                    std::cout << "  [Profiling] Step 6 (final hole fill): " << t6ms << " ms\n";
                 }
             }
             
@@ -595,8 +557,9 @@ namespace gte
             }
             
             // For each non-manifold edge, keep first 2 triangles, mark rest for removal
-            std::set<size_t> trianglesToRemove;
-            
+            std::vector<bool> removeFlag(triangles.size(), false);
+            size_t removeCount = 0;
+
             for (auto const& et : edgeToTriangles)
             {
                 auto const& triIndices = et.second;
@@ -605,21 +568,27 @@ namespace gte
                     // Keep first 2, remove the rest
                     for (size_t i = 2; i < triIndices.size(); ++i)
                     {
-                        trianglesToRemove.insert(triIndices[i]);
+                        if (!removeFlag[triIndices[i]])
+                        {
+                            removeFlag[triIndices[i]] = true;
+                            ++removeCount;
+                        }
                     }
                 }
             }
-            
-            // Remove marked triangles (in reverse order to maintain indices)
-            std::vector<size_t> sortedToRemove(trianglesToRemove.begin(), trianglesToRemove.end());
-            std::sort(sortedToRemove.rbegin(), sortedToRemove.rend());
-            
-            for (auto idx : sortedToRemove)
+
+            // Single-pass compaction: O(T) total
+            size_t writeIdx = 0;
+            for (size_t readIdx = 0; readIdx < triangles.size(); ++readIdx)
             {
-                triangles.erase(triangles.begin() + idx);
+                if (!removeFlag[readIdx])
+                {
+                    triangles[writeIdx++] = triangles[readIdx];
+                }
             }
-            
-            return sortedToRemove.size();
+            triangles.resize(writeIdx);
+
+            return removeCount;
         }
         
         // Identify connected patches in the mesh

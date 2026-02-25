@@ -98,7 +98,6 @@ BenchmarkResult RunBenchmark(std::vector<Vector3<double>> const& points, bool ve
     
     Co3Ne<double>::Parameters co3neParams;
     co3neParams.kNeighbors = 20;
-    co3neParams.relaxedManifoldExtraction = true;
     co3neParams.orientNormals = true;
     
     std::vector<Vector3<double>> vertices;

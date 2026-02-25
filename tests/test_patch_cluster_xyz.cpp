@@ -216,7 +216,6 @@ int main(int argc, char* argv[])
 
     Co3Ne<double>::Parameters co3Params;
     co3Params.kNeighbors               = 20;
-    co3Params.relaxedManifoldExtraction = true;
     co3Params.orientNormals             = true;
     co3Params.triangleQualityThreshold  = 0.1;
 
