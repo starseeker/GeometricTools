@@ -74,7 +74,6 @@ int main(int argc, char* argv[])
     // Run Co3Ne
     std::cout << "Running Co3Ne reconstruction...\n";
     Co3Ne<double>::Parameters co3neParams;
-    co3neParams.relaxedManifoldExtraction = true;
     
     std::vector<Vector3<double>> vertices;
     std::vector<std::array<int32_t, 3>> triangles;

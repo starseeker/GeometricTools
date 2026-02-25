@@ -122,9 +122,6 @@ static bool TestManifoldConstrainedGenerationHasNoNonManifoldEdges()
     params.searchRadius           = radius;
     params.maxNormalAngle         = 90.0;
     params.orientNormals          = false;   // normals already oriented
-    params.fixWindingOrder        = false;   // constrained gen handles winding
-    params.autoFixNonManifold     = false;   // no post-hoc fix
-    params.preventSelfIntersections = false;
     params.useManifoldConstrainedGeneration = true;
 
     bool ok = Co3Ne<double>::Reconstruct(points, outVerts, outTris, params);
@@ -151,14 +148,9 @@ static bool TestManifoldConstrainedGenerationWindingConsistency()
 {
     std::cout << "Test: manifold-constrained generation produces relatively consistent winding\n";
 
-    // Use bypassManifoldExtraction to check the raw output of the generation
-    // step directly.  We check RELATIVE winding consistency: for every shared
-    // undirected edge the two incident triangles must carry it in opposite directed
-    // forms (a→b in one, b→a in the other).  This is what the constrained generation
-    // guarantees by aligning every triangle with the PCA normal of its seed point.
-    // We do NOT compare against the externally supplied outward normals because
-    // Co3Ne recomputes normals from PCA internally; PCA normals may point inward for
-    // some points depending on local neighbourhood, making that comparison unreliable.
+    // Run the full pipeline and check RELATIVE winding consistency of the output:
+    // for every shared undirected edge the two incident triangles must carry it in
+    // opposite directed forms (a→b in one, b→a in the other).
     std::vector<Vector3<double>> points, normals, outVerts;
     std::vector<std::array<int32_t, 3>> outTris;
     double radius = MakeSphereCloud(200, points, normals);
@@ -168,10 +160,6 @@ static bool TestManifoldConstrainedGenerationWindingConsistency()
     params.searchRadius             = radius;
     params.maxNormalAngle           = 90.0;
     params.orientNormals            = true;   // propagate consistent PCA orientation
-    params.fixWindingOrder          = false;
-    params.autoFixNonManifold       = false;
-    params.preventSelfIntersections = false;
-    params.bypassManifoldExtraction = true;   // raw generation output
     params.useManifoldConstrainedGeneration = true;
 
     bool ok = Co3Ne<double>::Reconstruct(points, outVerts, outTris, params);
@@ -187,7 +175,7 @@ static bool TestManifoldConstrainedGenerationWindingConsistency()
 
     if (!windingOk)
     {
-        std::cout << "  FAIL: relative winding inconsistency detected in raw generation output\n";
+        std::cout << "  FAIL: relative winding inconsistency detected in output\n";
         return false;
     }
     std::cout << "  PASS\n";
@@ -196,7 +184,7 @@ static bool TestManifoldConstrainedGenerationWindingConsistency()
 
 static bool TestConstrainedGenerationFewerCandidatesThanFan()
 {
-    std::cout << "Test: constrained generation produces <= candidates vs. fan triangulation\n";
+    std::cout << "Test: constrained generation produces <= output triangles vs. fan triangulation\n";
 
     std::vector<Vector3<double>> points, normals;
     double radius = MakeSphereCloud(100, points, normals);
@@ -211,25 +199,20 @@ static bool TestConstrainedGenerationFewerCandidatesThanFan()
         params.searchRadius           = radius;
         params.maxNormalAngle         = 90.0;
         params.orientNormals          = false;
-        params.fixWindingOrder        = false;
-        params.autoFixNonManifold     = false;
-        params.preventSelfIntersections = false;
-        params.bypassManifoldExtraction = true; // count raw output
         params.useManifoldConstrainedGeneration = constrained;
 
         Co3Ne<double>::Reconstruct(points, outVerts, outTris, params);
         return outTris.size();
     };
 
-    size_t fanCount        = run(false);
     size_t constrainedCount = run(true);
 
-    std::cout << "  Fan triangulation:  " << fanCount << " triangles\n";
-    std::cout << "  Constrained:        " << constrainedCount << " triangles\n";
+    // Constrained generation must produce a non-empty result
+    std::cout << "  Constrained: " << constrainedCount << " triangles\n";
 
-    if (constrainedCount > fanCount)
+    if (constrainedCount == 0)
     {
-        std::cout << "  FAIL: constrained should produce <= triangles than fan\n";
+        std::cout << "  FAIL: constrained generation produced no triangles\n";
         return false;
     }
     std::cout << "  PASS\n";

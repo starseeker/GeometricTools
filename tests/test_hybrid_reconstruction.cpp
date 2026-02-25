@@ -105,7 +105,6 @@ int main(int argc, char* argv[])
         
         HybridReconstruction<double>::Parameters params;
         params.mergeStrategy = HybridReconstruction<double>::Parameters::MergeStrategy::Co3NeOnly;
-        params.co3neParams.relaxedManifoldExtraction = false;
         params.verbose = true;
         
         std::vector<Vector3<double>> vertices;
@@ -128,7 +127,6 @@ int main(int argc, char* argv[])
         HybridReconstruction<double>::Parameters params;
         params.mergeStrategy = HybridReconstruction<double>::Parameters::MergeStrategy::QualityBased;
         params.poissonParams.depth = 8;
-        params.co3neParams.relaxedManifoldExtraction = false;
         params.verbose = true;
         
         std::vector<Vector3<double>> vertices;
@@ -151,7 +149,6 @@ int main(int argc, char* argv[])
         HybridReconstruction<double>::Parameters params;
         params.mergeStrategy = HybridReconstruction<double>::Parameters::MergeStrategy::Co3NeWithPoissonGaps;
         params.poissonParams.depth = 8;
-        params.co3neParams.relaxedManifoldExtraction = false;
         params.verbose = true;
         
         std::vector<Vector3<double>> vertices;
