@@ -433,7 +433,7 @@ lines of correct, auditable code.
 ### Should Fix (quality / parity)
 - [x] **1.4** Replace auto-radius formula with `0.05 * bbox_diagonal`.
 - [x] **1.5** Change `maxNormalAngle` default to 60°.
-- [ ] **1.6** Audit `ReorientMesh` against Geogram's `mesh_reorient`.
+- [x] **1.6** Audit `ReorientMesh` against Geogram's `mesh_reorient`.
 - [x] **2.2.1** Remove duplicate hole-filling step from `Co3NeManifoldStitcher`.
 - [x] **2.2.2** Fix orphaned-vertices bug in revert-on-failure.
 - [x] **2.2.3** Replace `AbsorbSmallClosedComponents` with simple deletion
