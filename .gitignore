@@ -1,0 +1,64 @@
+# Build artifacts (test executables in root)
+test_mesh_repair
+test_remesh
+test_co3ne
+test_full_algorithms
+test_rvd
+demo_rvd_cvt
+test_remesh_comparison
+test_co3ne_rvd
+test_newton_optimizer
+test_rvd_performance
+stress_test
+test_threadpool
+test_parallel_rvd
+test_enhanced_manifold
+test_co3ne_debug
+test_co3ne_simple
+test_debug
+test_debug_50points
+test_with_validation
+test_no_repair
+test_manifold_closure
+test_manifold_test
+test_timeout_closure
+test_closure_diagnostic
+test_euler_investigation
+compare_with_geogram
+check_projection
+*.o
+
+# Test output files in tests/data/
+tests/data/*_repaired.obj
+tests/data/*_ec.obj
+tests/data/*_cdt.obj
+tests/data/*_output.obj
+tests/data/test_output*.obj
+tests/data/test_small.obj
+tests/data/test_medium.obj
+tests/data/cvt_rvd_sites.obj
+tests/data/remesh_*.obj
+tests/data/co3ne_*.obj
+
+# Backup files
+*.obj.bak
+
+# Editor artifacts
+*.swp
+*~
+.DS_Store
+
+# Test binaries and temporary files
+test_*
+a.out
+*.gch
+*.pch
+*.obj
+perf.data
+perf.data.old
+gmon.out
+build/
+test_performance_benchmark
+
+# Allow test source files in the tests/ subdirectory to be tracked
+!tests/test_*.cpp

@@ -13,6 +13,32 @@ The update history for the current version of GTE is
 [Current Update History](https://www.geometrictools.com/Downloads/Gte8UpdateHistory.pdf).
 The update history for all versions of GTE is [Full Update History](https://www.geometrictools.com/Downloads/GteFullUpdateHistory.pdf).
 
+## Mesh Processing Extensions
+
+This repository includes GTE-style implementations of advanced mesh processing algorithms ported from Geogram, developed for BRL-CAD integration:
+
+- **Mesh Repair:** Topology validation, vertex deduplication, degenerate removal
+- **Hole Filling:** Multiple triangulation methods (Ear Clipping, Constrained Delaunay, 3D)
+- **Surface Reconstruction:** Co3Ne algorithm for point cloud reconstruction
+- **CVT Remeshing:** Centroidal Voronoi Tessellation-based remeshing
+- **Restricted Voronoi Diagram:** Surface-restricted Voronoi computation
+
+**Documentation:**
+- [STATUS.md](STATUS.md) - Current implementation status
+- [GOALS.md](GOALS.md) - Project objectives
+- [UNIMPLEMENTED.md](UNIMPLEMENTED.md) - Remaining features
+- [README_DEVELOPMENT.md](README_DEVELOPMENT.md) - Developer guide
+- [GTE_MESH_PROCESSING_README.md](GTE_MESH_PROCESSING_README.md) - Quick start guide
+- [docs/MANIFOLD_CLOSURE_SUMMARY.md](docs/MANIFOLD_CLOSURE_SUMMARY.md) - Co3Ne manifold closure implementation
+- [tests/README.md](tests/README.md) - Test suite documentation
+
+**Quick Start:**
+```bash
+make all              # Build all tests
+make test             # Run basic validation
+./stress_test         # Run comprehensive tests
+```
+
 ## Supported Platforms
 
 The mathematics code is in a header-only library, GTMathematics. A
