@@ -87,7 +87,7 @@ namespace gte
             Parameters()
                 : kNeighbors(20)
                 , searchRadius(static_cast<Real>(0))
-                , maxNormalAngle(static_cast<Real>(90))
+                , maxNormalAngle(static_cast<Real>(60))
                 , triangleQualityThreshold(static_cast<Real>(0.3))
                 , orientNormals(true)
                 , strictMode(false)
@@ -99,7 +99,7 @@ namespace gte
                 , autoFixNonManifold(false)         // Default: don't auto-fix
                 , fixWindingOrder(true)             // Default: fix winding (important for BRL-CAD)
                 , preventSelfIntersections(false)   // Default: DISABLED (too aggressive, experimental)
-                , useManifoldConstrainedGeneration(false) // Default: use original generation
+                , useManifoldConstrainedGeneration(true) // Default: angular-consecutive generation (O(k), matches RVC order)
             {
             }
         };
@@ -414,53 +414,65 @@ namespace gte
                 }
             };
 
-            std::priority_queue<OrientElement> queue;
             std::vector<bool> visited(n, false);
 
-            // Start from vertex 0
-            queue.push({ static_cast<Real>(0), 0 });
-
-            while (!queue.empty())
+            // Outer loop handles disconnected components: restart from any
+            // unvisited vertex, matching Geogram's reorient_normals logic.
+            for (size_t seed = 0; seed < n; ++seed)
             {
-                OrientElement elem = queue.top();
-                queue.pop();
-
-                size_t i = elem.vertex;
-                if (visited[i])
+                if (visited[seed])
                 {
                     continue;
                 }
-                visited[i] = true;
 
-                // Find neighbors
-                constexpr int32_t MaxNeighbors = 100;
-                std::array<int32_t, MaxNeighbors> indices;
-                int32_t numFound = nnQuery.template FindNeighbors<MaxNeighbors>(
-                    points[i], searchRadius, indices);
+                std::priority_queue<OrientElement> queue;
+                // Mark the seed as visited *before* pushing to prevent
+                // it from being pushed again by a neighbour.
+                visited[seed] = true;
+                queue.push({ static_cast<Real>(0), seed });
 
-                int32_t k = std::min(numFound, static_cast<int32_t>(params.kNeighbors));
-
-                for (int32_t j = 0; j < k; ++j)
+                while (!queue.empty())
                 {
-                    size_t neighborIdx = static_cast<size_t>(indices[j]);
-                    if (neighborIdx == i || visited[neighborIdx])
-                    {
-                        continue;
-                    }
+                    OrientElement elem = queue.top();
+                    queue.pop();
 
-                    // Check if normals point in similar direction
-                    Real dot = Dot(normals[i], normals[neighborIdx]);
-                    
-                    if (dot < static_cast<Real>(0))
-                    {
-                        // Flip neighbor normal
-                        normals[neighborIdx] = -normals[neighborIdx];
-                        dot = -dot;
-                    }
+                    size_t i = elem.vertex;
 
-                    // Add to queue with deviation
-                    Real deviation = static_cast<Real>(1) - dot;
-                    queue.push({ deviation, neighborIdx });
+                    // Find neighbors
+                    constexpr int32_t MaxNeighbors = 100;
+                    std::array<int32_t, MaxNeighbors> indices;
+                    int32_t numFound = nnQuery.template FindNeighbors<MaxNeighbors>(
+                        points[i], searchRadius, indices);
+
+                    int32_t k = std::min(numFound, static_cast<int32_t>(params.kNeighbors));
+
+                    for (int32_t j = 0; j < k; ++j)
+                    {
+                        size_t neighborIdx = static_cast<size_t>(indices[j]);
+                        if (neighborIdx == i || visited[neighborIdx])
+                        {
+                            continue;
+                        }
+
+                        // Mark visited before pushing so a vertex can only
+                        // be pushed once, preventing double-flip.
+                        visited[neighborIdx] = true;
+
+                        // Check if normals point in similar direction
+                        Real dot = Dot(normals[i], normals[neighborIdx]);
+
+                        if (dot < static_cast<Real>(0))
+                        {
+                            // Flip at push time here is safe because visited
+                            // ensures this neighbour is enqueued only once.
+                            normals[neighborIdx] = -normals[neighborIdx];
+                            dot = -dot;
+                        }
+
+                        // Add to queue with deviation
+                        Real deviation = static_cast<Real>(1) - dot;
+                        queue.push({ deviation, neighborIdx });
+                    }
                 }
             }
         }
@@ -1076,18 +1088,9 @@ namespace gte
             }
 
             Real diagonal = Length(maxPt - minPt);
-            
-            // Compute average nearest neighbor distance for better scaling
-            // For sparse point sets, we need a larger radius
-            // Use a heuristic based on point density: diagonal / (n^(1/3))
-            size_t n = points.size();
-            Real densityFactor = std::pow(static_cast<Real>(n), static_cast<Real>(1.0 / 3.0));
-            Real avgSpacing = diagonal / densityFactor;
-            
-            // Use 3-5x the average spacing to ensure sufficient neighbors
-            // This scales better than a fixed percentage of diagonal
-            Real multiplier = static_cast<Real>(4.0);  // Works well in practice
-            return avgSpacing * multiplier;
+
+            // Use 5% of the bounding-box diagonal, matching Geogram / BRL-CAD.
+            return static_cast<Real>(0.05) * diagonal;
         }
         
         // Automatically fix non-manifold edges by removing offending triangles

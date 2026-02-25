@@ -1,6 +1,6 @@
 // Test to diagnose why we can't reach 100% closure
 
-#include <GTE/Mathematics/Co3NeEnhanced.h>
+#include <GTE/Mathematics/Co3Ne.h>
 #include <iostream>
 #include <iomanip>
 #include <set>
@@ -71,16 +71,12 @@ int main()
     {
         std::cout << "Test 1: Default parameters (5 iter, 1.5 mult, 0.1 quality)" << std::endl;
         
-        Co3NeEnhanced<double>::EnhancedParameters params;
-        params.guaranteeManifold = true;
-        params.maxRefinementIterations = 5;
-        params.refinementRadiusMultiplier = 1.5;
-        params.minTriangleQuality = 0.1;
+        Co3Ne<double>::Parameters params;
         
         std::vector<Vector3<double>> vertices;
         std::vector<std::array<int32_t, 3>> triangles;
         
-        Co3NeEnhanced<double>::Reconstruct(points, vertices, triangles, params);
+        Co3Ne<double>::Reconstruct(points, vertices, triangles, params);
         
         int boundaryEdges = CountBoundaryEdges(triangles);
         std::cout << "  Triangles: " << triangles.size() << std::endl;
@@ -88,20 +84,17 @@ int main()
         std::cout << std::endl;
     }
     
-    // Test 2: More iterations
+    // Test 2: More neighbors
     {
-        std::cout << "Test 2: More iterations (20 iter)" << std::endl;
+        std::cout << "Test 2: More neighbors (kNeighbors=30)" << std::endl;
         
-        Co3NeEnhanced<double>::EnhancedParameters params;
-        params.guaranteeManifold = true;
-        params.maxRefinementIterations = 20;
-        params.refinementRadiusMultiplier = 1.5;
-        params.minTriangleQuality = 0.1;
+        Co3Ne<double>::Parameters params;
+        params.kNeighbors = 30;
         
         std::vector<Vector3<double>> vertices;
         std::vector<std::array<int32_t, 3>> triangles;
         
-        Co3NeEnhanced<double>::Reconstruct(points, vertices, triangles, params);
+        Co3Ne<double>::Reconstruct(points, vertices, triangles, params);
         
         int boundaryEdges = CountBoundaryEdges(triangles);
         std::cout << "  Triangles: " << triangles.size() << std::endl;
@@ -113,16 +106,13 @@ int main()
     {
         std::cout << "Test 3: Lower quality threshold (0.01)" << std::endl;
         
-        Co3NeEnhanced<double>::EnhancedParameters params;
-        params.guaranteeManifold = true;
-        params.maxRefinementIterations = 5;
-        params.refinementRadiusMultiplier = 1.5;
-        params.minTriangleQuality = 0.01;
+        Co3Ne<double>::Parameters params;
+        params.triangleQualityThreshold = 0.01;
         
         std::vector<Vector3<double>> vertices;
         std::vector<std::array<int32_t, 3>> triangles;
         
-        Co3NeEnhanced<double>::Reconstruct(points, vertices, triangles, params);
+        Co3Ne<double>::Reconstruct(points, vertices, triangles, params);
         
         int boundaryEdges = CountBoundaryEdges(triangles);
         std::cout << "  Triangles: " << triangles.size() << std::endl;
@@ -130,20 +120,17 @@ int main()
         std::cout << std::endl;
     }
     
-    // Test 4: Larger radius multiplier
+    // Test 4: Larger search radius
     {
-        std::cout << "Test 4: Larger radius multiplier (2.5)" << std::endl;
+        std::cout << "Test 4: Larger search radius (0.5)" << std::endl;
         
-        Co3NeEnhanced<double>::EnhancedParameters params;
-        params.guaranteeManifold = true;
-        params.maxRefinementIterations = 5;
-        params.refinementRadiusMultiplier = 2.5;
-        params.minTriangleQuality = 0.1;
+        Co3Ne<double>::Parameters params;
+        params.searchRadius = 0.5;
         
         std::vector<Vector3<double>> vertices;
         std::vector<std::array<int32_t, 3>> triangles;
         
-        Co3NeEnhanced<double>::Reconstruct(points, vertices, triangles, params);
+        Co3Ne<double>::Reconstruct(points, vertices, triangles, params);
         
         int boundaryEdges = CountBoundaryEdges(triangles);
         std::cout << "  Triangles: " << triangles.size() << std::endl;
@@ -151,20 +138,17 @@ int main()
         std::cout << std::endl;
     }
     
-    // Test 5: Combination - more iterations + lower quality
+    // Test 5: Relaxed normal angle
     {
-        std::cout << "Test 5: Combined (20 iter, 2.0 mult, 0.01 quality)" << std::endl;
+        std::cout << "Test 5: Relaxed normal angle (120 degrees)" << std::endl;
         
-        Co3NeEnhanced<double>::EnhancedParameters params;
-        params.guaranteeManifold = true;
-        params.maxRefinementIterations = 20;
-        params.refinementRadiusMultiplier = 2.0;
-        params.minTriangleQuality = 0.01;
+        Co3Ne<double>::Parameters params;
+        params.maxNormalAngle = 120.0;
         
         std::vector<Vector3<double>> vertices;
         std::vector<std::array<int32_t, 3>> triangles;
         
-        Co3NeEnhanced<double>::Reconstruct(points, vertices, triangles, params);
+        Co3Ne<double>::Reconstruct(points, vertices, triangles, params);
         
         int boundaryEdges = CountBoundaryEdges(triangles);
         std::cout << "  Triangles: " << triangles.size() << std::endl;
