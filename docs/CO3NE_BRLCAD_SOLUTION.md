@@ -48,15 +48,10 @@ Co3Ne now produces **clean, manifold, non-self-intersecting** meshes suitable fo
 std::vector<gte::Vector3<double>> points;
 // ... load points from BRL-CAD ...
 
-// Use default parameters - all fixes enabled!
+// Use default parameters
 gte::Co3Ne<double>::Parameters params;
 params.kNeighbors = 20;
 params.orientNormals = true;
-
-// Choose mode based on needs
-params.relaxedManifoldExtraction = true;  // Better coverage (recommended)
-// or
-params.relaxedManifoldExtraction = false; // More conservative (strict)
 
 // Reconstruct - guaranteed clean mesh!
 std::vector<gte::Vector3<double>> vertices;
@@ -67,9 +62,8 @@ bool success = gte::Co3Ne<double>::Reconstruct(points, vertices, triangles, para
 if (success)
 {
     // Mesh is guaranteed to be:
-    // ✅ Manifold (if autoFixNonManifold enabled or strict mode)
-    // ✅ Consistent winding order (outward-facing)
-    // ✅ No self-intersections
+    // ✅ Manifold (manifold extractor is always applied)
+    // ✅ Consistent winding order (handled by constrained generator)
     // ✅ Suitable for BRL-CAD
 }
 ```
@@ -81,21 +75,13 @@ struct Parameters {
     // Triangle generation
     size_t kNeighbors = 20;              // Good default for most cases
     Real searchRadius = 0.0;             // Auto-compute (recommended)
-    Real maxNormalAngle = 90.0;          // Accept neighbors within 90 degrees
+    Real maxNormalAngle = 60.0;          // Accept neighbors within 60 degrees
     bool orientNormals = true;           // Orient consistently
-    
-    // Manifold extraction
     bool strictMode = false;             // Use relaxed for better coverage
-    bool relaxedManifoldExtraction = false;  // Set to true for more triangles
-    bool bypassManifoldExtraction = false;   // Don't bypass (keep false)
-    
-    // Quality fixes (ENABLED BY DEFAULT for BRL-CAD)
-    bool autoFixNonManifold = false;         // Enable for guaranteed manifold
-    bool fixWindingOrder = true;             // ✅ ENABLED - fixes normals
-    bool preventSelfIntersections = true;    // ✅ ENABLED - removes bad triangles
-    
+    bool useManifoldConstrainedGeneration = true;  // Angular-consecutive O(k) generator
+
     // Post-processing
-    bool smoothWithRVD = true;           // Optional smoothing
+    bool smoothWithRVD = false;          // Optional smoothing (O(n²)/iter, off by default)
     size_t rvdSmoothIterations = 3;      // Number of smoothing passes
 };
 ```
@@ -106,24 +92,22 @@ struct Parameters {
 
 **Use Strict Mode:**
 ```cpp
-params.relaxedManifoldExtraction = false;  // Strict mode
+params.strictMode = true;  // More conservative manifold extraction
 ```
 
-- Produces fewer triangles (17 for 1000 points)
-- Captures 72.5% of volume
+- Produces fewer triangles
 - Very conservative and reliable
 - **Good for simple planar shapes**
 
 ### For Complex/Concave Shapes
 
-**Use Relaxed Mode:**
+**Use Default Mode (strictMode = false):**
 ```cpp
-params.relaxedManifoldExtraction = true;  // Relaxed mode
+params.strictMode = false;  // Default: accepts more candidate triangles
 ```
 
-- Produces more triangles (60 for 1000 points)
-- Captures 397.8% of convex hull volume (captures concave features!)
-- Better shape fidelity
+- Produces more triangles
+- Better shape fidelity for concave geometry
 - **Recommended for complex BRL-CAD geometry**
 
 ## Volume > 100% of Hull is CORRECT

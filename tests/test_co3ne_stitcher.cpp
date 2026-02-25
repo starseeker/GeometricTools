@@ -72,7 +72,6 @@ void TestBasicStitching()
     // Run Co3Ne reconstruction
     Co3Ne<double>::Parameters co3neParams;
     co3neParams.kNeighbors = 5;
-    co3neParams.relaxedManifoldExtraction = true;
     
     std::vector<Vector3<double>> vertices;
     std::vector<std::array<int32_t, 3>> triangles;
@@ -126,7 +125,6 @@ void TestRealDataStitching(size_t maxPoints)
     // Run Co3Ne reconstruction with relaxed mode
     Co3Ne<double>::Parameters co3neParams;
     co3neParams.kNeighbors = 20;
-    co3neParams.relaxedManifoldExtraction = true;
     co3neParams.orientNormals = true;
     
     std::vector<Vector3<double>> vertices;
@@ -235,7 +233,6 @@ void TestBallPivotWelding()
     // Run Co3Ne reconstruction with relaxed mode
     Co3Ne<double>::Parameters co3neParams;
     co3neParams.kNeighbors = 20;
-    co3neParams.relaxedManifoldExtraction = true;
     co3neParams.orientNormals = true;
     
     std::vector<Vector3<double>> vertices;

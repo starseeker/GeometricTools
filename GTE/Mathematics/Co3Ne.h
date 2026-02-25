@@ -65,23 +65,28 @@ namespace gte
             size_t kNeighbors;              // Number of neighbors for PCA (default: 20)
             Real searchRadius;              // Search radius (0 = auto)
             Real maxNormalAngle;            // Max angle for normal agreement (degrees)
-            Real triangleQualityThreshold;  // Minimum triangle quality (0-1)
+            // Minimum triangle quality (0–1).  Triangles whose area falls below
+            // triangleQualityThreshold * (√3/4) * r² (where r is the local search
+            // radius) are discarded during O(k²) generation.  Has no effect when
+            // useManifoldConstrainedGeneration = true.
+            Real triangleQualityThreshold;
             bool orientNormals;             // Orient normals consistently via propagation
             bool strictMode;                // Strict manifold extraction (more conservative)
             bool removeIsolatedTriangles;   // Remove isolated triangles
-            bool smoothWithRVD;             // Post-process with RVD-based smoothing (improves quality)
+            // Post-process with RVD-based smoothing.  NOTE: This is O(n²) per
+            // iteration and should only be used for small meshes (n < ~2000).
+            // Geogram's Co3Ne_smooth uses a different (cheaper) approach; prefer
+            // it for large inputs.  Disabled by default.
+            bool smoothWithRVD;
             size_t rvdSmoothIterations;     // Number of RVD smoothing iterations
-            bool relaxedManifoldExtraction; // Use relaxed manifold extraction (accept more triangles)
-            bool bypassManifoldExtraction;  // Skip manifold extraction entirely (output all unique triangles)
-            bool autoFixNonManifold;        // Automatically fix non-manifold edges (guarantees manifold output)
-            bool fixWindingOrder;           // Fix triangle winding to be consistent (outward-facing)
-            bool preventSelfIntersections;  // Reject triangles that would cause self-intersections (EXPERIMENTAL - can be too aggressive)
-            // Manifold-constrained generation: enforces manifold topology during triangle
-            // production using tangent-plane angular ordering (approximating Voronoi polygon
-            // order). Instead of generating all O(k²) neighbor pairs, only angularly-
-            // consecutive pairs are triangulated and each undirected edge is allowed in at
-            // most 2 triangles. Winding is aligned with the point normal at generation
-            // time, eliminating the need for the post-hoc FixWindingOrder step.
+            // Manifold-constrained generation: enforces manifold topology during
+            // triangle production using tangent-plane angular ordering (approximating
+            // Voronoi polygon order).  Only angularly-consecutive pairs are
+            // triangulated and each undirected edge is allowed in at most 2
+            // triangles.  This is O(k) per seed (vs. O(k²) for the fallback),
+            // matches Geogram's RVC polygon traversal, and aligns winding with the
+            // PCA normal at generation time.  Set to true by default; set to false
+            // only to fall back to the O(k²) generator for diagnostic purposes.
             bool useManifoldConstrainedGeneration;
             
             Parameters()
@@ -94,11 +99,6 @@ namespace gte
                 , removeIsolatedTriangles(true)
                 , smoothWithRVD(false)      // Disabled by default: O(n²)/iter; see SmoothWithRVD for full analysis
                 , rvdSmoothIterations(3)    // 3 iterations usually sufficient
-                , relaxedManifoldExtraction(false)  // Default to original behavior
-                , bypassManifoldExtraction(false)   // Default to standard manifold extraction
-                , autoFixNonManifold(false)         // Default: don't auto-fix
-                , fixWindingOrder(true)             // Default: fix winding (important for BRL-CAD)
-                , preventSelfIntersections(false)   // Default: DISABLED (too aggressive, experimental)
                 , useManifoldConstrainedGeneration(true) // Default: angular-consecutive generation (O(k), matches RVC order)
             {
             }
@@ -163,24 +163,6 @@ namespace gte
 
             // Step 4: Extract manifold surface
             ExtractManifold(points, normals, candidateTriangles, outTriangles, params);
-            
-            // Step 4.5: Auto-fix non-manifold edges if requested
-            if (params.autoFixNonManifold && !outTriangles.empty())
-            {
-                AutoFixNonManifoldEdges(outTriangles);
-            }
-            
-            // Step 4.6: Fix winding order to be consistent (outward-facing)
-            if (params.fixWindingOrder && !outTriangles.empty())
-            {
-                FixWindingOrder(points, outTriangles);
-            }
-            
-            // Step 4.7: Remove self-intersecting triangles if requested
-            if (params.preventSelfIntersections && !outTriangles.empty())
-            {
-                RemoveSelfIntersectingTriangles(points, outTriangles);
-            }
 
             // Copy vertices
             outVertices = points;
@@ -249,21 +231,6 @@ namespace gte
             }
 
             ExtractManifold(points, workNormals, candidateTriangles, outTriangles, params);
-
-            if (params.autoFixNonManifold && !outTriangles.empty())
-            {
-                AutoFixNonManifoldEdges(outTriangles);
-            }
-
-            if (params.fixWindingOrder && !outTriangles.empty())
-            {
-                FixWindingOrder(points, outTriangles);
-            }
-
-            if (params.preventSelfIntersections && !outTriangles.empty())
-            {
-                RemoveSelfIntersectingTriangles(points, outTriangles);
-            }
 
             outVertices = points;
 
@@ -582,14 +549,14 @@ namespace gte
         //    the RVC edge between seeds j and k is exactly the boundary between
         //    two angularly-adjacent Voronoi neighbors of i in the tangent plane.
         //
-        // 2. Inconsistent winding order requiring FixWindingOrder post-processing
+        // 2. Inconsistent winding order
         //    Standard: triangle orientation is arbitrary.
         //    Fix: after deciding the edge (v1→v2) in angular CCW order seen from
         //    normal[i], we verify Cross(v1-v0, v2-v0) · normal[i] > 0; if not,
         //    we swap v1 and v2 in-place. Winding is therefore consistent with
         //    the estimated surface normal at generation time.
         //
-        // 3. Non-manifold edges requiring post-hoc autoFixNonManifold
+        // 3. Non-manifold edges
         //    Standard: every O(k²) candidate is added unconditionally, so an
         //    edge can appear in arbitrarily many triangles.
         //    Fix: maintain a global edge-use counter. Each undirected edge
@@ -599,8 +566,7 @@ namespace gte
         // Trade-off: because we enforce a global greedy constraint, the result
         // depends on processing order, and the output is a subset of the surface
         // rather than the full set of plausible triangles. The subsequent
-        // ExtractManifold / AutoFixNonManifold steps are still available and can
-        // be applied to this already-clean candidate set.
+        // ExtractManifold step is still applied to this already-clean candidate set.
         static void GenerateTrianglesManifoldConstrained(
             std::vector<Vector3<Real>> const& points,
             std::vector<Vector3<Real>> const& normals,
@@ -851,35 +817,6 @@ namespace gte
             std::vector<std::array<int32_t, 3>>& outTriangles,
             Parameters const& params)
         {
-            // Option: Bypass manifold extraction entirely and output unique triangles
-            if (params.bypassManifoldExtraction)
-            {
-                // Deduplicate triangles while preserving the original winding order.
-                // Use sorted vertex triples as the canonical key for identity, but
-                // keep the first-seen (original winding) copy in the output.
-                std::unordered_map<std::array<int32_t, 3>, std::array<int32_t, 3>,
-                                   TriangleArrayHash> seen;
-                seen.reserve(candidateTriangles.size());
-
-                for (auto const& tri : candidateTriangles)
-                {
-                    std::array<int32_t, 3> key = tri;
-                    std::sort(key.begin(), key.end());
-                    // try_emplace inserts only if the key is absent; the first-seen
-                    // triangle (with its original winding) therefore wins.
-                    seen.try_emplace(key, tri);
-                }
-
-                outTriangles.clear();
-                outTriangles.reserve(seen.size());
-                for (auto const& [key, tri] : seen)
-                {
-                    outTriangles.push_back(tri);
-                }
-
-                return;
-            }
-
             // When manifold-constrained generation was used, every candidate triangle
             // appears exactly once and the edge-manifold constraint was already enforced
             // during generation.  Skip the Voronoi-count (T3/T12) classification and
@@ -911,15 +848,15 @@ namespace gte
                 extractor.Extract(uniqueCandidates, empty, outTriangles);
                 return;
             }
-            
-            // Standard manifold extraction follows...
-            
-            // Separate triangles into "good" and "not-so-good" categories
-            // Good triangles: appear exactly 3 times (seen from 3 Voronoi cells)
-            // These form a reliable manifold seed
+
+            // Standard manifold extraction follows (fallback O(k²) generator path).
+            //
+            // Separate triangles into "good" and "not-so-good" categories.
+            // Good triangles: appear exactly 3 times (seen from 3 Voronoi cells).
+            // These form a reliable manifold seed.
             std::vector<std::array<int32_t, 3>> goodTriangles;
             std::vector<std::array<int32_t, 3>> notSoGoodTriangles;
-            
+
             // Build triangle count map.
             // Use unordered_map for O(1) average insertion/lookup vs O(log T) for
             // std::map.  With O(n·k²) candidate triangles this matters at scale.
@@ -932,48 +869,39 @@ namespace gte
                 std::sort(normalized.begin(), normalized.end());
                 triangleCounts[normalized]++;
             }
-            
-            // Categorize triangles based on frequency
-            // Following Geogram's logic exactly:
+
+            // Categorize triangles based on Voronoi count.
+            // Following Geogram's logic:
             // - Triangles appearing exactly 3 times → good (reliable manifold seed)
             // - Triangles appearing 1-2 times → not-so-good (added incrementally)
-            // - Triangles appearing > 3 times → discarded (overly constrained)
-            // In relaxed mode, triangles appearing 2-3 times are considered good
-            
-            int minGoodCount = params.relaxedManifoldExtraction ? 2 : 3;
-            int maxGoodCount = 3;
-            
-            // Add each UNIQUE triangle once based on its count
+            // - Triangles appearing > 3 times → discarded (over-constrained)
+            constexpr int minGoodCount = 3;
+            constexpr int maxGoodCount = 3;
+
             for (auto const& pair : triangleCounts)
             {
                 std::array<int32_t, 3> const& normalized = pair.first;
                 int count = pair.second;
-                
+
                 if (count >= minGoodCount && count <= maxGoodCount)
                 {
-                    // Good triangles (appear 2-3 times depending on mode)
                     goodTriangles.push_back(normalized);
                 }
-                else if (count <= 2 && count >= 1)
+                else if (count < minGoodCount)
                 {
-                    // Not-so-good triangles (appear 1-2 times)
-                    // Only add if not already in good triangles
-                    if (count < minGoodCount)
-                    {
-                        notSoGoodTriangles.push_back(normalized);
-                    }
+                    notSoGoodTriangles.push_back(normalized);
                 }
                 // Triangles appearing > 3 times are discarded (like Geogram)
             }
-            
+
             // Use full manifold extraction
             typename Co3NeManifoldExtractor<Real>::Parameters extractorParams;
             extractorParams.strictMode = params.strictMode;
             extractorParams.maxIterations = 50;  // Default from geogram
             extractorParams.verbose = false;
-            
+
             Co3NeManifoldExtractor<Real> extractor(points, extractorParams);
-            
+
             // Extract manifold with incremental insertion
             extractor.Extract(goodTriangles, notSoGoodTriangles, outTriangles);
         }

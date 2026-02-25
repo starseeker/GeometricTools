@@ -5,7 +5,7 @@
 **Input**: 1000 points from r768.xyz  
 **Co3Ne Parameters**:
 - kNeighbors = 20
-- relaxedManifoldExtraction = true
+- strictMode = false (default)
 - orientNormals = true
 
 **Co3Ne Output**: 428 triangles, 102 components

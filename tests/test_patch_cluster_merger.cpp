@@ -229,7 +229,6 @@ static bool TestCo3NeIntegration()
 
     Co3Ne<double>::Parameters co3Params;
     co3Params.kNeighbors               = 20;
-    co3Params.relaxedManifoldExtraction = true;
     co3Params.triangleQualityThreshold  = 0.1;
 
     std::vector<Vector3<double>>          outVerts;

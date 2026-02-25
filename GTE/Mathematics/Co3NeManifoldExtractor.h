@@ -642,19 +642,59 @@ namespace gte
         void MergeConnectedComponent(int32_t fromComp, int32_t toComp, int32_t ori)
         {
             if (fromComp == toComp) return;
-            
+
+            // Find a seed triangle in fromComp and build the membership set.
+            // O(T) scan runs once to seed the BFS; subsequent processing is
+            // via adjacency links (matching Geogram's BFS-order approach) so
+            // that Remove(t,false)+Insert(t) calls in FlipTriangle do not
+            // corrupt the circular corner linked-lists.
+            int32_t seed = NO_FACET;
+            std::vector<bool> inFromComp(mTriangles.size(), false);
             for (int32_t t = 0; t < static_cast<int32_t>(mTriangles.size()); ++t)
             {
                 if (GetConnectedComponent(t) == fromComp)
                 {
-                    mConnectedComponent[t] = toComp;
-                    if (ori == -1)
+                    inFromComp[t] = true;
+                    if (seed == NO_FACET) seed = t;
+                }
+            }
+            if (seed == NO_FACET) return;
+
+            // BFS traversal via mCornerToAdjacentFacet.
+            std::vector<bool> visited(mTriangles.size(), false);
+            std::vector<int32_t> queue;
+            queue.reserve(static_cast<size_t>(mComponentSize[fromComp]));
+            queue.push_back(seed);
+            visited[seed] = true;
+            size_t head = 0;
+
+            while (head < queue.size())
+            {
+                int32_t t = queue[head++];
+
+                // Snapshot adjacencies before FlipTriangle rearranges corners.
+                int32_t adj[3] = {
+                    mCornerToAdjacentFacet[t * 3 + 0],
+                    mCornerToAdjacentFacet[t * 3 + 1],
+                    mCornerToAdjacentFacet[t * 3 + 2]
+                };
+
+                mConnectedComponent[t] = toComp;
+                if (ori == -1)
+                {
+                    FlipTriangle(t);
+                }
+
+                for (int i = 0; i < 3; ++i)
+                {
+                    if (adj[i] != NO_FACET && !visited[adj[i]] && inFromComp[adj[i]])
                     {
-                        FlipTriangle(t);
+                        visited[adj[i]] = true;
+                        queue.push_back(adj[i]);
                     }
                 }
             }
-            
+
             mComponentSize[toComp] += mComponentSize[fromComp];
             mComponentSize[fromComp] = 0;
         }
