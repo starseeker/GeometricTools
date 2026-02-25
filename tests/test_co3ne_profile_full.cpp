@@ -240,7 +240,14 @@ static TierResult RunTier(std::vector<Vector3<double>> const& points,
     // Phase 1: Co3Ne reconstruction
     Co3Ne<double>::Parameters co3neParams;
     co3neParams.kNeighbors               = 20;
-    co3neParams.orientNormals             = true;
+    // When normals come from a scanner file they are already consistently
+    // oriented (outward-facing).  OrientNormalsConsistently does a BFS
+    // propagation that can inadvertently flip cross-surface points (e.g.
+    // inner vs outer surfaces of thin features) to agree with their nearest
+    // geometric neighbor, turning truly opposite normals into falsely
+    // "consistent" ones.  This degrades the normal-based co-cone filter in
+    // GenerateTrianglesManifoldConstrained.  Trust the provided normals.
+    co3neParams.orientNormals             = false;
 
     std::vector<Vector3<double>>      vertices;
     std::vector<std::array<int32_t, 3>> triangles;

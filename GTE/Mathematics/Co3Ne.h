@@ -166,8 +166,20 @@ namespace gte
         // Reconstruction using caller-supplied precomputed normals.
         // Useful when normals are already available (e.g., from an XYZ file
         // with 6 columns: x y z nx ny nz) and PCA estimation is unnecessary.
-        // Steps 1 (ComputeNormals) and 2 (OrientNormalsConsistently) are
-        // skipped; the provided normals are used directly.
+        // Step 1 (ComputeNormals) is always skipped; the provided normals are
+        // used directly.
+        //
+        // NOTE on params.orientNormals:
+        //   If the provided normals are already consistently oriented (e.g.
+        //   scanner normals all pointing outward), set orientNormals = false
+        //   to trust them as-is.  Calling OrientNormalsConsistently on an
+        //   already-correct normal field can introduce flips near thin features
+        //   where cross-surface neighbors are geometrically close: the BFS
+        //   propagation may flip normals of points on the opposite face to
+        //   "agree" with their nearest neighbor, turning a correct anti-aligned
+        //   pair into a falsely consistent one and degrading triangle generation.
+        //   The default (orientNormals = true) is kept for backward compatibility but
+        //   callers with reliable scanner normals should pass false.
         static bool ReconstructWithNormals(
             std::vector<Vector3<Real>> const& points,
             std::vector<Vector3<Real>> const& normals,
@@ -606,12 +618,33 @@ namespace gte
                     continue;
                 }
 
-                int32_t k = std::min(numFound, static_cast<int32_t>(params.kNeighbors));
+                // Scan the FULL found-neighbor list (not just the first k) to
+                // collect up to k CONSISTENT (same-surface) neighbors.
+                //
+                // Problem this fixes:
+                //   For scenes with thin features (e.g., the Stanford Bunny
+                //   ears, ~6 mm thick, search radius ~38 mm), a large fraction
+                //   (~59 %) of the k geometrically-nearest points are
+                //   cross-surface captures whose normals point roughly opposite
+                //   (Dot(n_i, n_j) ≈ -1).  The normal-consistency filter
+                //   correctly rejects these, but when we only scanned the first
+                //   k found points, we often ended up with far fewer than k
+                //   valid surface neighbors.  With a diminished consistent-
+                //   neighbor set the fan covers fewer angular slots, every edge
+                //   in that fan is claimed at count=2 by the greedy edge-budget,
+                //   and adjacent seeds cannot attach — producing tens of
+                //   thousands of disconnected patches.
+                //
+                //   By scanning all numFound points (up to MaxNeighbors=100)
+                //   and stopping once k consistent neighbors are found, we
+                //   reliably obtain k true surface neighbors for every seed,
+                //   regardless of how many cross-surface points appear among the
+                //   geometrically closest candidates.
+                int32_t kTarget = static_cast<int32_t>(params.kNeighbors);
 
-                // Filter by normal consistency (co-cone criterion)
                 std::vector<int32_t> consistent;
-                consistent.reserve(static_cast<size_t>(k));
-                for (int32_t j = 0; j < k; ++j)
+                consistent.reserve(static_cast<size_t>(kTarget));
+                for (int32_t j = 0; j < numFound && static_cast<int32_t>(consistent.size()) < kTarget; ++j)
                 {
                     int32_t nIdx = indices[j];
                     if (nIdx == static_cast<int32_t>(i))
