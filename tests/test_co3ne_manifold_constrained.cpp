@@ -122,7 +122,6 @@ static bool TestManifoldConstrainedGenerationHasNoNonManifoldEdges()
     params.searchRadius           = radius;
     params.maxNormalAngle         = 90.0;
     params.orientNormals          = false;   // normals already oriented
-    params.useManifoldConstrainedGeneration = true;
 
     bool ok = Co3Ne<double>::Reconstruct(points, outVerts, outTris, params);
     if (!ok)
@@ -160,7 +159,6 @@ static bool TestManifoldConstrainedGenerationWindingConsistency()
     params.searchRadius             = radius;
     params.maxNormalAngle           = 90.0;
     params.orientNormals            = true;   // propagate consistent PCA orientation
-    params.useManifoldConstrainedGeneration = true;
 
     bool ok = Co3Ne<double>::Reconstruct(points, outVerts, outTris, params);
     if (!ok)
@@ -184,28 +182,22 @@ static bool TestManifoldConstrainedGenerationWindingConsistency()
 
 static bool TestConstrainedGenerationFewerCandidatesThanFan()
 {
-    std::cout << "Test: constrained generation produces <= output triangles vs. fan triangulation\n";
+    std::cout << "Test: constrained generation produces a valid non-empty mesh\n";
 
     std::vector<Vector3<double>> points, normals;
     double radius = MakeSphereCloud(100, points, normals);
 
-    auto run = [&](bool constrained) -> size_t
-    {
-        std::vector<Vector3<double>> outVerts;
-        std::vector<std::array<int32_t, 3>> outTris;
+    std::vector<Vector3<double>> outVerts;
+    std::vector<std::array<int32_t, 3>> outTris;
 
-        Co3Ne<double>::Parameters params;
-        params.kNeighbors             = 12;
-        params.searchRadius           = radius;
-        params.maxNormalAngle         = 90.0;
-        params.orientNormals          = false;
-        params.useManifoldConstrainedGeneration = constrained;
+    Co3Ne<double>::Parameters params;
+    params.kNeighbors             = 12;
+    params.searchRadius           = radius;
+    params.maxNormalAngle         = 90.0;
+    params.orientNormals          = false;
 
-        Co3Ne<double>::Reconstruct(points, outVerts, outTris, params);
-        return outTris.size();
-    };
-
-    size_t constrainedCount = run(true);
+    Co3Ne<double>::Reconstruct(points, outVerts, outTris, params);
+    size_t constrainedCount = outTris.size();
 
     // Constrained generation must produce a non-empty result
     std::cout << "  Constrained: " << constrainedCount << " triangles\n";
@@ -221,7 +213,7 @@ static bool TestConstrainedGenerationFewerCandidatesThanFan()
 
 static bool TestReconstructWorksWithFlag()
 {
-    std::cout << "Test: Reconstruct completes successfully with useManifoldConstrainedGeneration\n";
+    std::cout << "Test: Reconstruct completes successfully (manifold-constrained generation)\n";
 
     std::vector<Vector3<double>> points, normals, outVerts;
     std::vector<std::array<int32_t, 3>> outTris;
@@ -229,7 +221,6 @@ static bool TestReconstructWorksWithFlag()
 
     Co3Ne<double>::Parameters params;
     params.searchRadius = radius;
-    params.useManifoldConstrainedGeneration = true;
     params.orientNormals = false;
 
     bool ok = Co3Ne<double>::Reconstruct(points, outVerts, outTris, params);

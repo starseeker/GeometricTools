@@ -71,20 +71,11 @@ namespace gte
             Real triangleQualityThreshold;
             bool orientNormals;             // Orient normals consistently via propagation
             bool strictMode;                // Strict manifold extraction (more conservative)
-            bool removeIsolatedTriangles;   // Remove isolated triangles
             // Post-process with RVD-based smoothing (improves quality).
             // NOTE: O(n²) per iteration.  Disabled by default.  Only use for
             // small meshes (n < ~2000 vertices).  See SmoothWithRVD for details.
             bool smoothWithRVD;
             size_t rvdSmoothIterations;     // Number of RVD smoothing iterations
-            // Use manifold-constrained triangle generation (recommended, default: true).
-            // Projects k-NN onto the tangent plane, sorts by angle, and triangulates
-            // only angularly-consecutive pairs — O(k) candidates per seed, equivalent
-            // to Geogram's Restricted Voronoi Cell polygon traversal.  Each undirected
-            // edge is used in at most 2 triangles, and winding is aligned with the
-            // PCA normal at generation time.  The legacy O(k²) fan generator remains
-            // available as a fallback when GTE_DEBUG is defined.
-            bool useManifoldConstrainedGeneration;
             
             Parameters()
                 : kNeighbors(20)
@@ -93,10 +84,8 @@ namespace gte
                 , triangleQualityThreshold(static_cast<Real>(0.3))
                 , orientNormals(true)
                 , strictMode(false)
-                , removeIsolatedTriangles(true)
                 , smoothWithRVD(false)
                 , rvdSmoothIterations(3)
-                , useManifoldConstrainedGeneration(true)
             {
             }
         };
@@ -443,8 +432,11 @@ namespace gte
         // ===== TRIANGLE GENERATION =====
 
         // Generate triangles using co-cone analysis.
-        // Dispatches to GenerateTrianglesManifoldConstrained when
-        // params.useManifoldConstrainedGeneration is true.
+        // Uses GenerateTrianglesManifoldConstrained: projects k-NN onto the
+        // tangent plane, sorts by angle, and triangulates only angularly-
+        // consecutive pairs — O(k) candidates per seed, equivalent to Geogram's
+        // Restricted Voronoi Cell polygon traversal.
+        // The legacy O(k²) fan generator is available in GTE_DEBUG builds.
         // Accepts a pre-built NNTree and search radius to avoid rebuilding
         // the tree for every phase.
         static void GenerateTriangles(
@@ -455,12 +447,9 @@ namespace gte
             NNTree const& nnQuery,
             Real searchRadius)
         {
-            if (params.useManifoldConstrainedGeneration)
-            {
-                GenerateTrianglesManifoldConstrained(
-                    points, normals, triangles, params, nnQuery, searchRadius);
-                return;
-            }
+            GenerateTrianglesManifoldConstrained(
+                points, normals, triangles, params, nnQuery, searchRadius);
+            return;
 
 #ifdef GTE_DEBUG
             // Legacy O(k²) fan generator — inferior results, kept for debugging only.
@@ -783,12 +772,12 @@ namespace gte
         // ===== MANIFOLD EXTRACTION =====
 
         // Extract manifold surface from candidate triangles.
-        // When manifold-constrained generation was used (the default), every
-        // candidate appears exactly once and the edge-budget constraint was
-        // already enforced during generation.  All unique candidates are passed
-        // directly as "good" triangles to Co3NeManifoldExtractor, skipping the
-        // legacy T3/T12 Voronoi-count classification (which is only meaningful
-        // for the O(k²) fan generator, available in GTE_DEBUG builds).
+        // Candidates from GenerateTrianglesManifoldConstrained appear exactly once
+        // and the edge-budget constraint was already enforced during generation.
+        // All unique candidates are passed directly as "good" triangles to
+        // Co3NeManifoldExtractor, skipping the legacy T3/T12 Voronoi-count
+        // classification (which is only meaningful for the O(k²) fan generator,
+        // available in GTE_DEBUG builds).
         static void ExtractManifold(
             std::vector<Vector3<Real>> const& points,
             std::vector<Vector3<Real>> const& normals,
@@ -796,32 +785,29 @@ namespace gte
             std::vector<std::array<int32_t, 3>>& outTriangles,
             Parameters const& params)
         {
-            if (params.useManifoldConstrainedGeneration)
+            // Deduplicate (defensive — candidates should already be unique)
+            std::set<std::array<int32_t, 3>> seen;
+            std::vector<std::array<int32_t, 3>> uniqueCandidates;
+            uniqueCandidates.reserve(candidateTriangles.size());
+            for (auto const& tri : candidateTriangles)
             {
-                // Deduplicate (defensive — candidates should already be unique)
-                std::set<std::array<int32_t, 3>> seen;
-                std::vector<std::array<int32_t, 3>> uniqueCandidates;
-                uniqueCandidates.reserve(candidateTriangles.size());
-                for (auto const& tri : candidateTriangles)
+                std::array<int32_t, 3> normalized = tri;
+                std::sort(normalized.begin(), normalized.end());
+                if (seen.insert(normalized).second)
                 {
-                    std::array<int32_t, 3> normalized = tri;
-                    std::sort(normalized.begin(), normalized.end());
-                    if (seen.insert(normalized).second)
-                    {
-                        uniqueCandidates.push_back(tri);
-                    }
+                    uniqueCandidates.push_back(tri);
                 }
-
-                typename Co3NeManifoldExtractor<Real>::Parameters extractorParams;
-                extractorParams.strictMode    = params.strictMode;
-                extractorParams.maxIterations = 50;
-                extractorParams.verbose       = false;
-
-                Co3NeManifoldExtractor<Real> extractor(points, extractorParams);
-                std::vector<std::array<int32_t, 3>> empty;
-                extractor.Extract(uniqueCandidates, empty, outTriangles);
-                return;
             }
+
+            typename Co3NeManifoldExtractor<Real>::Parameters extractorParams;
+            extractorParams.strictMode    = params.strictMode;
+            extractorParams.maxIterations = 50;
+            extractorParams.verbose       = false;
+
+            Co3NeManifoldExtractor<Real> extractor(points, extractorParams);
+            std::vector<std::array<int32_t, 3>> empty;
+            extractor.Extract(uniqueCandidates, empty, outTriangles);
+            return;  // always use the production path above
 
 #ifdef GTE_DEBUG
             // Legacy T3/T12 Voronoi-count classification — only meaningful for the
@@ -853,13 +839,13 @@ namespace gte
                 // count > 3: discard
             }
 
-            typename Co3NeManifoldExtractor<Real>::Parameters extractorParams;
-            extractorParams.strictMode    = params.strictMode;
-            extractorParams.maxIterations = 50;
-            extractorParams.verbose       = false;
+            typename Co3NeManifoldExtractor<Real>::Parameters debugExtractorParams;
+            debugExtractorParams.strictMode    = params.strictMode;
+            debugExtractorParams.maxIterations = 50;
+            debugExtractorParams.verbose       = false;
 
-            Co3NeManifoldExtractor<Real> extractor(points, extractorParams);
-            extractor.Extract(goodTriangles, notSoGoodTriangles, outTriangles);
+            Co3NeManifoldExtractor<Real> debugExtractor(points, debugExtractorParams);
+            debugExtractor.Extract(goodTriangles, notSoGoodTriangles, outTriangles);
 #endif  // GTE_DEBUG
         }
 
