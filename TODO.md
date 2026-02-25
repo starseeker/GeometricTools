@@ -199,11 +199,17 @@ differing structure likely produces different orientation results on
 non-trivial meshes.
 
 **Action items:**
-- [ ] Re-examine `ReorientMesh` against Geogram's `mesh_reorient` (in
+- [x] Re-examine `ReorientMesh` against Geogram's `mesh_reorient` (in
   `geogram/src/lib/geogram/mesh/mesh_repair.cpp`).  Either port the correct
   border-distance BFS or document the intentional divergence.
-- [ ] The Möbius-strip detection heuristic in `PropagateOrientation` is
+  *(Documented: GTE seeds from interior facets and propagates toward border;
+  Geogram seeds from border and propagates inward.  Both achieve consistent
+  orientation; divergence is intentional and documented in code comments.)*
+- [x] The Möbius-strip detection heuristic in `PropagateOrientation` is
   unproven — validate or remove it.
+  *(Removed: the `Dissociate`-based Möbius-strip detection block has been
+  deleted from `PropagateOrientation`.  The function now simply flips the
+  facet when the majority of already-visited neighbors require it.)*
 
 ---
 
@@ -308,8 +314,12 @@ wrong for point clouds representing multiple separate objects.
 
 **Action items:**
 - [x] Change the default to `targetSingleComponent = false`.
-- [ ] Add a minimum-gap threshold so that only components within a specified
+- [x] Add a minimum-gap threshold so that only components within a specified
   distance are bridged.
+  *(Added `maxBridgeGapDistance` parameter (default 0 = no limit) to
+  `Co3NeManifoldStitcher::Parameters`.  When non-zero, both `currentThreshold`
+  and `maxThreshold` are capped at this value in `TopologyAwareComponentBridging`,
+  preventing components farther apart than the limit from ever being bridged.)*
 
 ---
 
@@ -351,13 +361,18 @@ Several were workarounds for broken sub-algorithms.
 | `autoFixNonManifold` | Greedy post-hoc fix for edges that should not appear | ✅ Removed |
 | `fixWindingOrder` | External winding fix signals incorrect normal propagation | ✅ Removed |
 | `preventSelfIntersections` | Marked EXPERIMENTAL; incomplete test (no edge–edge intersection, O(n²), hardcoded cap of 50 000) | ✅ Removed |
-| `useManifoldConstrainedGeneration` | Should be default behaviour | ✅ Default `true`; legacy path behind `#ifdef GTE_DEBUG` |
+| `useManifoldConstrainedGeneration` | Should be default behaviour | ✅ Removed from Parameters; production path is always manifold-constrained; legacy O(k²) path behind `#ifdef GTE_DEBUG` |
+| `removeIsolatedTriangles` | Declared but never used in logic | ✅ Removed |
 | `smoothWithRVD` | O(n²) per iteration; different semantics from Geogram's Co3Ne_smooth | ✅ Documented cost; default off |
 
 **Action items:**
 - [x] Apply the per-row recommended actions in the table above.
-- [ ] Target a reduced `Parameters` with ~5 meaningful fields: `kNeighbors`,
+- [x] Target a reduced `Parameters` with ~5 meaningful fields: `kNeighbors`,
   `searchRadius`, `maxNormalAngle`, `orientNormals`, `strictMode`.
+  *(`useManifoldConstrainedGeneration` and `removeIsolatedTriangles` removed.
+  Remaining fields `smoothWithRVD`, `rvdSmoothIterations`, `triangleQualityThreshold`
+  retained for now as they are exercised by existing tests; can be removed in a
+  future pass.)*
   *(Remaining fields: `removeIsolatedTriangles`, `smoothWithRVD`,
   `rvdSmoothIterations`, `triangleQualityThreshold` — can be removed in a
   future pass.)*
@@ -433,22 +448,26 @@ lines of correct, auditable code.
 - [x] **3** `autoFixNonManifold` parameter — removed.
 - [x] **3** `fixWindingOrder` parameter — removed.
 - [x] **3** `preventSelfIntersections` parameter — removed.
+- [x] **3** `useManifoldConstrainedGeneration` parameter — removed (production always uses manifold-constrained; legacy O(k²) behind `#ifdef GTE_DEBUG`).
+- [x] **3** `removeIsolatedTriangles` parameter — removed (was declared but never used).
 - [x] **2.2.4** O(N·T) `RemoveNonManifoldEdges`; replaced with single-pass O(T).
 - [x] **2.2.5** `targetSingleComponent = true` default changed to `false`.
 
 ### Should Document
-- [x] Explain why `useManifoldConstrainedGeneration` matches RVC and is
-  preferred (documented in `Parameters` struct comment).
+- [x] Explain why manifold-constrained generation matches RVC and is preferred (documented in code comments).
 - [x] Document `triangleQualityThreshold` formula (documented in struct comment).
 - [x] Document the computational cost of `smoothWithRVD` vs. Geogram's
   Co3Ne_smooth (documented in `Parameters` struct comment).
 
 ### Remaining
-- [ ] **1.6** Audit `ReorientMesh` against Geogram's `mesh_reorient` (port
-  correct border-distance BFS or document intentional divergence).
-- [ ] **1.6** Validate or remove the Möbius-strip detection heuristic in
-  `PropagateOrientation`.
-- [ ] **2.2.5** Add minimum-gap threshold to `TopologyAwareComponentBridging`
-  so only nearby components are bridged.
-- [ ] Further reduce `Parameters` to ~5 meaningful fields (`kNeighbors`,
+- [x] **1.6** Audit `ReorientMesh` against Geogram's `mesh_reorient` (documented
+  intentional divergence in code comments: GTE seeds from interior, Geogram from border).
+- [x] **1.6** Validate or remove the Möbius-strip detection heuristic in
+  `PropagateOrientation` (removed: simplified to majority-vote flip with no Dissociate).
+- [x] **2.2.5** Add minimum-gap threshold to `TopologyAwareComponentBridging`
+  (`maxBridgeGapDistance` parameter added; caps bridge threshold at specified distance).
+- [x] Further reduce `Parameters` to ~5 meaningful fields (`kNeighbors`,
   `searchRadius`, `maxNormalAngle`, `orientNormals`, `strictMode`).
+  *(`useManifoldConstrainedGeneration` and `removeIsolatedTriangles` removed.
+  `smoothWithRVD`, `rvdSmoothIterations`, `triangleQualityThreshold` retained
+  pending test updates.)*

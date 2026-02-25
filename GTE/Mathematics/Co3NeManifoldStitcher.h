@@ -138,6 +138,12 @@ namespace gte
             Real initialBridgeThreshold;   // Initial distance threshold multiplier
             Real maxBridgeThreshold;       // Maximum distance threshold multiplier
             bool targetSingleComponent;    // Stop when single component achieved
+            // Absolute maximum gap distance for component bridging (0 = no limit).
+            // Components whose nearest boundary-edge midpoints are farther apart
+            // than this value will never be bridged, regardless of maxBridgeThreshold.
+            // Set to a small positive value (e.g. a few times the average edge length)
+            // to prevent unrelated objects from being incorrectly stitched together.
+            Real maxBridgeGapDistance;
             
             // General parameters
             bool removeNonManifoldEdges;  // Remove triangles causing non-manifold edges
@@ -168,6 +174,7 @@ namespace gte
                 , initialBridgeThreshold(static_cast<Real>(2.0))
                 , maxBridgeThreshold(static_cast<Real>(10.0))
                 , targetSingleComponent(false)
+                , maxBridgeGapDistance(static_cast<Real>(0))  // No limit by default
                 , removeNonManifoldEdges(true)
                 , removeSmallClosedComponents(true)
                 , absorbSmallClosedComponents(false)
@@ -2846,6 +2853,13 @@ namespace gte
             Real avgEdgeLength = EstimateAverageEdgeLength(vertices, triangles);
             Real currentThreshold = avgEdgeLength * params.initialBridgeThreshold;
             Real maxThreshold = avgEdgeLength * params.maxBridgeThreshold;
+            
+            // If a hard gap limit is set, cap both thresholds at that distance.
+            if (params.maxBridgeGapDistance > static_cast<Real>(0))
+            {
+                maxThreshold     = std::min(maxThreshold,     params.maxBridgeGapDistance);
+                currentThreshold = std::min(currentThreshold, params.maxBridgeGapDistance);
+            }
             
             bool isClosedManifold = false;
             bool hasNonManifold = false;
