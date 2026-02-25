@@ -59,7 +59,7 @@ its edge-budget constraint (≤2 triangles per undirected edge) reproduces the
 manifold property that RVC naturally provides.
 
 **Action items:**
-- [ ] Make `GenerateTrianglesManifoldConstrained` the default generator by
+- [x] Make `GenerateTrianglesManifoldConstrained` the default generator by
   setting `useManifoldConstrainedGeneration = true` in `Parameters()`.
 - [ ] Remove (or hide behind `#ifdef GTE_DEBUG`) the O(k²)
   `GenerateTriangles` path; it exists only as a fallback and produces
@@ -104,9 +104,9 @@ disconnected components.  GTE processes only the component containing vertex
 0; all other components retain arbitrary normal orientations.
 
 **Action items:**
-- [ ] Move the flip of `normals[neighborIdx]` from push time to pop time,
+- [x] Move the flip of `normals[neighborIdx]` from push time to pop time,
   matching Geogram's logic.
-- [ ] Add an outer loop over all vertices to restart the BFS for each
+- [x] Add an outer loop over all vertices to restart the BFS for each
   unvisited vertex, handling disconnected point clouds.
 
 ---
@@ -142,10 +142,10 @@ The same two errors appear in `Co3NeEnhanced::ManifoldExtractor::
 TrianglesNormalsAgree` (Co3NeEnhanced.h lines 1038–1047).
 
 **Action items:**
-- [ ] Add the combinatorial-orientation check: test whether the shared edge
+- [x] Add the combinatorial-orientation check: test whether the shared edge
   appears in the same or opposite direction in t1 vs. t2; if the same
   direction, negate `d` before the threshold test.
-- [ ] Change the threshold from `0.5` to `−0.8`.
+- [x] Change the threshold from `0.5` to `−0.8`.
 
 ---
 
@@ -165,7 +165,7 @@ produces a radius **8× larger** than the BRL-CAD value, causing gross
 over-connection and many spurious triangles.
 
 **Action items:**
-- [ ] Replace `ComputeAutomaticSearchRadius` with `0.05 * bbox_diagonal` to
+- [x] Replace `ComputeAutomaticSearchRadius` with `0.05 * bbox_diagonal` to
   match Geogram/BRL-CAD usage.  The current density-scaling formula is
   untested and over-estimates radius for small clouds.
 
@@ -180,7 +180,7 @@ normals to be treated as co-cone compatible, massively inflating the
 candidate triangle count.
 
 **Action items:**
-- [ ] Change the default for `maxNormalAngle` from `90` to `60`.
+- [x] Change the default for `maxNormalAngle` from `90` to `60`.
 
 ---
 
@@ -250,8 +250,8 @@ Beyond the compile failure, `Co3NeEnhanced`:
   component tracking diverges over time.
 
 **Action items:**
-- [ ] Delete `Co3NeEnhanced.h` entirely.
-- [ ] Remove its `#include` from any file that references it.
+- [x] Delete `Co3NeEnhanced.h` entirely.
+- [x] Remove its `#include` from any file that references it.
 
 ---
 
@@ -322,7 +322,8 @@ GTE's standard headers.  This will fail to compile unless `LogAssert` is
 defined elsewhere.
 
 **Action items:**
-- [ ] Replace `LogAssert` with `assert` or GTE's standard assertion mechanism.
+- [x] Replace `LogAssert` with `assert` or GTE's standard assertion mechanism
+  (added `#include <GTE/Mathematics/Logger.h>` so `LogAssert` is properly defined).
 
 **2.3.3 Deduplication of the manifold extractor.**  `Co3Ne.h` also contains
 a private inline manifold-extraction code path in `ExtractManifold` (lines
@@ -398,20 +399,22 @@ lines of correct, auditable code.
 ## Part 5 — Summary Checklist
 
 ### Must Fix (bugs / correctness)
-- [ ] **1.1** Make manifold-constrained generation the default; remove or
+- [x] **1.1** Make manifold-constrained generation the default; remove or
   isolate O(k²) generator; remove meaningless T3/T12 split when using it.
-- [ ] **1.2** Fix `OrientNormalsConsistently`: pop-time flip + outer
+  *(Default changed to `useManifoldConstrainedGeneration = true`.
+  O(k²) path and T3/T12 split still present as a fallback — see remaining items below.)*
+- [x] **1.2** Fix `OrientNormalsConsistently`: pop-time flip + outer
   disconnected-component loop.
-- [ ] **1.3** Fix `TrianglesNormalsAgree`: add orientation correction, change
+- [x] **1.3** Fix `TrianglesNormalsAgree`: add orientation correction, change
   threshold to −0.8.
 - [ ] **1.7** Fix `MergeConnectedComponent`: replace O(T) scan with BFS
   traversal.
-- [ ] **2.3.2** Fix undefined `LogAssert` in `Co3NeManifoldExtractor`.
-- [ ] **2.1** Delete broken `Co3NeEnhanced.h`.
+- [x] **2.3.2** Fix undefined `LogAssert` in `Co3NeManifoldExtractor`.
+- [x] **2.1** Delete broken `Co3NeEnhanced.h`.
 
 ### Should Fix (quality / parity)
-- [ ] **1.4** Replace auto-radius formula with `0.05 * bbox_diagonal`.
-- [ ] **1.5** Change `maxNormalAngle` default to 60°.
+- [x] **1.4** Replace auto-radius formula with `0.05 * bbox_diagonal`.
+- [x] **1.5** Change `maxNormalAngle` default to 60°.
 - [ ] **1.6** Audit `ReorientMesh` against Geogram's `mesh_reorient`.
 - [ ] **2.2.1** Remove duplicate hole-filling step from `Co3NeManifoldStitcher`.
 - [ ] **2.2.2** Fix orphaned-vertices bug in revert-on-failure.
@@ -419,7 +422,7 @@ lines of correct, auditable code.
 - [ ] **2.3.3** Consolidate manifold extractor into single implementation.
 
 ### Should Remove (cleanup)
-- [ ] **2.1** `Co3NeEnhanced.h` (broken, duplicate).
+- [x] **2.1** `Co3NeEnhanced.h` (broken, duplicate) — deleted.
 - [ ] **3** `bypassManifoldExtraction` parameter (debug-only escape hatch).
 - [ ] **3** `relaxedManifoldExtraction` parameter (workaround for 1.1).
 - [ ] **3** `autoFixNonManifold` parameter (workaround for extractor bugs).

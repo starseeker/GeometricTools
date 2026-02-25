@@ -1,7 +1,6 @@
 // Detailed debugging for 50-point sphere reconstruction failure
 // This test investigates why Test 6 fails
 
-#include <GTE/Mathematics/Co3NeEnhanced.h>
 #include <GTE/Mathematics/Co3Ne.h>
 #include <iostream>
 #include <iomanip>
@@ -54,13 +53,12 @@ int main()
         std::cout << "Triangles: " << triangles.size() << "\n";
     }
     
-    std::cout << "\n--- Test 2: Enhanced with default params ---\n";
+    std::cout << "\n--- Test 2: Co3Ne with default params ---\n";
     {
         std::vector<Vector3<double>> vertices;
         std::vector<std::array<int32_t, 3>> triangles;
         
-        Co3NeEnhanced<double>::EnhancedParameters params;
-        params.useEnhancedManifold = true;
+        Co3Ne<double>::Parameters params;
         
         std::cout << "Parameters:\n";
         std::cout << "  kNeighbors: " << params.kNeighbors << "\n";
@@ -68,19 +66,18 @@ int main()
         std::cout << "  maxNormalAngle: " << params.maxNormalAngle << "\n";
         std::cout << "  strictMode: " << (params.strictMode ? "YES" : "NO") << "\n";
         
-        bool success = Co3NeEnhanced<double>::Reconstruct(points, vertices, triangles, params);
+        bool success = Co3Ne<double>::Reconstruct(points, vertices, triangles, params);
         std::cout << "Success: " << (success ? "YES" : "NO") << "\n";
         std::cout << "Vertices: " << vertices.size() << "\n";
         std::cout << "Triangles: " << triangles.size() << "\n";
     }
     
-    std::cout << "\n--- Test 3: Enhanced with relaxed params ---\n";
+    std::cout << "\n--- Test 3: Co3Ne with relaxed params ---\n";
     {
         std::vector<Vector3<double>> vertices;
         std::vector<std::array<int32_t, 3>> triangles;
         
-        Co3NeEnhanced<double>::EnhancedParameters params;
-        params.useEnhancedManifold = true;
+        Co3Ne<double>::Parameters params;
         params.kNeighbors = 12;  // More neighbors
         params.searchRadius = 0.5;  // Larger search radius
         params.maxNormalAngle = 120.0;  // More relaxed angle
@@ -92,7 +89,7 @@ int main()
         std::cout << "  maxNormalAngle: " << params.maxNormalAngle << "\n";
         std::cout << "  strictMode: " << (params.strictMode ? "YES" : "NO") << "\n";
         
-        bool success = Co3NeEnhanced<double>::Reconstruct(points, vertices, triangles, params);
+        bool success = Co3Ne<double>::Reconstruct(points, vertices, triangles, params);
         std::cout << "Success: " << (success ? "YES" : "NO") << "\n";
         std::cout << "Vertices: " << vertices.size() << "\n";
         std::cout << "Triangles: " << triangles.size() << "\n";
@@ -105,10 +102,9 @@ int main()
         std::vector<Vector3<double>> vertices;
         std::vector<std::array<int32_t, 3>> triangles;
         
-        Co3NeEnhanced<double>::EnhancedParameters params;
-        params.useEnhancedManifold = true;
+        Co3Ne<double>::Parameters params;
         
-        bool success = Co3NeEnhanced<double>::Reconstruct(pts, vertices, triangles, params);
+        bool success = Co3Ne<double>::Reconstruct(pts, vertices, triangles, params);
         std::cout << "Points: " << std::setw(3) << n 
                   << "  Success: " << (success ? "YES" : "NO ")
                   << "  Triangles: " << std::setw(4) << triangles.size() << "\n";

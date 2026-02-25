@@ -31,6 +31,7 @@
 #ifndef GTE_MATHEMATICS_CO3NE_MANIFOLD_EXTRACTOR_H
 #define GTE_MATHEMATICS_CO3NE_MANIFOLD_EXTRACTOR_H
 
+#include <GTE/Mathematics/Logger.h>
 #include <GTE/Mathematics/Vector3.h>
 #include <algorithm>
 #include <array>
@@ -402,13 +403,50 @@ namespace gte
             return true;
         }
         
+        // Returns true when the two adjacent triangles traverse their shared
+        // edge in the same direction.  In a correctly-oriented manifold mesh,
+        // neighbours traverse the shared edge in *opposite* directions.  When
+        // they traverse it in the same direction the triangles point away from
+        // each other, so the dot-product sign must be negated before testing.
+        bool SameCombinorialOrientation(int32_t t1, int32_t t2) const
+        {
+            auto const& tri1 = mTriangles[t1];
+            auto const& tri2 = mTriangles[t2];
+
+            for (int i = 0; i < 3; ++i)
+            {
+                int32_t a = tri1[i];
+                int32_t b = tri1[(i + 1) % 3];
+
+                for (int j = 0; j < 3; ++j)
+                {
+                    if (tri2[j] == a && tri2[(j + 1) % 3] == b)
+                    {
+                        return true;   // same direction
+                    }
+                    if (tri2[j] == b && tri2[(j + 1) % 3] == a)
+                    {
+                        return false;  // opposite direction (manifold-correct)
+                    }
+                }
+            }
+            return false;
+        }
+
         bool TrianglesNormalsAgree(int32_t t1, int32_t t2) const
         {
             Vector3<Real> n1 = ComputeTriangleNormal(t1);
             Vector3<Real> n2 = ComputeTriangleNormal(t2);
-            
-            Real dot = Dot(n1, n2);
-            return dot > static_cast<Real>(0.5);  // ~60 degree tolerance
+
+            Real d = Dot(n1, n2);
+            // Match Geogram: negate d when both triangles traverse their
+            // shared edge in the same direction (they face away from each
+            // other), then apply the permissive threshold of -0.8 (~143°).
+            if (SameCombinorialOrientation(t1, t2))
+            {
+                d = -d;
+            }
+            return d > static_cast<Real>(-0.8);
         }
         
         Vector3<Real> ComputeTriangleNormal(int32_t t) const

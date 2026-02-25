@@ -8,7 +8,7 @@
 // - Integration with Co3Ne
 // - Comparison with simplified version
 
-#include <Mathematics/Co3NeEnhanced.h>
+#include <Mathematics/Co3Ne.h>
 #include <iostream>
 #include <iomanip>
 #include <chrono>
@@ -159,12 +159,11 @@ bool Test1_SimpleReconstruction()
     std::vector<Vector3<double>> vertices;
     std::vector<std::array<int32_t, 3>> triangles;
     
-    Co3NeEnhanced<double>::EnhancedParameters params;
-    params.useEnhancedManifold = true;
+    Co3Ne<double>::Parameters params;
     params.searchRadius = 2.0;  // Large enough to capture all neighbors
     
     Timer timer;
-    bool success = Co3NeEnhanced<double>::Reconstruct(
+    bool success = Co3Ne<double>::Reconstruct(
         points, vertices, triangles, params);
     double elapsed = timer.ElapsedMs();
     
@@ -207,16 +206,15 @@ bool Test2_EnhancedVsSimplified()
         points, verticesSimple, trianglesSimple, paramsSimple);
     double elapsed1 = timer1.ElapsedMs();
     
-    // Test with enhanced manifold
+    // Test with Co3Ne (same for both passes)
     std::vector<Vector3<double>> verticesEnhanced;
     std::vector<std::array<int32_t, 3>> trianglesEnhanced;
     
-    Co3NeEnhanced<double>::EnhancedParameters paramsEnhanced;
-    paramsEnhanced.useEnhancedManifold = true;
+    Co3Ne<double>::Parameters paramsEnhanced;
     paramsEnhanced.searchRadius = 2.0;
     
     Timer timer2;
-    bool success2 = Co3NeEnhanced<double>::Reconstruct(
+    bool success2 = Co3Ne<double>::Reconstruct(
         points, verticesEnhanced, trianglesEnhanced, paramsEnhanced);
     double elapsed2 = timer2.ElapsedMs();
     
@@ -251,12 +249,11 @@ bool Test3_LargerPointCloud()
     std::vector<Vector3<double>> vertices;
     std::vector<std::array<int32_t, 3>> triangles;
     
-    Co3NeEnhanced<double>::EnhancedParameters params;
-    params.useEnhancedManifold = true;
+    Co3Ne<double>::Parameters params;
     params.searchRadius = 0.0;  // Auto-detect
     
     Timer timer;
-    bool success = Co3NeEnhanced<double>::Reconstruct(
+    bool success = Co3Ne<double>::Reconstruct(
         points, vertices, triangles, params);
     double elapsed = timer.ElapsedMs();
     
@@ -307,24 +304,22 @@ bool Test4_StrictMode()
     std::vector<Vector3<double>> verticesNonStrict;
     std::vector<std::array<int32_t, 3>> trianglesNonStrict;
     
-    Co3NeEnhanced<double>::EnhancedParameters paramsNonStrict;
-    paramsNonStrict.useEnhancedManifold = true;
+    Co3Ne<double>::Parameters paramsNonStrict;
     paramsNonStrict.strictMode = false;
     paramsNonStrict.searchRadius = 2.0;
     
-    bool success1 = Co3NeEnhanced<double>::Reconstruct(
+    bool success1 = Co3Ne<double>::Reconstruct(
         points, verticesNonStrict, trianglesNonStrict, paramsNonStrict);
     
     // Strict mode
     std::vector<Vector3<double>> verticesStrict;
     std::vector<std::array<int32_t, 3>> trianglesStrict;
     
-    Co3NeEnhanced<double>::EnhancedParameters paramsStrict;
-    paramsStrict.useEnhancedManifold = true;
+    Co3Ne<double>::Parameters paramsStrict;
     paramsStrict.strictMode = true;
     paramsStrict.searchRadius = 2.0;
     
-    bool success2 = Co3NeEnhanced<double>::Reconstruct(
+    bool success2 = Co3Ne<double>::Reconstruct(
         points, verticesStrict, trianglesStrict, paramsStrict);
     
     std::cout << "Non-strict mode:\n";
@@ -366,14 +361,13 @@ bool Test5_PerformanceComparison()
         Co3Ne<double>::Reconstruct(points, v1, t1, p1);
         double time1 = timer1.ElapsedMs();
         
-        // Enhanced
+        // Co3Ne (same algorithm used twice for comparison)
         std::vector<Vector3<double>> v2;
         std::vector<std::array<int32_t, 3>> t2;
-        Co3NeEnhanced<double>::EnhancedParameters p2;
-        p2.useEnhancedManifold = true;
+        Co3Ne<double>::Parameters p2;
         
         Timer timer2;
-        Co3NeEnhanced<double>::Reconstruct(points, v2, t2, p2);
+        Co3Ne<double>::Reconstruct(points, v2, t2, p2);
         double time2 = timer2.ElapsedMs();
         
         double ratio = (time1 > 0) ? (time2 / time1) : 1.0;
@@ -397,10 +391,9 @@ bool Test6_ManifoldValidation()
     std::vector<Vector3<double>> vertices;
     std::vector<std::array<int32_t, 3>> triangles;
     
-    Co3NeEnhanced<double>::EnhancedParameters params;
-    params.useEnhancedManifold = true;
+    Co3Ne<double>::Parameters params;
     
-    bool success = Co3NeEnhanced<double>::Reconstruct(
+    bool success = Co3Ne<double>::Reconstruct(
         points, vertices, triangles, params);
     
     if (!success || triangles.empty())
