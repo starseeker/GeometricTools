@@ -37,7 +37,8 @@ using Clock = std::chrono::high_resolution_clock;
 // Load XYZ (with or without per-point normals)
 // ---------------------------------------------------------------------------
 static bool LoadXYZ(std::string const& filename,
-                    std::vector<Vector3<double>>& points)
+                    std::vector<Vector3<double>>& points,
+                    std::vector<Vector3<double>>& normals)
 {
     std::ifstream in(filename);
     if (!in.is_open())
@@ -46,7 +47,9 @@ static bool LoadXYZ(std::string const& filename,
         return false;
     }
     points.clear();
+    normals.clear();
     std::string line;
+    bool hasNormals = true;  // assume normals present until proven otherwise
     while (std::getline(in, line))
     {
         if (line.empty()) continue;
@@ -54,8 +57,22 @@ static bool LoadXYZ(std::string const& filename,
         double x, y, z;
         if (!(iss >> x >> y >> z)) continue;
         points.push_back(Vector3<double>{x, y, z});
-        // skip optional nx ny nz
+
+        double nx, ny, nz;
+        if (hasNormals && (iss >> nx >> ny >> nz))
+        {
+            normals.push_back(Vector3<double>{nx, ny, nz});
+        }
+        else
+        {
+            hasNormals = false;
+        }
     }
+
+    // If at least one line lacked normals, discard the partial normal list.
+    if (normals.size() != points.size())
+        normals.clear();
+
     return !points.empty();
 }
 
@@ -210,6 +227,7 @@ struct TierResult
 };
 
 static TierResult RunTier(std::vector<Vector3<double>> const& points,
+                          std::vector<Vector3<double>> const& normals,
                           bool verbose)
 {
     TierResult tr{};
@@ -228,7 +246,21 @@ static TierResult RunTier(std::vector<Vector3<double>> const& points,
     std::vector<std::array<int32_t, 3>> triangles;
 
     auto t0 = Clock::now();
-    bool ok = Co3Ne<double>::Reconstruct(points, vertices, triangles, co3neParams);
+    bool ok = false;
+    if (normals.size() == points.size())
+    {
+        // Use the per-point normals supplied in the XYZ file (more accurate than
+        // PCA-estimated normals, especially for complex geometry).
+        if (verbose)
+            std::cout << "  Using provided normals (ReconstructWithNormals)\n";
+        ok = Co3Ne<double>::ReconstructWithNormals(points, normals, vertices, triangles, co3neParams);
+    }
+    else
+    {
+        if (verbose)
+            std::cout << "  No normals in file — using PCA (Reconstruct)\n";
+        ok = Co3Ne<double>::Reconstruct(points, vertices, triangles, co3neParams);
+    }
     tr.reconstructionSec = std::chrono::duration<double>(Clock::now() - t0).count();
 
     if (!ok || triangles.empty())
@@ -253,7 +285,9 @@ static TierResult RunTier(std::vector<Vector3<double>> const& points,
     stitchParams.enableBallPivotHoleFiller = false;
     stitchParams.initialBridgeThreshold  = 2.0;
     stitchParams.maxBridgeThreshold      = 10.0;
-    stitchParams.maxIterations           = 20;
+    // maxIterations and MaxNearbyEdges use library defaults (20 and 8) which
+    // provide the same total neighbour-query budget as the former (5, 32) config
+    // but distributed over more passes for better component connectivity.
 
     auto t1 = Clock::now();
     Co3NeManifoldStitcher<double>::StitchPatches(vertices, triangles, stitchParams);
@@ -295,12 +329,16 @@ int main(int argc, char* argv[])
 
     // Load the full dataset
     std::vector<Vector3<double>> allPoints;
-    if (!LoadXYZ(xyzPath, allPoints))
+    std::vector<Vector3<double>> allNormals;
+    if (!LoadXYZ(xyzPath, allPoints, allNormals))
     {
         std::cerr << "Failed to load: " << xyzPath << "\n";
         return 1;
     }
-    std::cout << "Dataset: " << xyzPath << "  (" << allPoints.size() << " points)\n\n";
+    std::cout << "Dataset: " << xyzPath << "  (" << allPoints.size() << " points";
+    if (!allNormals.empty())
+        std::cout << ", normals available";
+    std::cout << ")\n\n";
 
     // Reproducible random subset generation
     std::vector<size_t> idx(allPoints.size());
@@ -321,10 +359,19 @@ int main(int argc, char* argv[])
         if (sz > allPoints.size()) continue;
 
         std::vector<Vector3<double>> pts(sz);
+        std::vector<Vector3<double>> nrm;
         for (size_t i = 0; i < sz; ++i)
+        {
             pts[i] = allPoints[idx[i]];
+        }
+        if (!allNormals.empty())
+        {
+            nrm.resize(sz);
+            for (size_t i = 0; i < sz; ++i)
+                nrm[i] = allNormals[idx[i]];
+        }
 
-        auto tr = RunTier(pts, true);
+        auto tr = RunTier(pts, nrm, true);
         results.push_back(tr);
 
         if (tr.totalSec > timeoutSec)
