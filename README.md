@@ -16,7 +16,7 @@ The update history for all versions of GTE is [Full Update History](https://www.
 ## Supported Platforms
 
 The mathematics code is in a header-only library, GTMathematics. A
-mathematics library with GPU-based implementations is provided,s
+mathematics library with GPU-based implementations is provided,
 GTMathematicsGPU. The CPU-based common graphics engine code is in its
 own library, GTGraphics. DirectX 11 wrappers are provided for graphics
 and applications, GTGraphicsDX11 and GTApplicationsDX11, on Microsoft

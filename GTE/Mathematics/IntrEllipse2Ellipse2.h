@@ -3,7 +3,7 @@
 // Distributed under the Boost Software License, Version 1.0.
 // https://www.boost.org/LICENSE_1_0.txt
 // https://www.geometrictools.com/License/Boost/LICENSE_1_0.txt
-// File Version: 8.0.2025.05.10
+// File Version: 8.0.2026.02.25
 
 #pragma once
 
@@ -11,7 +11,7 @@
 // discussed in the document
 // https://www.geometrictools.com/Documentation/IntersectionOfEllipses.pdf
 // The T type should support exact rational arithmetic in order for the
-// polynomial root construction to be robust.s The classification of the
+// polynomial root construction to be robust. The classification of the
 // intersections depends on various sign tests of computed values.  If these
 // values are computed with floating-point arithmetic, the sign tests can
 // lead to misclassification.
