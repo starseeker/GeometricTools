@@ -1,0 +1,6 @@
+[submodule "geogram"]
+	path = geogram
+	url = https://github.com/BrunoLevy/geogram
+[submodule "PoissonRecon"]
+	path = PoissonRecon
+	url = https://github.com/mkazhdan/PoissonRecon
