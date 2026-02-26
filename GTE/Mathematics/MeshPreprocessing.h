@@ -125,6 +125,41 @@ namespace gte
             }
 
             triangles = std::move(newTriangles);
+
+            // Step 5: Remove isolated vertices (vertices no longer referenced by
+            // any triangle).  This matches the behaviour of Geogram's
+            // remove_small_connected_components, which also compacts the vertex
+            // array after removing facets.
+            int32_t numVertices = static_cast<int32_t>(vertices.size());
+            std::vector<bool> referenced(numVertices, false);
+            for (auto const& tri : triangles)
+            {
+                referenced[tri[0]] = true;
+                referenced[tri[1]] = true;
+                referenced[tri[2]] = true;
+            }
+
+            std::vector<int32_t> oldToNew(numVertices, -1);
+            std::vector<Vector3<Real>> newVertices;
+            newVertices.reserve(numVertices);
+
+            for (int32_t i = 0; i < numVertices; ++i)
+            {
+                if (referenced[i])
+                {
+                    oldToNew[i] = static_cast<int32_t>(newVertices.size());
+                    newVertices.push_back(vertices[i]);
+                }
+            }
+
+            for (auto& tri : triangles)
+            {
+                tri[0] = oldToNew[tri[0]];
+                tri[1] = oldToNew[tri[1]];
+                tri[2] = oldToNew[tri[2]];
+            }
+
+            vertices = std::move(newVertices);
         }
 
         // Orient normals consistently within each connected component.

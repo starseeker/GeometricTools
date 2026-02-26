@@ -167,8 +167,12 @@ namespace gte
             }
             else
             {
-                // Epsilon-based comparison using spatial hashing
-                // Custom hash function for int64_t arrays
+                // Epsilon-based comparison using spatial hashing.
+                // Each cell has side length epsilon, so two vertices within distance
+                // epsilon can be in the same cell OR in any of the 26 adjacent cells.
+                // We therefore check the full 3x3x3 neighborhood of 27 cells to
+                // guarantee that all pairs within epsilon are detected regardless of
+                // which side of a cell boundary they fall on.
                 struct ArrayHash {
                     size_t operator()(std::array<int64_t, 3> const& arr) const {
                         size_t h = 0;
@@ -184,33 +188,55 @@ namespace gte
 
                 for (int32_t i = 0; i < numVertices; ++i)
                 {
-                    // Compute hash bucket
+                    // Compute the cell this vertex falls in.
                     std::array<int64_t, 3> bucket = {
                         static_cast<int64_t>(std::floor(vertices[i][0] * invEpsilon)),
                         static_cast<int64_t>(std::floor(vertices[i][1] * invEpsilon)),
                         static_cast<int64_t>(std::floor(vertices[i][2] * invEpsilon))
                     };
 
-                    auto& bucketVertices = spatialHash[bucket];
+                    // Search the 3x3x3 neighbourhood (27 cells) for an existing
+                    // canonical vertex within distance epsilon.
                     bool found = false;
-                    for (int32_t j : bucketVertices)
+                    for (int dx = -1; dx <= 1 && !found; ++dx)
                     {
-                        Real distSqr = static_cast<Real>(0);
-                        for (int k = 0; k < 3; ++k)
+                        for (int dy = -1; dy <= 1 && !found; ++dy)
                         {
-                            Real diff = vertices[i][k] - vertices[j][k];
-                            distSqr += diff * diff;
-                        }
-                        if (distSqr <= epsilon * epsilon)
-                        {
-                            colocated[i] = j;
-                            found = true;
-                            break;
+                            for (int dz = -1; dz <= 1 && !found; ++dz)
+                            {
+                                std::array<int64_t, 3> neighborBucket = {
+                                    bucket[0] + dx,
+                                    bucket[1] + dy,
+                                    bucket[2] + dz
+                                };
+                                auto it = spatialHash.find(neighborBucket);
+                                if (it == spatialHash.end())
+                                {
+                                    continue;
+                                }
+                                for (int32_t j : it->second)
+                                {
+                                    Real distSqr = static_cast<Real>(0);
+                                    for (int k = 0; k < 3; ++k)
+                                    {
+                                        Real diff = vertices[i][k] - vertices[j][k];
+                                        distSqr += diff * diff;
+                                    }
+                                    if (distSqr <= epsilon * epsilon)
+                                    {
+                                        colocated[i] = j;
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                            }
                         }
                     }
+
                     if (!found)
                     {
-                        bucketVertices.push_back(i);
+                        // Vertex i is canonical in its own cell.
+                        spatialHash[bucket].push_back(i);
                     }
                 }
             }

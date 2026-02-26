@@ -81,13 +81,13 @@ namespace gte
 
             Parameters()
                 : maxArea(static_cast<Real>(0))
-                , maxEdges(std::numeric_limits<size_t>::max())
+                , maxEdges(0)                               // 0 = unlimited (fill all holes)
                 , repair(true)
                 , method(TriangulationMethod::EarClipping)  // Default to EC for compatibility
                 , planarityThreshold(static_cast<Real>(0))  // 0 = disabled
                 , autoFallback(true)                        // Enable automatic fallback
-                , validateOutput(true)                      // Validate by default
-                , requireManifold(true)                     // Must be manifold
+                , validateOutput(false)                     // No validation by default (Geogram-compatible)
+                , requireManifold(false)                    // No manifold requirement by default
                 , requireNoSelfIntersections(false)         // Don't require (can be expensive)
             {
             }
@@ -103,18 +103,14 @@ namespace gte
         };
 
         // Fill holes in the mesh by generating new triangles.
-        // Only fills holes with area < maxArea and edges < maxEdges.
+        // Holes with area exceeding maxArea (when > 0) or with more than maxEdges
+        // boundary edges (when > 0) are skipped.  A value of 0 for either
+        // parameter means no limit (fill all holes of that kind).
         static void FillHoles(
             std::vector<Vector3<Real>>& vertices,
             std::vector<std::array<int32_t, 3>>& triangles,
             Parameters const& params = Parameters())
         {
-            if (params.maxArea == static_cast<Real>(0) && 
-                params.maxEdges == 0)
-            {
-                return;
-            }
-
             // Step 1: Build directed-edge existence set using unordered_map for O(T) average.
             // Key: directed edge (v0, v1) encoded as int64_t = (v0<<32)|v1.
             // An undirected edge is a boundary edge iff its reverse (v1, v0) is absent.
@@ -168,12 +164,22 @@ namespace gte
                 return;
             }
 
+            // Save a snapshot of the mesh so we can roll back on validation
+            // failure (only when validateOutput is requested).
+            std::vector<Vector3<Real>> savedVertices;
+            std::vector<std::array<int32_t, 3>> savedTriangles;
+            if (params.validateOutput)
+            {
+                savedVertices  = vertices;
+                savedTriangles = triangles;
+            }
+
             // Step 3: Triangulate and add holes that meet criteria
             size_t numFilled = 0;
             for (auto const& hole : holes)
             {
                 // Check size constraints
-                if (params.maxEdges < std::numeric_limits<size_t>::max() &&
+                if (params.maxEdges > 0 &&
                     hole.vertices.size() > params.maxEdges)
                 {
                     continue;
@@ -242,6 +248,25 @@ namespace gte
                 typename MeshRepair<Real>::Parameters repairParams;
                 repairParams.mode = MeshRepair<Real>::RepairMode::DEFAULT;
                 MeshRepair<Real>::Repair(vertices, triangles, repairParams);
+            }
+
+            // Step 5: Optional output validation.  When requireManifold is set
+            // and the result fails the manifold check, restore the pre-fill
+            // snapshot so the caller receives the original (unmodified) mesh.
+            // Validation is only performed when validateOutput is true and at
+            // least one pass/fail criterion (requireManifold or
+            // requireNoSelfIntersections) is enabled, since without a criterion
+            // the result cannot be acted upon.
+            if (numFilled > 0 && params.validateOutput &&
+                (params.requireManifold || params.requireNoSelfIntersections))
+            {
+                auto validationResult = MeshValidation<Real>::Validate(
+                    vertices, triangles, params.requireNoSelfIntersections);
+                if (params.requireManifold && !validationResult.isManifold)
+                {
+                    vertices  = std::move(savedVertices);
+                    triangles = std::move(savedTriangles);
+                }
             }
         }
 
