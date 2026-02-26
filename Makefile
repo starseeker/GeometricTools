@@ -8,6 +8,12 @@ PTHREAD = -pthread
 # Test source directory
 TEST_DIR = tests
 
+# Geogram submodule paths (used by test_geogram_comparison)
+GEOGRAM_SRC = geogram/src/lib
+GEOGRAM_INC = -I$(GEOGRAM_SRC) -I$(GEOGRAM_SRC)/geogram/third_party/OpenNL
+GEOGRAM_LIB_DIR = /tmp/geogram_build/lib
+GEOGRAM_LIBS = -L$(GEOGRAM_LIB_DIR) -lgeogram -Wl,-rpath,$(GEOGRAM_LIB_DIR)
+
 # Primary test targets
 TARGETS = test_mesh_repair test_co3ne test_full_algorithms test_rvd \
           demo_rvd_cvt test_remesh_comparison test_co3ne_rvd test_newton_optimizer \
@@ -17,7 +23,8 @@ TARGETS = test_mesh_repair test_co3ne test_full_algorithms test_rvd \
           test_anisotropic_end_to_end test_co3ne_stitcher test_ball_pivot_hole_filler \
           test_ball_pivot_integration test_comprehensive_manifold_analysis test_progressive_merging \
           test_parallel_nntree_queries test_co3ne_manifold_constrained \
-          test_patch_cluster_merger test_patch_cluster_xyz
+          test_patch_cluster_merger test_patch_cluster_xyz \
+          compare_with_geogram
 
 all: $(TARGETS)
 
@@ -43,6 +50,21 @@ test_remesh_comparison: $(TEST_DIR)/test_remesh_comparison.cpp
 
 test_co3ne_rvd: $(TEST_DIR)/test_co3ne_rvd.cpp
 	$(CXX) $(CXXFLAGS) -o test_co3ne_rvd $(TEST_DIR)/test_co3ne_rvd.cpp $(LDFLAGS)
+
+# GTE-only comparison (no geogram required, compares GTE output with a pre-generated geogram .obj)
+compare_with_geogram: $(TEST_DIR)/compare_with_geogram.cpp
+	$(CXX) $(CXXFLAGS) -o compare_with_geogram $(TEST_DIR)/compare_with_geogram.cpp $(LDFLAGS)
+
+# Direct GTE vs Geogram comparison (requires geogram submodule to be built)
+# Build geogram first: cd /tmp && mkdir -p geogram_build && cd geogram_build && cmake <repo>/geogram && make -j$(nproc)
+# Then set GEOGRAM_LIB_DIR to the build directory containing libgeogram.so before running make.
+test_geogram_comparison: $(TEST_DIR)/test_geogram_comparison.cpp \
+                         GTE/Mathematics/MeshRepair.h \
+                         GTE/Mathematics/MeshHoleFilling.h \
+                         GTE/Mathematics/MeshValidation.h
+	$(CXX) $(CXXFLAGS) $(GEOGRAM_INC) -o test_geogram_comparison \
+	    $(TEST_DIR)/test_geogram_comparison.cpp \
+	    $(GEOGRAM_LIBS) $(LDFLAGS)
 
 # Performance and optimization
 test_newton_optimizer: $(TEST_DIR)/test_newton_optimizer.cpp
@@ -108,16 +130,21 @@ test: test_mesh_repair
 	@echo "Running basic mesh repair test..."
 	./test_mesh_repair $(TEST_DIR)/data/gt.obj $(TEST_DIR)/data/gt_repaired.obj
 
+# Run GTE vs Geogram comparison (requires test_geogram_comparison to be built first)
+test_geogram: test_geogram_comparison
+	@echo "Running GTE vs Geogram comparison..."
+	./test_geogram_comparison $(TEST_DIR)/data/gt.obj
+
 stress: stress_test
 	@echo "Running comprehensive stress tests..."
 	./stress_test
 
 # Clean up
 clean:
-	rm -f $(TARGETS)
+	rm -f $(TARGETS) test_geogram_comparison
 	rm -f $(TEST_DIR)/data/*_repaired.obj $(TEST_DIR)/data/*_output.obj
 
-.PHONY: all clean test stress generate_test_data
+.PHONY: all clean test test_geogram stress generate_test_data
 
 # Phase 4 integration test
 test_phase4_integration: $(TEST_DIR)/test_phase4_integration.cpp GTE/Mathematics/CVTN.h GTE/Mathematics/MeshRemesh.h
