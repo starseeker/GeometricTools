@@ -643,6 +643,64 @@ static void Test_FillHoles_Hexagon_3D() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// T29: MeshRepair – SplitNonManifoldVertices: bowtie (two triangles sharing
+//      only a single vertex)
+// ─────────────────────────────────────────────────────────────────────────────
+static void Test_SplitNonManifoldVertices_Bowtie() {
+    // Two triangles that share ONLY vertex 0 (a "bowtie").
+    // Vertex 0 is non-manifold because its incident triangles form two
+    // disconnected fans (no shared edge containing vertex 0).
+    Verts V = {
+        {0,0,0},            // v0 – shared bowtie vertex
+        {1,0,0}, {0,1,0},   // v1, v2 – triangle 1
+        {-1,0,0}, {0,-1,0}  // v3, v4 – triangle 2
+    };
+    Tris T = {
+        {0,1,2},
+        {0,3,4}
+    };
+
+    MeshRepair<double>::Parameters p;
+    // MODE = 0 means no colocate, no dup_f removal; only topology + orient.
+    p.mode = static_cast<MeshRepair<double>::RepairMode>(0);
+    MeshRepair<double>::Repair(V, T, p);
+
+    // After splitting, the bowtie vertex is duplicated: one of the two
+    // triangles still uses the original vertex 0, the other uses the new
+    // duplicate.  The two triangles must reference DIFFERENT vertex 0-positions.
+    CHECK(V.size() == 6,
+          "SplitNonManifoldVertices_Bowtie: one new vertex created");
+
+    // Both triangles should remain, just with different vertex 0 indices.
+    CHECK(T.size() == 2,
+          "SplitNonManifoldVertices_Bowtie: triangle count unchanged");
+
+    // The mesh should now be manifold at the former bowtie vertex.
+    bool manifold = MeshValidation<double>::IsManifold(T);
+    CHECK(manifold, "SplitNonManifoldVertices_Bowtie: manifold after split");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T30: MeshRepair – SplitNonManifoldVertices: manifold mesh is unchanged
+// ─────────────────────────────────────────────────────────────────────────────
+static void Test_SplitNonManifoldVertices_ManifoldUnchanged() {
+    Verts V;
+    Tris  T;
+    MakeTetrahedron(V, T);
+    size_t vBefore = V.size();
+    size_t tBefore = T.size();
+
+    MeshRepair<double>::Parameters p;
+    p.mode = static_cast<MeshRepair<double>::RepairMode>(0);
+    MeshRepair<double>::Repair(V, T, p);
+
+    CHECK(V.size() == vBefore,
+          "SplitNonManifoldVertices_ManifoldUnchanged: vertex count unchanged");
+    CHECK(T.size() == tBefore,
+          "SplitNonManifoldVertices_ManifoldUnchanged: triangle count unchanged");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -675,6 +733,8 @@ int main()
     Test_OrientNormals_AlreadyOriented();
     Test_ColocateEpsilonBoundary();
     Test_FillHoles_Hexagon_3D();
+    Test_SplitNonManifoldVertices_Bowtie();
+    Test_SplitNonManifoldVertices_ManifoldUnchanged();
 
     std::cout << "\n=== Results: " << gPassed << " passed, "
               << gFailed << " failed ===\n";

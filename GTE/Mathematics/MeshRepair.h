@@ -25,6 +25,7 @@
 #include <cmath>
 #include <cstdint>
 #include <map>
+#include <queue>
 #include <set>
 #include <unordered_map>
 #include <vector>
@@ -104,6 +105,12 @@ namespace gte
             // normals).  Geogram's mesh_repair() always calls orient_normals()
             // for 3-D meshes; we replicate that here.
             MeshPreprocessing<Real>::OrientNormals(vertices, triangles);
+
+            // Step 5: Split non-manifold vertices (matching Geogram's
+            // repair_split_non_manifold_vertices).  Vertices where the incident
+            // triangles do not form a single connected fan around the vertex are
+            // duplicated so that each fan uses its own vertex copy.
+            SplitNonManifoldVertices(vertices, triangles);
         }
 
         // Detect colocated vertices and return mapping to canonical vertex indices.
@@ -374,6 +381,143 @@ namespace gte
             }
 
             vertices = std::move(newVertices);
+        }
+
+        // Split non-manifold vertices.
+        //
+        // A vertex is non-manifold if its incident triangles do not form a
+        // single connected fan around it.  This occurs when two separate
+        // "cones" of triangles share only the vertex (e.g., a bowtie).
+        //
+        // For each such vertex the incident triangles are partitioned into
+        // connected fans using BFS over edges that contain the vertex.  Fan 0
+        // keeps the original vertex; every additional fan receives a new
+        // duplicate vertex at the same position.
+        //
+        // This matches Geogram's repair_split_non_manifold_vertices().
+        static void SplitNonManifoldVertices(
+            std::vector<Vector3<Real>>& vertices,
+            std::vector<std::array<int32_t, 3>>& triangles)
+        {
+            int32_t numVerts = static_cast<int32_t>(vertices.size());
+            int32_t numTris  = static_cast<int32_t>(triangles.size());
+
+            // Build vertex → incident-triangle index lists.
+            std::vector<std::vector<int32_t>> vertToTris(numVerts);
+            for (int32_t t = 0; t < numTris; ++t)
+            {
+                for (int k = 0; k < 3; ++k)
+                {
+                    vertToTris[triangles[t][k]].push_back(t);
+                }
+            }
+
+            for (int32_t v = 0; v < numVerts; ++v)
+            {
+                auto& inc = vertToTris[v];
+                int32_t numInc = static_cast<int32_t>(inc.size());
+                if (numInc <= 1)
+                {
+                    continue;
+                }
+
+                // Map each "other vertex u adjacent to v" to the local
+                // triangle indices (within inc[]) that contain edge v–u.
+                std::map<int32_t, std::vector<int32_t>> neighborToLocal;
+                for (int32_t li = 0; li < numInc; ++li)
+                {
+                    int32_t t = inc[li];
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        int32_t u = triangles[t][k];
+                        if (u != v)
+                        {
+                            neighborToLocal[u].push_back(li);
+                        }
+                    }
+                }
+
+                // BFS: group incident triangles into connected fans.
+                // Two triangles in inc[] are adjacent if they share an
+                // edge containing v (i.e. they both contain some u ≠ v).
+                std::vector<int32_t> comp(numInc, -1);
+                int32_t numComp = 0;
+
+                for (int32_t seed = 0; seed < numInc; ++seed)
+                {
+                    if (comp[seed] >= 0)
+                    {
+                        continue;
+                    }
+
+                    std::queue<int32_t> q;
+                    q.push(seed);
+                    comp[seed] = numComp;
+
+                    while (!q.empty())
+                    {
+                        int32_t cur = q.front();
+                        q.pop();
+
+                        int32_t curTri = inc[cur];
+                        for (int k = 0; k < 3; ++k)
+                        {
+                            int32_t u = triangles[curTri][k];
+                            if (u == v)
+                            {
+                                continue;
+                            }
+
+                            auto it = neighborToLocal.find(u);
+                            if (it == neighborToLocal.end())
+                            {
+                                continue;
+                            }
+
+                            for (int32_t adj : it->second)
+                            {
+                                if (comp[adj] < 0)
+                                {
+                                    comp[adj] = numComp;
+                                    q.push(adj);
+                                }
+                            }
+                        }
+                    }
+
+                    ++numComp;
+                }
+
+                if (numComp <= 1)
+                {
+                    continue;
+                }
+
+                // Fan 0 keeps vertex v.  Fans 1, 2, ... get new duplicate
+                // vertices, and the triangles in those fans are updated.
+                for (int32_t c = 1; c < numComp; ++c)
+                {
+                    int32_t newV = static_cast<int32_t>(vertices.size());
+                    vertices.push_back(vertices[v]);
+
+                    for (int32_t li = 0; li < numInc; ++li)
+                    {
+                        if (comp[li] != c)
+                        {
+                            continue;
+                        }
+
+                        int32_t t = inc[li];
+                        for (int k = 0; k < 3; ++k)
+                        {
+                            if (triangles[t][k] == v)
+                            {
+                                triangles[t][k] = newV;
+                            }
+                        }
+                    }
+                }
+            }
         }
     };
 
