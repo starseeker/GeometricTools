@@ -3,7 +3,7 @@
 // Distributed under the Boost Software License, Version 1.0.
 // https://www.boost.org/LICENSE_1_0.txt
 // https://www.geometrictools.com/License/Boost/LICENSE_1_0.txt
-// File Version: 8.0.2026.02.10
+// File Version: 8.0.2026.02.26
 //
 // Ported from Geogram: https://github.com/BrunoLevy/geogram
 // Original files: src/lib/geogram/mesh/mesh_repair.cpp, mesh_repair.h
@@ -45,6 +45,7 @@
 
 #include <GTE/Mathematics/Vector3.h>
 #include <GTE/Mathematics/ETManifoldMesh.h>
+#include <GTE/Mathematics/MeshPreprocessing.h>
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -127,6 +128,15 @@ namespace gte
 
             // Step 5: Connect and reorient facets
             // (Geogram does this internally, we'll rely on the mesh being properly oriented)
+
+            // Step 6: Orient normals consistently per connected component.
+            // Matches geogram's mesh_repair which always calls orient_normals()
+            // at the end to ensure outward-facing normals by flipping any component
+            // whose signed volume is negative.
+            if (!triangles.empty())
+            {
+                MeshPreprocessing<Real>::OrientNormals(vertices, triangles);
+            }
         }
 
         // Detect colocated vertices and return mapping to canonical vertex indices.

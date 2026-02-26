@@ -193,17 +193,6 @@ namespace gte
 
             for (int32_t compId = 0; compId < numComponents; ++compId)
             {
-                // Find first triangle in this component
-                size_t seedTriangle = 0;
-                for (size_t i = 0; i < triangles.size(); ++i)
-                {
-                    if (componentIds[i] == compId)
-                    {
-                        seedTriangle = i;
-                        break;
-                    }
-                }
-
                 // Determine if component should be flipped based on signed volume
                 Real signedVolume = static_cast<Real>(0);
                 for (size_t i = 0; i < triangles.size(); ++i)
