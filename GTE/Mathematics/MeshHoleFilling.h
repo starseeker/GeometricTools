@@ -17,14 +17,11 @@
 // - Removed Geogram-specific Logger and CmdLine calls
 //
 // WINDING-ORDER NOTES
-// For a consistently oriented mesh (CCW outward normals), boundary loops
-// traced by following the mesh's directed edges are CW (inner holes) or CCW
-// (outer perimeter of an open mesh).  Only CW loops represent true holes that
-// should be filled; CCW loops are skipped.
-//
-// A boundary loop is classified as CW when the dot product of its
-// un-normalized Newell area vector and the average mesh outward normal is
-// negative.
+// All boundary loops detected in the mesh are filled, matching Geogram's
+// mesh_fill_holes behaviour.  For a consistently oriented mesh (CCW outward
+// normals) each boundary loop represents either an inner hole or the outer
+// perimeter of an open patch; both are filled by this implementation so that
+// the caller gets a closed surface regardless of the original mesh topology.
 //
 // For a CW hole boundary projected to 2D via its Newell normal (which always
 // yields a CCW 2D polygon), the fill triangles from TriangulateEC / CDT are
@@ -127,8 +124,9 @@ namespace gte
             }
         };
 
-        // Fill all inner holes in the mesh that satisfy the size constraints.
-        // Outer boundary loops of open meshes are skipped automatically.
+        // Fill all boundary loops in the mesh that satisfy the size constraints.
+        // All detected boundary loops are filled (matching Geogram's behaviour),
+        // whether they represent inner holes or the outer perimeter of an open mesh.
         static void FillHoles(
             std::vector<Vector3<Real>>& vertices,
             std::vector<std::array<int32_t, 3>>& triangles,
@@ -156,14 +154,6 @@ namespace gte
                 return;
             }
 
-            // Compute the average outward normal of the mesh.  This is used to
-            // classify each boundary loop as CW (inner hole) or CCW (outer
-            // perimeter of an open mesh).  Only CW loops are filled.
-            Vector3<Real> avgMeshNormal =
-                ComputeAverageMeshNormal(vertices, triangles);
-            bool hasMeshNormal =
-                (Length(avgMeshNormal) > static_cast<Real>(1e-10));
-
             size_t numFilled = 0;
             for (auto const& hole : holes)
             {
@@ -172,21 +162,6 @@ namespace gte
                     hole.vertices.size() > params.maxEdges)
                 {
                     continue;
-                }
-
-                // Classify boundary orientation.  A CW loop is an inner hole;
-                // a CCW loop is the outer perimeter of an open mesh.
-                if (hasMeshNormal)
-                {
-                    Vector3<Real> rawNewell =
-                        ComputeHoleNormalRaw(vertices, hole);
-                    // Negative dot → the boundary normal opposes the outward
-                    // mesh normal → CW boundary → inner hole → fill.
-                    // Positive dot → CCW boundary → outer perimeter → skip.
-                    if (Dot(rawNewell, avgMeshNormal) >= static_cast<Real>(0))
-                    {
-                        continue;
-                    }
                 }
 
                 // Determine which triangulation method to use.
@@ -698,6 +673,14 @@ namespace gte
                 merged.v2 = workingHole[
                     (nextIdx + 1) % workingHole.size()].v1;
 
+                // The entry immediately before bestIdx has a stale .v2 that
+                // still points to the clipped ear tip.  Update it now so that
+                // subsequent score computations use the correct lookahead vertex.
+                size_t const sz = workingHole.size();
+                size_t const prevIdx =
+                    (static_cast<size_t>(bestIdx) + sz - 1u) % sz;
+                workingHole[prevIdx].v2 = t2.v1;
+
                 workingHole[bestIdx] = merged;
                 workingHole.erase(workingHole.begin() + nextIdx);
             }
@@ -796,32 +779,6 @@ namespace gte
             Vector3<Real> n = ComputeHoleNormalRaw(vertices, hole);
             Normalize(n);
             return n;
-        }
-
-        // Average area-weighted normal of all mesh triangles.
-        // Used to classify boundary loops as CW (inner hole) or CCW (outer edge).
-        static Vector3<Real> ComputeAverageMeshNormal(
-            std::vector<Vector3<Real>> const& vertices,
-            std::vector<std::array<int32_t, 3>> const& triangles)
-        {
-            Vector3<Real> avg{
-                static_cast<Real>(0),
-                static_cast<Real>(0),
-                static_cast<Real>(0)};
-
-            for (auto const& tri : triangles)
-            {
-                Vector3<Real> e1 = vertices[tri[1]] - vertices[tri[0]];
-                Vector3<Real> e2 = vertices[tri[2]] - vertices[tri[0]];
-                avg += Cross(e1, e2);   // area-weighted contribution
-            }
-
-            Real len = Length(avg);
-            if (len > static_cast<Real>(1e-10))
-            {
-                avg /= len;
-            }
-            return avg;
         }
 
         // Build a tangent-space basis {uAxis, vAxis} orthogonal to 'normal'.
