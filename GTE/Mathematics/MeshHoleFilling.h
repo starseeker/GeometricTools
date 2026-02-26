@@ -3,7 +3,7 @@
 // Distributed under the Boost Software License, Version 1.0.
 // https://www.boost.org/LICENSE_1_0.txt
 // https://www.geometrictools.com/License/Boost/LICENSE_1_0.txt
-// File Version: 8.0.2026.02.10
+// File Version: 8.0.2026.02.26
 //
 // Ported from Geogram: https://github.com/BrunoLevy/geogram
 // Original files: src/lib/geogram/mesh/mesh_fill_holes.cpp, mesh_fill_holes.h
@@ -235,7 +235,18 @@ namespace gte
 
                     if (params.maxArea <= static_cast<Real>(0) || holeArea < params.maxArea)
                     {
-                        // Add new triangles to mesh
+                        // Reverse winding of new triangles before adding to mesh.
+                        // The hole boundary is traced as a directed boundary loop
+                        // (clockwise when viewed from outside for a CCW mesh), so the
+                        // triangulation produces triangles with inward-facing normals.
+                        // Reversing v1 <-> v2 corrects this, matching geogram's
+                        // fill_holes which inserts triangles as
+                        // create_triangle(indices[2], indices[1], indices[0]).
+                        for (auto& tri : newTriangles)
+                        {
+                            // tri = {v0, v1, v2}: swap v1 and v2 to flip winding
+                            std::swap(tri[1], tri[2]);
+                        }
                         triangles.insert(triangles.end(), newTriangles.begin(), newTriangles.end());
                         ++numFilled;
                     }
