@@ -38,6 +38,7 @@
 #include <cstdint>
 #include <limits>
 #include <stack>
+#include <unordered_map>
 #include <vector>
 
 namespace gte
@@ -93,6 +94,15 @@ namespace gte
             if (!candidateTriangles.empty())
             {
                 AddTriangles(candidateTriangles);
+
+                // Final manifold cleanup: ConnectAndValidateTriangle prevents
+                // most non-manifold edges, but subtle circular-list ordering
+                // during incremental insertion can occasionally allow a
+                // conflicting T12 triangle through.  Scan all output triangles
+                // and remove any that share an undirected edge with more than
+                // one other triangle.  This is O(T) and free of the circular-
+                // list traversal that could loop in the presence of corruption.
+                RemoveNonManifoldTriangles();
             }
             
             // Extract result
@@ -153,42 +163,55 @@ namespace gte
         
         void InitAndRemoveNonManifoldEdges()
         {
-            // Build topology for all triangles
-            for (int32_t t = 0; t < static_cast<int32_t>(mTriangles.size()); ++t)
+            // Iteratively remove non-manifold triangles until the mesh is clean.
+            // One pass may not suffice: after removing the first round of
+            // conflicting triangles the compacted mesh can expose new conflicts
+            // (e.g. a same-direction winding pair that was hidden behind a
+            // three-way edge conflict).  We iterate until no more removals occur.
+            static constexpr int maxPasses = 10;
+            for (int pass = 0; pass < maxPasses; ++pass)
             {
-                Insert(t);
-            }
-            
-            // Find non-manifold edges and mark triangles for removal
-            std::vector<bool> removeTriangle(mTriangles.size(), false);
-            int32_t nbNonManifold = 0;
-            
-            for (int32_t t = 0; t < static_cast<int32_t>(mTriangles.size()); ++t)
-            {
-                if (!Connect(t))
-                {
-                    removeTriangle[t] = true;
-                    ++nbNonManifold;
-                }
-            }
-            
-            // Reorient mesh and remove Moebius configurations
-            ReorientMesh(removeTriangle);
-            
-            if (nbNonManifold > 0 || HasMarkedTriangles(removeTriangle))
-            {
-                // Remove marked triangles
-                DeleteMarkedTriangles(removeTriangle);
-                
-                // Rebuild topology structures
-                mNextCornerAroundVertex.assign(mTriangles.size() * 3, NO_CORNER);
-                mVertexToCorner.assign(mVertexToCorner.size(), NO_CORNER);
-                mCornerToAdjacentFacet.assign(mTriangles.size() * 3, NO_FACET);
-                
+                // Build vertex-to-corner circular lists.
                 for (int32_t t = 0; t < static_cast<int32_t>(mTriangles.size()); ++t)
                 {
                     Insert(t);
                 }
+
+                // Find non-manifold edges and mark triangles for removal.
+                std::vector<bool> removeTriangle(mTriangles.size(), false);
+                int32_t nbNonManifold = 0;
+
+                for (int32_t t = 0; t < static_cast<int32_t>(mTriangles.size()); ++t)
+                {
+                    if (!Connect(t))
+                    {
+                        removeTriangle[t] = true;
+                        ++nbNonManifold;
+                    }
+                }
+
+                // Reorient mesh and remove Möbius configurations.
+                ReorientMesh(removeTriangle);
+
+                if (nbNonManifold == 0 && !HasMarkedTriangles(removeTriangle))
+                {
+                    // Mesh is clean; rebuild the adjacency map one last time so
+                    // that InitConnectedComponents and AddTriangles can rely on
+                    // mCornerToAdjacentFacet being fully populated.
+                    for (int32_t t = 0; t < static_cast<int32_t>(mTriangles.size()); ++t)
+                    {
+                        Connect(t);
+                    }
+                    break;
+                }
+
+                // Remove marked triangles.
+                DeleteMarkedTriangles(removeTriangle);
+
+                // Reset topology structures for the next pass.
+                mNextCornerAroundVertex.assign(mTriangles.size() * 3, NO_CORNER);
+                mVertexToCorner.assign(mVertexToCorner.size(), NO_CORNER);
+                mCornerToAdjacentFacet.assign(mTriangles.size() * 3, NO_FACET);
             }
         }
         
@@ -233,7 +256,54 @@ namespace gte
         }
         
         // ===== INCREMENTAL TRIANGLE INSERTION =====
-        
+
+        // Post-insertion cleanup: remove triangles that participate in
+        // non-manifold edges (edges shared by more than two triangles).
+        // Called after AddTriangles to fix any triangles that slipped through
+        // the incremental manifold check due to circular-list ordering.
+        // O(T) time; does not use the corner circular-list traversal.
+        void RemoveNonManifoldTriangles()
+        {
+            // Encode an undirected edge as a 64-bit key.
+            auto edgeKey = [](int32_t a, int32_t b) -> uint64_t
+            {
+                if (a > b) std::swap(a, b);
+                return (static_cast<uint64_t>(static_cast<uint32_t>(a)) << 32)
+                     |  static_cast<uint64_t>(static_cast<uint32_t>(b));
+            };
+
+            // Count how many triangles reference each undirected edge.
+            std::unordered_map<uint64_t, int32_t> edgeCounts;
+            edgeCounts.reserve(mTriangles.size() * 3);
+            for (auto const& tri : mTriangles)
+            {
+                for (int i = 0; i < 3; ++i)
+                {
+                    edgeCounts[edgeKey(tri[i], tri[(i + 1) % 3])]++;
+                }
+            }
+
+            // Mark any triangle that has an edge with count > 2.
+            std::vector<std::array<int32_t, 3>> clean;
+            clean.reserve(mTriangles.size());
+            for (auto const& tri : mTriangles)
+            {
+                bool bad = false;
+                for (int i = 0; i < 3 && !bad; ++i)
+                {
+                    if (edgeCounts[edgeKey(tri[i], tri[(i + 1) % 3])] > 2)
+                    {
+                        bad = true;
+                    }
+                }
+                if (!bad)
+                {
+                    clean.push_back(tri);
+                }
+            }
+            mTriangles = std::move(clean);
+        }
+
         void AddTriangles(std::vector<std::array<int32_t, 3>> const& candidateTriangles)
         {
             int32_t nbTriangles = static_cast<int32_t>(candidateTriangles.size());
@@ -751,13 +821,13 @@ namespace gte
         
         void FlipTriangle(int32_t t)
         {
-            // Swap vertices 1 and 2
+            // Swap vertices 1 and 2 to reverse the triangle's winding order.
             std::swap(mTriangles[t][1], mTriangles[t][2]);
-            
+
             // Update adjacency
             std::swap(mCornerToAdjacentFacet[t * 3 + 1], mCornerToAdjacentFacet[t * 3 + 2]);
-            
-            // Re-insert into topology
+
+            // Re-insert into the per-vertex corner circular lists.
             Remove(t, false);
             Insert(t);
         }

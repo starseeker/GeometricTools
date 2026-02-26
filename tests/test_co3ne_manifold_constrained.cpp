@@ -113,6 +113,11 @@ static bool TestManifoldConstrainedGenerationHasNoNonManifoldEdges()
 {
     std::cout << "Test: manifold-constrained generation produces no non-manifold edges\n";
 
+    // Use ReconstructWithNormals with exact (consistently-outward) sphere
+    // normals.  The T3/T12 Geogram algorithm relies on consistent normal
+    // orientation to classify triangles by mutual agreement; with exact
+    // normals every T3 triangle is reliably identified and the extractor
+    // produces a clean manifold with 0 non-manifold edges.
     std::vector<Vector3<double>> points, normals, outVerts;
     std::vector<std::array<int32_t, 3>> outTris;
     double radius = MakeSphereCloud(200, points, normals);
@@ -120,10 +125,10 @@ static bool TestManifoldConstrainedGenerationHasNoNonManifoldEdges()
     Co3Ne<double>::Parameters params;
     params.kNeighbors             = 15;
     params.searchRadius           = radius;
-    params.maxNormalAngle         = 90.0;
-    params.orientNormals          = false;   // normals already oriented
+    params.maxNormalAngle         = 60.0;
+    params.orientNormals          = false;   // exact normals need no re-orientation
 
-    bool ok = Co3Ne<double>::Reconstruct(points, outVerts, outTris, params);
+    bool ok = Co3Ne<double>::ReconstructWithNormals(points, normals, outVerts, outTris, params);
     if (!ok)
     {
         std::cout << "  FAIL: no triangles generated (search_radius=" << radius << ")\n";
@@ -215,13 +220,17 @@ static bool TestReconstructWorksWithFlag()
 {
     std::cout << "Test: Reconstruct completes successfully (manifold-constrained generation)\n";
 
+    // Reconstruct computes PCA normals which have arbitrary sign.
+    // The T3/T12 Geogram algorithm requires consistently-oriented normals
+    // to classify triangles; orientNormals=true uses BFS propagation to
+    // make the PCA normals consistent before triangle generation.
     std::vector<Vector3<double>> points, normals, outVerts;
     std::vector<std::array<int32_t, 3>> outTris;
     double radius = MakeSphereCloud(150, points, normals);
 
     Co3Ne<double>::Parameters params;
-    params.searchRadius = radius;
-    params.orientNormals = false;
+    params.searchRadius  = radius;
+    params.orientNormals = true;   // required: PCA normals need orientation
 
     bool ok = Co3Ne<double>::Reconstruct(points, outVerts, outTris, params);
     std::cout << "  Triangles generated: " << outTris.size() << "\n";

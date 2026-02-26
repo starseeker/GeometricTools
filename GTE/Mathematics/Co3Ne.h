@@ -49,7 +49,6 @@
 #include <map>
 #include <mutex>
 #include <queue>
-#include <set>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -443,12 +442,13 @@ namespace gte
 
         // ===== TRIANGLE GENERATION =====
 
-        // Generate triangles using co-cone analysis.
-        // Uses GenerateTrianglesManifoldConstrained: projects k-NN onto the
-        // tangent plane, sorts by angle, and triangulates only angularly-
-        // consecutive pairs — O(k) candidates per seed, equivalent to Geogram's
-        // Restricted Voronoi Cell polygon traversal.
-        // The legacy O(k²) fan generator is available in GTE_DEBUG builds.
+        // Generate triangles using the real Geogram Co3Ne algorithm:
+        //   For each seed i, collect up to k normal-consistent neighbors
+        //   (scanning all found neighbors, not just the first k), then
+        //   propose every pair as a candidate triangle — O(k²) per seed.
+        //   ExtractManifold applies T3/T12 classification to these raw
+        //   proposals: triangles seen from all 3 vertex perspectives (T3)
+        //   seed the manifold first; T12 triangles fill gaps.
         // Accepts a pre-built NNTree and search radius to avoid rebuilding
         // the tree for every phase.
         static void GenerateTriangles(
@@ -461,87 +461,30 @@ namespace gte
         {
             GenerateTrianglesManifoldConstrained(
                 points, normals, triangles, params, nnQuery, searchRadius);
-            return;
-
-#ifdef GTE_DEBUG
-            // Legacy O(k²) fan generator — inferior results, kept for debugging only.
-            // Each seed generates all pairs of consistent k-NN as candidates.
-            // The "exactly 3 appearances" invariant from Geogram's RVC polygon does NOT
-            // hold here, making the T3/T12 classification in ExtractManifold meaningless.
-            Real maxCosAngle = std::cos(params.maxNormalAngle * static_cast<Real>(3.14159265358979323846) / static_cast<Real>(180));
-
-            for (size_t i = 0; i < points.size(); ++i)
-            {
-                constexpr int32_t MaxNeighbors = 100;
-                std::array<int32_t, MaxNeighbors> indices;
-                int32_t numFound = nnQuery.template FindNeighbors<MaxNeighbors>(
-                    points[i], searchRadius, indices);
-
-                if (numFound < 3) continue;
-
-                int32_t k = std::min(numFound, static_cast<int32_t>(params.kNeighbors));
-
-                std::vector<int32_t> consistentNeighbors;
-                for (int32_t j = 0; j < k; ++j)
-                {
-                    int32_t nIdx = indices[j];
-                    if (nIdx == static_cast<int32_t>(i)) continue;
-                    if (Dot(normals[i], normals[nIdx]) >= maxCosAngle)
-                        consistentNeighbors.push_back(nIdx);
-                }
-
-                if (consistentNeighbors.size() < 2) continue;
-
-                for (size_t j = 0; j < consistentNeighbors.size(); ++j)
-                {
-                    for (size_t kk = j + 1; kk < consistentNeighbors.size(); ++kk)
-                    {
-                        int32_t v0 = static_cast<int32_t>(i);
-                        int32_t v1 = consistentNeighbors[j];
-                        int32_t v2 = consistentNeighbors[kk];
-
-                        if (!IsTriangleValid(points, v0, v1, v2, params)) continue;
-
-                        triangles.push_back({ v0, v1, v2 });
-                    }
-                }
-            }
-#endif  // GTE_DEBUG
         }
 
-        // Manifold-constrained triangle generation.
+        // Real Geogram Co3Ne triangle generation.
         //
-        // Root causes preventing standard Co3Ne from producing manifold output
-        // and how this method addresses each one:
+        // For each seed point i:
+        //   1. Find all neighbors within the search radius (up to MaxNeighbors).
+        //   2. Scan the FULL found list and collect up to kNeighbors neighbors
+        //      whose surface normal agrees with normal[i] within maxNormalAngle
+        //      (co-cone criterion).  Scanning the full list is essential for
+        //      geometry with thin features: geometrically close cross-surface
+        //      points are filtered by the normal test, so we must look past
+        //      them to collect k valid same-surface neighbors.
+        //   3. Propose every PAIR from the consistent set as a candidate
+        //      triangle (v0=i, v1=j, v2=kk) — O(k²) proposals per seed.
+        //      Degenerate / sliver triangles are discarded via IsTriangleValid.
         //
-        // 1. Spurious triangles from O(k²) fan triangulation
-        //    Standard: generates all pairs (j, kk) from consistent k-NN,
-        //    yielding O(k²) candidates, many geometrically invalid.
-        //    Fix: project k-NN onto the tangent plane, sort by angle, and
-        //    only triangulate angularly-consecutive pairs (O(k) candidates).
-        //    This directly mirrors Geogram's Restricted Voronoi Cell polygon:
-        //    the RVC edge between seeds j and k is exactly the boundary between
-        //    two angularly-adjacent Voronoi neighbors of i in the tangent plane.
-        //
-        // 2. Inconsistent winding order requiring FixWindingOrder post-processing
-        //    Standard: triangle orientation is arbitrary.
-        //    Fix: after deciding the edge (v1→v2) in angular CCW order seen from
-        //    normal[i], we verify Cross(v1-v0, v2-v0) · normal[i] > 0; if not,
-        //    we swap v1 and v2 in-place. Winding is therefore consistent with
-        //    the estimated surface normal at generation time.
-        //
-        // 3. Non-manifold edges requiring post-hoc fixing
-        //    Standard: every O(k²) candidate is added unconditionally, so an
-        //    edge can appear in arbitrarily many triangles.
-        //    Fix: maintain a global edge-use counter. Each undirected edge
-        //    (min(a,b), max(a,b)) is allowed in at most 2 triangles. Candidates
-        //    that would exceed this limit are silently skipped.
-        //
-        // Trade-off: because we enforce a global greedy constraint, the result
-        // depends on processing order, and the output is a subset of the surface
-        // rather than the full set of plausible triangles. The subsequent
-        // ExtractManifold step is still available and can
-        // be applied to this already-clean candidate set.
+        // The resulting raw candidate list contains duplicates: triangle
+        // (i,j,k) is proposed once each when i, j, and k are used as the
+        // seed.  ExtractManifold classifies proposals by count:
+        //   count == 3  →  T3  ("good"   — all three vertices agree)
+        //   count <  3  →  T12 ("not-so-good" — one or two vertices agree)
+        //   count >  3  →  discarded (too many proposals, unreliable)
+        // T3 triangles seed the manifold mesh; T12 fill gaps.  This is the
+        // classification scheme from the original Geogram Co3Ne paper.
         static void GenerateTrianglesManifoldConstrained(
             std::vector<Vector3<Real>> const& points,
             std::vector<Vector3<Real>> const& normals,
@@ -553,61 +496,11 @@ namespace gte
             static constexpr Real kPi = static_cast<Real>(3.14159265358979323846);
             Real maxCosAngle = std::cos(params.maxNormalAngle * kPi / static_cast<Real>(180));
 
-            // Global edge-use counter: (min_v, max_v) -> number of triangles using it.
-            // Limits each undirected edge to at most 2 triangles (manifold condition).
-            std::unordered_map<uint64_t, int32_t> edgeUseCount;
-            edgeUseCount.reserve(points.size() * static_cast<size_t>(params.kNeighbors));
-
-            // Encode an undirected edge as a single 64-bit key.
-            auto edgeKey = [](int32_t a, int32_t b) -> uint64_t
-            {
-                if (a > b) std::swap(a, b);
-                return (static_cast<uint64_t>(static_cast<uint32_t>(a)) << 32)
-                     |  static_cast<uint64_t>(static_cast<uint32_t>(b));
-            };
-
-            auto edgeUsable = [&edgeUseCount, &edgeKey](int32_t a, int32_t b) -> bool
-            {
-                auto it = edgeUseCount.find(edgeKey(a, b));
-                return it == edgeUseCount.end() || it->second < 2;
-            };
-
-            auto recordEdge = [&edgeUseCount, &edgeKey](int32_t a, int32_t b)
-            {
-                edgeUseCount[edgeKey(a, b)]++;
-            };
-
-            // Track already-added triangles by their canonical (sorted) key so that
-            // the same triangle generated from multiple seed points is added only once.
-            // Without this, seeds v0=i, v0=j, and v0=k can all independently generate
-            // triangle (i,j,k) (possibly with different cyclic orderings), each passing
-            // the edge-use check, consuming 2x or 3x edge budget and producing duplicates.
-            // We reuse the TriangleArrayHash that is already part of this class.
-            using TriangleSeen =
-                std::unordered_map<std::array<int32_t, 3>, bool, TriangleArrayHash>;
-            TriangleSeen triSeen;
-            triSeen.reserve(points.size() * static_cast<size_t>(params.kNeighbors));
-
-            // Build the canonical (sorted) key for a triangle so that (i,j,k),
-            // (j,k,i), (k,i,j), and all their reversals map to the same entry.
-            auto triCanonicalKey = [](int32_t a, int32_t b, int32_t c)
-                -> std::array<int32_t, 3>
-            {
-                std::array<int32_t, 3> key = { a, b, c };
-                std::sort(key.begin(), key.end());
-                return key;
-            };
-
-            // Neighbor struct for angular sort
-            struct AngNeighbor
-            {
-                Real   angle;
-                int32_t idx;
-            };
+            int32_t const kTarget = static_cast<int32_t>(params.kNeighbors);
 
             for (size_t i = 0; i < points.size(); ++i)
             {
-                // Find k-nearest neighbors within search radius
+                // Step 1: find all neighbors within the search radius.
                 constexpr int32_t MaxNeighbors = 100;
                 std::array<int32_t, MaxNeighbors> indices;
                 int32_t numFound = nnQuery.template FindNeighbors<MaxNeighbors>(
@@ -618,30 +511,11 @@ namespace gte
                     continue;
                 }
 
-                // Scan the FULL found-neighbor list (not just the first k) to
-                // collect up to k CONSISTENT (same-surface) neighbors.
-                //
-                // Problem this fixes:
-                //   For scenes with thin features (e.g., the Stanford Bunny
-                //   ears, ~6 mm thick, search radius ~38 mm), a large fraction
-                //   (~59 %) of the k geometrically-nearest points are
-                //   cross-surface captures whose normals point roughly opposite
-                //   (Dot(n_i, n_j) ≈ -1).  The normal-consistency filter
-                //   correctly rejects these, but when we only scanned the first
-                //   k found points, we often ended up with far fewer than k
-                //   valid surface neighbors.  With a diminished consistent-
-                //   neighbor set the fan covers fewer angular slots, every edge
-                //   in that fan is claimed at count=2 by the greedy edge-budget,
-                //   and adjacent seeds cannot attach — producing tens of
-                //   thousands of disconnected patches.
-                //
-                //   By scanning all numFound points (up to MaxNeighbors=100)
-                //   and stopping once k consistent neighbors are found, we
-                //   reliably obtain k true surface neighbors for every seed,
-                //   regardless of how many cross-surface points appear among the
-                //   geometrically closest candidates.
-                int32_t kTarget = static_cast<int32_t>(params.kNeighbors);
-
+                // Step 2: collect up to kTarget CONSISTENT (co-cone) neighbors
+                // by scanning the full found list rather than just the first k.
+                // This avoids under-sampling same-surface neighbors when
+                // cross-surface captures appear among the geometrically closest
+                // points (common for thin features such as bunny ears).
                 std::vector<int32_t> consistent;
                 consistent.reserve(static_cast<size_t>(kTarget));
                 for (int32_t j = 0; j < numFound && static_cast<int32_t>(consistent.size()) < kTarget; ++j)
@@ -662,103 +536,36 @@ namespace gte
                     continue;
                 }
 
-                // Build an orthonormal basis {u, v} for the tangent plane at i.
-                // We choose the axis of ni with the smallest absolute component
-                // to form a numerically stable cross product.
-                Vector3<Real> const& ni = normals[i];
-                Vector3<Real> u;
-                if (std::abs(ni[0]) <= std::abs(ni[1]) && std::abs(ni[0]) <= std::abs(ni[2]))
-                {
-                    u = Vector3<Real>{ static_cast<Real>(0), -ni[2], ni[1] };
-                }
-                else if (std::abs(ni[1]) <= std::abs(ni[2]))
-                {
-                    u = Vector3<Real>{ -ni[2], static_cast<Real>(0), ni[0] };
-                }
-                else
-                {
-                    u = Vector3<Real>{ ni[1], -ni[0], static_cast<Real>(0) };
-                }
-                Normalize(u);
-                Vector3<Real> vAxis = Cross(ni, u);   // second tangent axis
-
-                // Project consistent neighbors onto the tangent plane and sort by angle.
-                // This approximates the cyclic order of the Restricted Voronoi Cell
-                // boundary: the RVC polygon edge between seeds j and k corresponds
-                // exactly to angularly-adjacent neighbors in the tangent plane.
-                std::vector<AngNeighbor> angNeighbors;
-                angNeighbors.reserve(consistent.size());
-                for (int32_t nIdx : consistent)
-                {
-                    Vector3<Real> diff = points[nIdx] - points[i];
-                    Real pu = Dot(diff, u);
-                    Real pv = Dot(diff, vAxis);
-                    if (pu == static_cast<Real>(0) && pv == static_cast<Real>(0))
-                    {
-                        continue;    // coincident projection, skip
-                    }
-                    angNeighbors.push_back({ std::atan2(pv, pu), nIdx });
-                }
-
-                if (angNeighbors.size() < 2)
-                {
-                    continue;
-                }
-
-                std::sort(angNeighbors.begin(), angNeighbors.end(),
-                    [](AngNeighbor const& a, AngNeighbor const& b)
-                    {
-                        return a.angle < b.angle;
-                    });
-
-                // Generate one triangle per angularly-consecutive pair (wrapping around).
-                // This gives O(k) candidates instead of O(k²), closely matching the
-                // set of triangles that Geogram's Restricted Voronoi Cell would produce.
-                size_t const m = angNeighbors.size();
                 int32_t const v0 = static_cast<int32_t>(i);
 
-                for (size_t j = 0; j < m; ++j)
+                // Step 3: propose every pair — O(k²) candidates per seed.
+                for (size_t j = 0; j < consistent.size(); ++j)
                 {
-                    int32_t v1 = angNeighbors[j].idx;
-                    int32_t v2 = angNeighbors[(j + 1) % m].idx;
-
-                    // Quality check (degenerate / sliver rejection)
-                    if (!IsTriangleValid(points, v0, v1, v2, params))
+                    for (size_t kk = j + 1; kk < consistent.size(); ++kk)
                     {
-                        continue;
-                    }
+                        int32_t v1 = consistent[j];
+                        int32_t v2 = consistent[kk];
 
-                    // Align winding with the surface normal at v0.
-                    // Cross(p1-p0, p2-p0) · normal[i] should be > 0.
-                    {
+                        // Reject degenerate / sliver triangles early.
+                        if (!IsTriangleValid(points, v0, v1, v2, params))
+                        {
+                            continue;
+                        }
+
+                        // Align winding with normal[i] so proposals from
+                        // different seeds use consistent orientation for the
+                        // same triangle.  The manifold extractor also
+                        // re-orients during connectivity building, so this
+                        // is a soft hint rather than a hard requirement.
                         Vector3<Real> e1 = points[v1] - points[v0];
                         Vector3<Real> e2 = points[v2] - points[v0];
-                        if (Dot(Cross(e1, e2), ni) < static_cast<Real>(0))
+                        if (Dot(Cross(e1, e2), normals[i]) < static_cast<Real>(0))
                         {
                             std::swap(v1, v2);
                         }
-                    }
 
-                    // Manifold edge constraint: reject the triangle if any of its
-                    // three undirected edges already appears in 2 triangles.
-                    if (!edgeUsable(v0, v1) || !edgeUsable(v1, v2) || !edgeUsable(v0, v2))
-                    {
-                        continue;
+                        triangles.push_back({ v0, v1, v2 });
                     }
-
-                    // Deduplicate: skip if this triangle was already added from a
-                    // different seed point (same vertex set, possibly different cyclic order).
-                    auto tk = triCanonicalKey(v0, v1, v2);
-                    if (triSeen.count(tk))
-                    {
-                        continue;
-                    }
-                    triSeen[tk] = true;
-
-                    triangles.push_back({ v0, v1, v2 });
-                    recordEdge(v0, v1);
-                    recordEdge(v1, v2);
-                    recordEdge(v0, v2);
                 }
             }
         }
@@ -804,13 +611,23 @@ namespace gte
 
         // ===== MANIFOLD EXTRACTION =====
 
-        // Extract manifold surface from candidate triangles.
-        // Candidates from GenerateTrianglesManifoldConstrained appear exactly once
-        // and the edge-budget constraint was already enforced during generation.
-        // All unique candidates are passed directly as "good" triangles to
-        // Co3NeManifoldExtractor, skipping the legacy T3/T12 Voronoi-count
-        // classification (which is only meaningful for the O(k²) fan generator,
-        // available in GTE_DEBUG builds).
+        // Extract manifold surface from the raw O(k²) candidate triangles
+        // produced by GenerateTrianglesManifoldConstrained.
+        //
+        // Each triangle (i,j,k) appears in the candidate list once for every
+        // seed vertex that proposed it.  Geogram's T3/T12 classification counts
+        // these appearances after normalizing the vertex order:
+        //
+        //   count == 3  →  T3  ("good")        all three vertices agree
+        //   count <  3  →  T12 ("not-so-good") one or two vertices agree
+        //   count >  3  →  discarded           over-proposed, unreliable
+        //
+        // For each canonical triangle we keep the FIRST oriented (winding-
+        // aligned) proposal seen.  The manifold extractor will re-orient any
+        // inconsistent patches via its own BFS step, so this is merely a hint.
+        //
+        // T3 triangles seed Co3NeManifoldExtractor; T12 triangles are added
+        // incrementally wherever the manifold can safely accommodate them.
         static void ExtractManifold(
             std::vector<Vector3<Real>> const& points,
             std::vector<Vector3<Real>> const& normals,
@@ -818,18 +635,55 @@ namespace gte
             std::vector<std::array<int32_t, 3>>& outTriangles,
             Parameters const& params)
         {
-            // Deduplicate (defensive — candidates should already be unique)
-            std::set<std::array<int32_t, 3>> seen;
-            std::vector<std::array<int32_t, 3>> uniqueCandidates;
-            uniqueCandidates.reserve(candidateTriangles.size());
+            (void)normals;   // not used here; kept for API symmetry
+
+            // Count how many seeds proposed each canonical triangle, while
+            // retaining the first winding-aligned oriented version seen.
+            struct TriCount
+            {
+                int                     count   = 0;
+                std::array<int32_t, 3>  oriented{};
+            };
+            std::unordered_map<std::array<int32_t, 3>, TriCount, TriangleArrayHash> triangleCounts;
+            triangleCounts.reserve(candidateTriangles.size() / 3 + 1);
             for (auto const& tri : candidateTriangles)
             {
                 std::array<int32_t, 3> normalized = tri;
                 std::sort(normalized.begin(), normalized.end());
-                if (seen.insert(normalized).second)
+                auto& info = triangleCounts[normalized];
+                if (info.count == 0)
                 {
-                    uniqueCandidates.push_back(tri);
+                    info.oriented = tri;   // save first winding-aligned proposal
                 }
+                info.count++;
+            }
+
+            // Classify into T3 (good) and T12 (not-so-good).
+            std::vector<std::array<int32_t, 3>> goodTriangles;
+            std::vector<std::array<int32_t, 3>> notSoGoodTriangles;
+            goodTriangles.reserve(triangleCounts.size() / 4 + 1);
+            notSoGoodTriangles.reserve(triangleCounts.size());
+
+            for (auto const& [normalized, info] : triangleCounts)
+            {
+                if (info.count == 3)
+                {
+                    goodTriangles.push_back(info.oriented);
+                }
+                else if (info.count < 3)
+                {
+                    notSoGoodTriangles.push_back(info.oriented);
+                }
+                // count > 3: discard
+            }
+
+            // Graceful degradation: if no T3 triangles were found (e.g. when
+            // normals have inconsistent orientation and mutual k-NN agreement
+            // is low), promote T12 triangles to seeds so the extractor still
+            // produces output.
+            if (goodTriangles.empty())
+            {
+                goodTriangles.swap(notSoGoodTriangles);
             }
 
             typename Co3NeManifoldExtractor<Real>::Parameters extractorParams;
@@ -838,48 +692,7 @@ namespace gte
             extractorParams.verbose       = false;
 
             Co3NeManifoldExtractor<Real> extractor(points, extractorParams);
-            std::vector<std::array<int32_t, 3>> empty;
-            extractor.Extract(uniqueCandidates, empty, outTriangles);
-            return;  // always use the production path above
-
-#ifdef GTE_DEBUG
-            // Legacy T3/T12 Voronoi-count classification — only meaningful for the
-            // O(k²) fan generator (GTE_DEBUG builds).  With the constrained generator
-            // each triangle appears exactly once, so counting occurrences is useless.
-            //
-            // Triangles appearing exactly 3 times → T3 (good, reliable manifold seed)
-            // Triangles appearing 1–2 times        → T12 (not-so-good, added later)
-            // Triangles appearing > 3 times        → discarded
-            std::vector<std::array<int32_t, 3>> goodTriangles;
-            std::vector<std::array<int32_t, 3>> notSoGoodTriangles;
-
-            std::unordered_map<std::array<int32_t, 3>, int, TriangleArrayHash> triangleCounts;
-            triangleCounts.reserve(candidateTriangles.size() / 3);
-            for (auto const& tri : candidateTriangles)
-            {
-                std::array<int32_t, 3> normalized = tri;
-                std::sort(normalized.begin(), normalized.end());
-                triangleCounts[normalized]++;
-            }
-
-            for (auto const& pair : triangleCounts)
-            {
-                int count = pair.second;
-                if (count == 3)
-                    goodTriangles.push_back(pair.first);
-                else if (count < 3)
-                    notSoGoodTriangles.push_back(pair.first);
-                // count > 3: discard
-            }
-
-            typename Co3NeManifoldExtractor<Real>::Parameters debugExtractorParams;
-            debugExtractorParams.strictMode    = params.strictMode;
-            debugExtractorParams.maxIterations = 50;
-            debugExtractorParams.verbose       = false;
-
-            Co3NeManifoldExtractor<Real> debugExtractor(points, debugExtractorParams);
-            debugExtractor.Extract(goodTriangles, notSoGoodTriangles, outTriangles);
-#endif  // GTE_DEBUG
+            extractor.Extract(goodTriangles, notSoGoodTriangles, outTriangles);
         }
 
         // ===== UTILITY FUNCTIONS =====
