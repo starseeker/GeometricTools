@@ -131,9 +131,10 @@ test: test_mesh_repair
 	./test_mesh_repair $(TEST_DIR)/data/gt.obj $(TEST_DIR)/data/gt_repaired.obj
 
 # Run GTE vs Geogram comparison (requires test_geogram_comparison to be built first)
+# Runs both repair+hole-filling (use case 1) and Co3Ne reconstruction (use case 3)
 test_geogram: test_geogram_comparison
-	@echo "Running GTE vs Geogram comparison..."
-	./test_geogram_comparison $(TEST_DIR)/data/gt.obj
+	@echo "Running GTE vs Geogram comparison (repair + Co3Ne)..."
+	./test_geogram_comparison $(TEST_DIR)/data/gt.obj $(TEST_DIR)/data/r768_1000.xyz
 
 stress: stress_test
 	@echo "Running comprehensive stress tests..."

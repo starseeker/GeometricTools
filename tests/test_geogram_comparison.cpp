@@ -1,23 +1,32 @@
 // Comparison test: GTE vs Geogram mesh processing
 //
-// This test runs the same mesh repair and hole-filling operations using both
-// Geogram and GTE implementations, then compares the output quality metrics
-// to verify that the GTE port is functionally equivalent to Geogram.
+// This test runs the same mesh repair, hole-filling, and surface reconstruction
+// operations using both Geogram and GTE implementations, then compares the output
+// quality metrics to verify that the GTE port is functionally equivalent to Geogram.
+//
+// BRL-CAD uses Geogram for three purposes:
+//   1. Mesh repair (repair.cpp)     - MeshRepair + MeshHoleFilling
+//   2. Mesh remeshing (remesh.cpp)  - MeshRemesh (CVT-based)
+//   3. Surface reconstruction       - Co3Ne point cloud → mesh
+//
+// This test validates use cases 1 and 3.
 //
 // Geogram submodule: geogram/
-// GTE implementations: GTE/Mathematics/MeshRepair.h, MeshHoleFilling.h
+// GTE implementations: GTE/Mathematics/MeshRepair.h, MeshHoleFilling.h, Co3Ne.h
 //
 // Usage:
-//   ./test_geogram_comparison <input.obj>
+//   ./test_geogram_comparison <input.obj> [points.xyz]
+//     input.obj   - mesh for repair+hole-filling test
+//     points.xyz  - optional point cloud (x y z nx ny nz) for Co3Ne test
 //
 // Success criteria:
-//   - GTE fills at least as many holes as Geogram (fewer or equal boundary edges)
-//   - Volume difference < VOLUME_TOLERANCE_PCT%
-//   - Surface area difference < AREA_TOLERANCE_PCT%
+//   Repair/fill: GTE fills at least as many holes as Geogram, volume diff < VOLUME_TOLERANCE_PCT%
+//   Co3Ne:       GTE produces non-empty output with plausible triangle count
 
 #include <GTE/Mathematics/MeshRepair.h>
 #include <GTE/Mathematics/MeshHoleFilling.h>
 #include <GTE/Mathematics/MeshValidation.h>
+#include <GTE/Mathematics/Co3Ne.h>
 
 // Geogram includes
 #include <geogram/basic/process.h>
@@ -28,6 +37,8 @@
 #include <geogram/mesh/mesh_preprocessing.h>
 #include <geogram/mesh/mesh_repair.h>
 #include <geogram/mesh/mesh_fill_holes.h>
+#include <geogram/points/co3ne.h>
+#include <geogram/basic/attributes.h>
 
 #include <iostream>
 #include <fstream>
@@ -57,6 +68,17 @@ static constexpr double AREA_TOLERANCE_PCT_BASE  = 15.0;        // base area tol
 // When GTE fills more holes, the extra triangulated patches add surface area.
 // In that case a relaxed tolerance is applied.
 static constexpr double AREA_TOLERANCE_PCT_EXTRA = 30.0;
+
+// Co3Ne comparison: search radius as fraction of bounding box diagonal (mirrors BRL-CAD co3ne.cpp)
+static constexpr double CO3NE_SEARCH_RADIUS_FRACTION = 0.05;
+// Co3Ne: maximum normal angle in degrees for co-cone filter (mirrors BRL-CAD co3ne.cpp "co3ne:max_N_angle" = 60.0)
+static constexpr double CO3NE_MAX_NORMAL_ANGLE_DEG   = 60.0;
+// Co3Ne triangle count ratio bounds: acceptable range for GTE vs Geogram output triangle count.
+// A wide range (0.5x – 3.0x) is expected because the two implementations use different neighbor
+// counts, search radius heuristics, and T3/T12 classification strategies while still producing
+// plausible reconstructions of the same surface.
+static constexpr double CO3NE_TRI_RATIO_MIN          = 0.5;
+static constexpr double CO3NE_TRI_RATIO_MAX          = 3.0;
 
 // ---- OBJ I/O ----
 
@@ -111,6 +133,31 @@ void SaveOBJ(std::string const& filename,
     {
         file << "f " << (t[0]+1) << " " << (t[1]+1) << " " << (t[2]+1) << "\n";
     }
+}
+
+// Load point cloud in "x y z nx ny nz" format (BRL-CAD co3ne.cpp input format)
+bool LoadXYZPointCloud(std::string const& filename,
+    std::vector<Vector3<double>>& points,
+    std::vector<Vector3<double>>& normals)
+{
+    std::ifstream file(filename);
+    if (!file.is_open()) { return false; }
+
+    points.clear();
+    normals.clear();
+
+    std::string line;
+    while (std::getline(file, line))
+    {
+        std::istringstream iss(line);
+        double px, py, pz, nx, ny, nz;
+        if (iss >> px >> py >> pz >> nx >> ny >> nz)
+        {
+            points.push_back(Vector3<double>{px, py, pz});
+            normals.push_back(Vector3<double>{nx, ny, nz});
+        }
+    }
+    return !points.empty();
 }
 
 // ---- Mesh metrics ----
@@ -279,6 +326,161 @@ bool RunGTERepairAndFillHoles(
     return true;
 }
 
+// ---- Co3Ne comparison functions ----
+
+// Run Geogram Co3Ne_reconstruct on the given point cloud.
+// Mirrors BRL-CAD co3ne.cpp usage exactly:
+//   gm.vertices.assign_points(...)
+//   normals attribute filled from input
+//   search_dist = 0.05 * GEO::bbox_diagonal(gm)
+//   GEO::Co3Ne_reconstruct(gm, search_dist)
+bool RunGeogramCo3Ne(
+    std::vector<Vector3<double>> const& points,
+    std::vector<Vector3<double>> const& normals,
+    std::vector<Vector3<double>>& outVertices,
+    std::vector<std::array<int32_t, 3>>& outTriangles)
+{
+    GEO::Mesh gm;
+
+    // Assign points
+    std::vector<double> flat(points.size() * 3);
+    for (size_t i = 0; i < points.size(); ++i)
+    {
+        flat[3*i+0] = points[i][0];
+        flat[3*i+1] = points[i][1];
+        flat[3*i+2] = points[i][2];
+    }
+    gm.vertices.assign_points(flat.data(), 3, static_cast<GEO::index_t>(points.size()));
+
+    // Create and fill normal attribute
+    GEO::Attribute<double> normalAttr;
+    normalAttr.create_vector_attribute(gm.vertices.attributes(), "normal", 3);
+    for (size_t i = 0; i < normals.size(); ++i)
+    {
+        normalAttr[3*i+0] = normals[i][0];
+        normalAttr[3*i+1] = normals[i][1];
+        normalAttr[3*i+2] = normals[i][2];
+    }
+
+    double search_dist = CO3NE_SEARCH_RADIUS_FRACTION * GEO::bbox_diagonal(gm);
+    GEO::Co3Ne_reconstruct(gm, search_dist);
+
+    // Extract results
+    outVertices.clear();
+    outTriangles.clear();
+    for (GEO::index_t v = 0; v < gm.vertices.nb(); ++v)
+    {
+        double const* pt = gm.vertices.point_ptr(v);
+        outVertices.push_back(Vector3<double>{pt[0], pt[1], pt[2]});
+    }
+    for (GEO::index_t f = 0; f < gm.facets.nb(); ++f)
+    {
+        if (gm.facets.nb_vertices(f) == 3)
+        {
+            outTriangles.push_back({
+                static_cast<int32_t>(gm.facets.vertex(f, 0)),
+                static_cast<int32_t>(gm.facets.vertex(f, 1)),
+                static_cast<int32_t>(gm.facets.vertex(f, 2))
+            });
+        }
+    }
+    return !outVertices.empty();
+}
+
+// Run GTE Co3Ne::Reconstruct on the given point cloud.
+// GTE Co3Ne estimates normals internally via PCA; the pre-computed normals from
+// the input file are intentionally not passed because the GTE API takes only
+// positions and derives normals from the point neighborhood structure.
+bool RunGTECo3Ne(
+    std::vector<Vector3<double>> const& points,
+    std::vector<Vector3<double>> const& /*normals - estimated internally by GTE via PCA*/,
+    std::vector<Vector3<double>>& outVertices,
+    std::vector<std::array<int32_t, 3>>& outTriangles)
+{
+    Co3Ne<double>::Parameters params;
+    params.kNeighbors     = 20;
+    // searchRadius = 0 triggers automatic calculation based on bounding box diagonal,
+    // analogous to CO3NE_SEARCH_RADIUS_FRACTION used in the Geogram path.
+    params.searchRadius   = static_cast<double>(0);
+    params.maxNormalAngle = static_cast<double>(CO3NE_MAX_NORMAL_ANGLE_DEG);
+    params.orientNormals  = true;
+    params.smoothWithRVD  = false;
+
+    return Co3Ne<double>::Reconstruct(points, outVertices, outTriangles, params);
+}
+
+// Run and compare Co3Ne results. Returns true if GTE passes all checks.
+bool RunCo3NeComparison(std::string const& xyzFile)
+{
+    std::cout << "\n--- Co3Ne Surface Reconstruction ---\n";
+    std::cout << "Input: " << xyzFile << "\n";
+
+    std::vector<Vector3<double>> points, normals;
+    if (!LoadXYZPointCloud(xyzFile, points, normals))
+    {
+        std::cerr << "[Co3Ne] Failed to load " << xyzFile << "\n";
+        return false;
+    }
+    std::cout << "  Points loaded: " << points.size() << "\n";
+
+    // Run Geogram Co3Ne
+    std::cout << "Running Geogram Co3Ne...\n";
+    std::vector<Vector3<double>> geoVerts, gteVerts;
+    std::vector<std::array<int32_t, 3>> geoTris, gteTris;
+
+    bool geoOK = RunGeogramCo3Ne(points, normals, geoVerts, geoTris);
+    if (!geoOK) { std::cerr << "[Co3Ne] Geogram returned empty mesh\n"; return false; }
+
+    // Run GTE Co3Ne
+    std::cout << "Running GTE Co3Ne...\n";
+    bool gteOK = RunGTECo3Ne(points, normals, gteVerts, gteTris);
+
+    // Validate and compare
+    auto geoValid = MeshValidation<double>::Validate(geoVerts, geoTris, false);
+    auto gteValid = gteOK
+        ? MeshValidation<double>::Validate(gteVerts, gteTris, false)
+        : MeshValidation<double>::ValidationResult{};
+
+    std::cout << "\nCo3Ne Results:\n";
+    std::cout << std::left
+              << std::setw(22) << "Metric"
+              << std::setw(16) << "Geogram"
+              << std::setw(16) << "GTE"
+              << "\n";
+    std::cout << std::string(54, '-') << "\n";
+    std::cout << std::left  << std::setw(22) << "Triangles"
+              << std::right << std::setw(16) << geoTris.size()
+              << std::setw(16) << gteTris.size() << "\n";
+    std::cout << std::left  << std::setw(22) << "Boundary Edges"
+              << std::right << std::setw(16) << geoValid.boundaryEdges
+              << std::setw(16) << gteValid.boundaryEdges << "\n";
+
+    bool passed = true;
+
+    // GTE must produce non-empty output
+    bool gteNonEmpty = gteOK && !gteTris.empty();
+    std::cout << "GTE non-empty:   " << (gteNonEmpty ? "PASS" : "FAIL") << "\n";
+    if (!gteNonEmpty) { passed = false; }
+
+    // GTE triangle count should be within CO3NE_TRI_RATIO_MIN – CO3NE_TRI_RATIO_MAX of Geogram's.
+    // A wide range is expected: the two implementations use different neighbor counts,
+    // search radius heuristics, and T3/T12 classification strategies.
+    if (gteNonEmpty && !geoTris.empty())
+    {
+        double ratio = static_cast<double>(gteTris.size()) / static_cast<double>(geoTris.size());
+        bool countOK = (ratio >= CO3NE_TRI_RATIO_MIN && ratio <= CO3NE_TRI_RATIO_MAX);
+        std::cout << "GTE triangle count ratio vs Geogram: " << ratio
+                  << " — " << (countOK ? "PASS" : "FAIL") << "\n";
+        if (!countOK) { passed = false; }
+    }
+
+    SaveOBJ("/tmp/co3ne_gte_output.obj",    gteVerts, gteTris);
+    SaveOBJ("/tmp/co3ne_geogram_output.obj", geoVerts, geoTris);
+    std::cout << "Outputs saved to /tmp/co3ne_gte_output.obj and /tmp/co3ne_geogram_output.obj\n";
+
+    return passed;
+}
+
 // ---- Main comparison logic ----
 
 int main(int argc, char* argv[])
@@ -287,19 +489,25 @@ int main(int argc, char* argv[])
 
     if (argc < 2)
     {
-        std::cerr << "Usage: " << argv[0] << " <input.obj>\n";
+        std::cerr << "Usage: " << argv[0] << " <input.obj> [points.xyz]\n";
+        std::cerr << "  input.obj   - mesh for repair + hole-filling test\n";
+        std::cerr << "  points.xyz  - optional point cloud for Co3Ne test (x y z nx ny nz)\n";
         return 1;
     }
 
     std::string inputFile = argv[1];
+    std::string xyzFile   = (argc >= 3) ? argv[2] : "";
 
     // Initialize Geogram
     GEO::initialize();
     GEO::Logger::instance()->unregister_all_clients();
     GEO::CmdLine::import_arg_group("standard");
     GEO::CmdLine::import_arg_group("algo");
+    GEO::CmdLine::import_arg_group("co3ne");
+    GEO::CmdLine::set_arg("co3ne:max_N_angle", std::to_string(CO3NE_MAX_NORMAL_ANGLE_DEG));
 
     std::cout << "=== GTE vs Geogram Mesh Processing Comparison ===\n\n";
+    std::cout << "--- Use Case 1: Mesh Repair + Hole Filling ---\n";
     std::cout << "Input: " << inputFile << "\n\n";
 
     // --- Run Geogram ---
@@ -413,12 +621,26 @@ int main(int argc, char* argv[])
     std::cout << "GTE non-empty output: " << (gteHasOutput ? "PASS" : "FAIL") << "\n";
     if (!gteHasOutput) { allPassed = false; }
 
-    std::cout << "\n=== OVERALL: " << (allPassed ? "PASS" : "FAIL") << " ===\n";
-
-    // Save outputs for inspection
+    // Save repair+fill outputs for inspection
     SaveOBJ("/tmp/gte_output.obj",    gteVerts, gteTris);
     SaveOBJ("/tmp/geogram_output.obj", geoVerts, geoTris);
     std::cout << "\nOutputs saved to /tmp/gte_output.obj and /tmp/geogram_output.obj\n";
+
+    // --- Use Case 3: Co3Ne surface reconstruction (optional) ---
+    bool co3nePassed = true;
+    if (!xyzFile.empty())
+    {
+        co3nePassed = RunCo3NeComparison(xyzFile);
+        if (co3nePassed)
+            std::cout << "Co3Ne comparison: PASS\n";
+        else
+        {
+            std::cout << "Co3Ne comparison: FAIL\n";
+            allPassed = false;
+        }
+    }
+
+    std::cout << "\n=== OVERALL: " << (allPassed ? "PASS" : "FAIL") << " ===\n";
 
     return allPassed ? 0 : 1;
 }
