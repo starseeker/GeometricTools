@@ -172,10 +172,14 @@ namespace gte
                     continue;
                 }
 
-                // BFS: propagate consistent orientation through the component.
+                // BFS: propagate consistent orientation through this component.
+                // Record every triangle in the component so we can compute its
+                // signed volume without a second global traversal.
+                std::vector<size_t> componentTriangles;
                 std::queue<size_t> bfsQueue;
                 bfsQueue.push(seed);
                 visited[seed] = true;
+                componentTriangles.push_back(seed);
 
                 while (!bfsQueue.empty())
                 {
@@ -204,7 +208,7 @@ namespace gte
 
                             // Determine if nb shares the edge in the same or
                             // opposite direction as cur.  Same direction means
-                            // both triangles have the same orientation at this
+                            // both triangles have the same winding at this
                             // edge, which violates manifold orientation; flip nb.
                             bool sameDir = false;
                             for (int k = 0; k < 3; ++k)
@@ -222,42 +226,27 @@ namespace gte
                             }
 
                             visited[nb] = true;
+                            componentTriangles.push_back(nb);
                             bfsQueue.push(nb);
                         }
                     }
                 }
 
-                // Determine the signed volume of this component and flip all of
-                // its triangles if the volume is negative (inverted normals).
-                std::vector<int32_t> componentIds;
-                int32_t numComponents =
-                    GetConnectedComponents(triangles, componentIds);
-
-                for (int32_t c = 0; c < numComponents; ++c)
+                // Compute the signed volume of this component only.
+                // If negative the component's outward normals point inward; flip.
+                Real sv = static_cast<Real>(0);
+                for (size_t triIdx : componentTriangles)
                 {
-                    Real sv = static_cast<Real>(0);
-                    for (size_t i = 0; i < numTriangles; ++i)
+                    sv += ComputeSignedVolume(vertices, triangles[triIdx]);
+                }
+                if (sv < static_cast<Real>(0))
+                {
+                    for (size_t triIdx : componentTriangles)
                     {
-                        if (componentIds[i] == c)
-                        {
-                            sv += ComputeSignedVolume(vertices, triangles[i]);
-                        }
-                    }
-                    if (sv < static_cast<Real>(0))
-                    {
-                        for (size_t i = 0; i < numTriangles; ++i)
-                        {
-                            if (componentIds[i] == c)
-                            {
-                                std::swap(triangles[i][1], triangles[i][2]);
-                            }
-                        }
+                        std::swap(triangles[triIdx][1], triangles[triIdx][2]);
                     }
                 }
-
-                // Only the first seed component is processed per call to this
-                // outer loop; break to avoid processing sub-components twice.
-                break;
+                // Continue to the next unvisited seed (next component).
             }
         }
 

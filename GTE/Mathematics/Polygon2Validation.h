@@ -12,6 +12,7 @@
 
 #include <Mathematics/Vector2.h>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 namespace gte
@@ -74,9 +75,16 @@ namespace gte
             Real denom = Cross2D(d1, d2);
 
             // Parallel or coincident edges are not considered intersecting.
-            if (std::abs(denom) < static_cast<Real>(1e-10))
+            // Use a scale-relative tolerance: |denom| <= |d1| * |d2| * eps
+            // Computed without sqrt by squaring: denom^2 <= d1sq * d2sq * eps^2
             {
-                return false;
+                Real d1sq = d1[0]*d1[0] + d1[1]*d1[1];
+                Real d2sq = d2[0]*d2[0] + d2[1]*d2[1];
+                Real eps = std::numeric_limits<Real>::epsilon();
+                if (denom * denom <= d1sq * d2sq * eps * eps)
+                {
+                    return false;
+                }
             }
 
             Real t = Cross2D(d3, d2) / denom;
