@@ -67,6 +67,7 @@ namespace gte
         // Triangulation method for hole filling.
         enum class TriangulationMethod
         {
+            LoopSplit,      // Geogram default: recursive split by min chord/arc ratio
             EarClipping,    // GTE TriangulateEC with exact arithmetic (2D projection)
             CDT,            // GTE TriangulateCDT with exact arithmetic (2D projection)
             EarClipping3D   // Direct 3D ear-cutting (handles non-planar holes)
@@ -104,7 +105,7 @@ namespace gte
                 : maxArea(static_cast<Real>(0))
                 , maxEdges(0)           // 0 = unlimited
                 , repair(true)
-                , method(TriangulationMethod::EarClipping)
+                , method(TriangulationMethod::LoopSplit)
                 , planarityThreshold(static_cast<Real>(0))
                 , autoFallback(true)
                 , validateOutput(true)
@@ -192,7 +193,8 @@ namespace gte
                 TriangulationMethod actualMethod = params.method;
                 if (params.planarityThreshold > static_cast<Real>(0) &&
                     (actualMethod == TriangulationMethod::EarClipping ||
-                     actualMethod == TriangulationMethod::CDT))
+                     actualMethod == TriangulationMethod::CDT ||
+                     actualMethod == TriangulationMethod::LoopSplit))
                 {
                     Vector3<Real> normal = ComputeHoleNormal(vertices, hole);
                     Real planarity =
@@ -212,6 +214,16 @@ namespace gte
                 if (actualMethod == TriangulationMethod::EarClipping3D)
                 {
                     success = TriangulateHole3D(vertices, hole, newTriangles);
+                }
+                else if (actualMethod == TriangulationMethod::LoopSplit)
+                {
+                    success = TriangulateHoleLoopSplit(vertices, hole,
+                        newTriangles);
+                    if (!success && params.autoFallback)
+                    {
+                        success = TriangulateHole3D(vertices, hole,
+                            newTriangles);
+                    }
                 }
                 else
                 {
@@ -329,18 +341,137 @@ namespace gte
             int32_t prevV,
             int32_t currentV)
         {
-            for (auto const& entry : edgeToTriangles)
+            // Use lower_bound to find all edges starting at currentV
+            // in O(log E + deg(currentV)) instead of O(E).
+            auto lo = edgeToTriangles.lower_bound(
+                {currentV, std::numeric_limits<int32_t>::lowest()});
+            for (auto it = lo;
+                 it != edgeToTriangles.end() && it->first.first == currentV;
+                 ++it)
             {
-                int32_t v0 = entry.first.first;
-                int32_t v1 = entry.first.second;
-
-                if (v0 == currentV && v1 != prevV &&
-                    edgeToTriangles.count({v1, v0}) == 0)
+                int32_t v1 = it->first.second;
+                if (v1 != prevV && edgeToTriangles.count({v1, currentV}) == 0)
                 {
                     return v1;
                 }
             }
             return -1;
+        }
+
+        // ---------------------------------------------------------------------------
+        // Loop-split triangulation (matches Geogram's default LOOP_SPLIT algorithm)
+
+        // Triangulate a CW hole boundary using Geogram's loop-split algorithm.
+        // Recursively bisects the hole by finding the chord (vi, vj) that
+        // minimises rij = dxij / dsij, where dxij is the Euclidean distance
+        // between the two vertices and dsij = min(arc_i_to_j, arc_j_to_i) is
+        // the shorter arc length along the boundary.  This reproduces the
+        // behaviour of geogram's triangulate_hole_loop_splitting().
+        //
+        // The hole vertices are in CW order (inner hole of a CCW-outward mesh).
+        // The base-case triangle is stored with reversed winding so that the
+        // fill triangles are CCW (outward-facing).
+        static bool TriangulateHoleLoopSplit(
+            std::vector<Vector3<Real>> const& vertices,
+            HoleBoundary const& hole,
+            std::vector<std::array<int32_t, 3>>& triangles)
+        {
+            size_t n = hole.vertices.size();
+            if (n < 3)
+            {
+                return false;
+            }
+
+            if (n == 3)
+            {
+                // Reverse CW boundary vertices to produce a CCW fill triangle.
+                triangles.push_back(
+                {
+                    hole.vertices[2],
+                    hole.vertices[1],
+                    hole.vertices[0]
+                });
+                return true;
+            }
+
+            // Compute cumulative arc lengths along the boundary.
+            std::vector<Real> s(n);
+            s[0] = static_cast<Real>(0);
+            for (size_t i = 1; i < n; ++i)
+            {
+                s[i] = s[i - 1] + Length(
+                    vertices[hole.vertices[i]] -
+                    vertices[hole.vertices[i - 1]]);
+            }
+            Real totalLength = s[n - 1] + Length(
+                vertices[hole.vertices[0]] -
+                vertices[hole.vertices[n - 1]]);
+
+            // Find the non-adjacent pair (bestI, bestJ) with minimum
+            // rij = max(dxij, eps) / max(dsij, eps).
+            // This is an O(n²) search, matching the original geogram algorithm
+            // (geogram's split_hole() is also O(n²) with no spatial acceleration).
+            Real bestRij = std::numeric_limits<Real>::max();
+            int32_t bestI = -1;
+            int32_t bestJ = -1;
+
+            for (size_t i = 0; i < n; ++i)
+            {
+                for (size_t j = i + 2; j < n; ++j)
+                {
+                    // Skip the implicit closing edge (last → first vertex).
+                    if (i == 0 && j == n - 1)
+                    {
+                        continue;
+                    }
+
+                    Real arcFwd = s[j] - s[i];
+                    Real dsij = std::min(arcFwd, totalLength - arcFwd);
+                    Real dxij = Length(
+                        vertices[hole.vertices[j]] -
+                        vertices[hole.vertices[i]]);
+
+                    // Clamp to 1e-6 to avoid division by zero or instability
+                    // when vertices are coincident or the arc is degenerate.
+                    // The value 1e-6 matches geogram's split_hole() guard.
+                    dsij = std::max(dsij, static_cast<Real>(1e-6));
+                    dxij = std::max(dxij, static_cast<Real>(1e-6));
+                    Real rij = dxij / dsij;
+
+                    if (rij < bestRij)
+                    {
+                        bestRij = rij;
+                        bestI = static_cast<int32_t>(i);
+                        bestJ = static_cast<int32_t>(j);
+                    }
+                }
+            }
+
+            if (bestI < 0 || bestJ < 0)
+            {
+                return false;
+            }
+
+            // Split the hole into two sub-holes:
+            //   hole1 = vertices[0..bestI] + vertices[bestJ..n-1]
+            //   hole2 = vertices[bestI..bestJ]
+            // Both sub-holes are CW (same orientation as the original).
+            HoleBoundary hole1, hole2;
+            for (int32_t i = 0; i < static_cast<int32_t>(n); ++i)
+            {
+                if (i <= bestI || i >= bestJ)
+                {
+                    hole1.vertices.push_back(hole.vertices[i]);
+                }
+                if (i >= bestI && i <= bestJ)
+                {
+                    hole2.vertices.push_back(hole.vertices[i]);
+                }
+            }
+
+            bool ok = TriangulateHoleLoopSplit(vertices, hole1, triangles);
+            ok = ok && TriangulateHoleLoopSplit(vertices, hole2, triangles);
+            return ok;
         }
 
         // ---------------------------------------------------------------------------

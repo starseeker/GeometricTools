@@ -18,6 +18,7 @@
 
 #pragma once
 
+#include <Mathematics/MeshPreprocessing.h>
 #include <Mathematics/Vector3.h>
 #include <algorithm>
 #include <array>
@@ -97,6 +98,12 @@ namespace gte
 
             // Step 3: Remove isolated vertices
             RemoveIsolatedVertices(vertices, triangles);
+
+            // Step 4: Orient normals consistently within each connected component
+            // so that the signed volume of each component is positive (outward
+            // normals).  Geogram's mesh_repair() always calls orient_normals()
+            // for 3-D meshes; we replicate that here.
+            MeshPreprocessing<Real>::OrientNormals(vertices, triangles);
         }
 
         // Detect colocated vertices and return mapping to canonical vertex indices.
