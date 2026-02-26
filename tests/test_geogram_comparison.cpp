@@ -11,9 +11,9 @@
 //   ./test_geogram_comparison <input.obj>
 //
 // Success criteria:
-//   - Both produce manifold output (no boundary edges)
-//   - Volume difference < 10%
-//   - Surface area difference < 15%
+//   - GTE fills at least as many holes as Geogram (fewer or equal boundary edges)
+//   - Volume difference < VOLUME_TOLERANCE_PCT%
+//   - Surface area difference < AREA_TOLERANCE_PCT%
 
 #include <GTE/Mathematics/MeshRepair.h>
 #include <GTE/Mathematics/MeshHoleFilling.h>
@@ -39,6 +39,24 @@
 #include <string>
 
 using namespace gte;
+
+// ---- Thresholds and constants ----
+
+// Geogram pipeline parameters (mirror BRL-CAD repair.cpp)
+static constexpr double GEO_EPSILON_SCALE        = 1e-6 * 0.01; // epsilon = scale * bbox_diag
+static constexpr double GEO_SMALL_COMP_FRACTION  = 0.03;        // remove components < 3% of total area
+static constexpr double GEO_HOLE_FILL_FRACTION   = 0.10;        // fill holes with perimeter < 10% of bbox_diag
+
+// GTE pipeline parameters (mirror Geogram defaults)
+static constexpr double GTE_EPSILON              = 1e-6;
+static constexpr double GTE_SMALL_COMP_FRACTION  = 0.03;        // same 3% threshold as Geogram
+
+// Assessment tolerances
+static constexpr double VOLUME_TOLERANCE_PCT     = 10.0;        // volume must match within 10%
+static constexpr double AREA_TOLERANCE_PCT_BASE  = 15.0;        // base area tolerance (15%)
+// When GTE fills more holes, the extra triangulated patches add surface area.
+// In that case a relaxed tolerance is applied.
+static constexpr double AREA_TOLERANCE_PCT_EXTRA = 30.0;
 
 // ---- OBJ I/O ----
 
@@ -205,15 +223,15 @@ bool RunGeogramRepairAndFillHoles(
 
     // Mirror BRL-CAD's repair.cpp usage
     double bbox_diag = GEO::bbox_diagonal(gm);
-    double epsilon = 1e-6 * (0.01 * bbox_diag);
+    double epsilon = GEO_EPSILON_SCALE * bbox_diag;
 
     GEO::mesh_repair(gm, GEO::MeshRepairMode(GEO::MESH_REPAIR_DEFAULT), epsilon);
 
     double area = GEO::Geom::mesh_area(gm, 3);
-    double min_comp_area = 0.03 * area;
+    double min_comp_area = GEO_SMALL_COMP_FRACTION * area;
     GEO::remove_small_connected_components(gm, min_comp_area);
 
-    double hole_size = 0.1 * GEO::bbox_diagonal(gm);
+    double hole_size = GEO_HOLE_FILL_FRACTION * GEO::bbox_diagonal(gm);
     GEO::fill_holes(gm, hole_size);
 
     GEO::mesh_repair(gm, GEO::MeshRepairMode(GEO::MESH_REPAIR_DEFAULT));
@@ -237,12 +255,12 @@ bool RunGTERepairAndFillHoles(
 
     // Repair - mirror Geogram's MESH_REPAIR_DEFAULT (colocate + remove dup_f)
     MeshRepair<double>::Parameters repairParams;
-    repairParams.epsilon = 1e-6;
+    repairParams.epsilon = GTE_EPSILON;
     MeshRepair<double>::Repair(outVertices, outTriangles, repairParams);
 
-    // Compute total area to determine small-component threshold (3% of total)
+    // Compute total area to determine small-component threshold
     double totalArea = ComputeSurfaceArea(outVertices, outTriangles);
-    double minCompArea = 0.03 * totalArea;
+    double minCompArea = GTE_SMALL_COMP_FRACTION * totalArea;
     MeshPreprocessing<double>::RemoveSmallComponents(outVertices, outTriangles, minCompArea);
 
     // Second repair pass after component removal (mirrors BRL-CAD bot_to_geogram)
@@ -370,9 +388,9 @@ int main(int argc, char* argv[])
     {
         volPct = std::abs(100.0 * (gteVol - geoVol) / geoVol);
     }
-    bool volOK = (volPct < 10.0);
+    bool volOK = (volPct < VOLUME_TOLERANCE_PCT);
     std::cout << "Volume match:     " << (volOK ? "PASS" : "FAIL")
-              << " (diff = " << volPct << "%, threshold 10%)\n";
+              << " (diff = " << volPct << "%, threshold " << VOLUME_TOLERANCE_PCT << "%)\n";
     if (!volOK) { allPassed = false; }
 
     // Surface area comparison: allow larger tolerance when GTE fills more holes
@@ -382,8 +400,9 @@ int main(int argc, char* argv[])
     {
         areaPct = std::abs(100.0 * (gteArea - geoArea) / geoArea);
     }
-    // If GTE filled more holes, allow 30% area tolerance; otherwise 15%
-    double areaTolerance = (gteFilledBetter && !gteManifold && !geoManifold) ? 30.0 : 15.0;
+    // If GTE filled more holes, use relaxed tolerance; otherwise use base tolerance
+    double areaTolerance = (gteFilledBetter && !gteManifold && !geoManifold)
+        ? AREA_TOLERANCE_PCT_EXTRA : AREA_TOLERANCE_PCT_BASE;
     bool areaOK = (areaPct < areaTolerance);
     std::cout << "Surface area match: " << (areaOK ? "PASS" : "FAIL")
               << " (diff = " << areaPct << "%, threshold " << areaTolerance << "%)\n";
