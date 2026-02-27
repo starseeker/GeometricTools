@@ -60,24 +60,46 @@ git clone https://github.com/starseeker/GeometricTools.git
 cd GeometricTools
 ```
 
-1a. ** Update submodules **
+2. **Initialize submodules** (geogram and PoissonRecon):
+```bash
 git submodule update --init
+# geogram also requires its own sub-submodules for building:
+cd geogram && git submodule update --init \
+    src/lib/geogram/third_party/OpenNL \
+    src/lib/geogram/third_party/rply \
+    src/lib/geogram/third_party/libMeshb \
+    src/lib/geogram/third_party/amgcl
+cd ..
+```
 
-2. **Build all tests:**
+3. **Build all tests:**
 ```bash
 make all
 ```
 
-3. **Run basic validation (tests are in tests subdirectory):**
+4. **Run basic validation (tests are in tests subdirectory):**
 ```bash
 make test
 # Or manually:
 ./test_mesh_repair gt.obj gt_repaired.obj
 ```
 
-4. **Run stress tests:**
+5. **Run stress tests:**
 ```bash
 ./stress_test
+```
+
+6. **Run GTE vs Geogram comparison** (verify GTE implementation correctness):
+```bash
+# First build geogram (one-time setup):
+mkdir -p /tmp/geogram_build && cd /tmp/geogram_build
+cmake <repo>/geogram -DGEOGRAM_WITH_GRAPHICS=OFF -DGEOGRAM_WITH_LEGACY_NUMERICS=OFF -DGEOGRAM_WITH_LUA=OFF
+make -j$(nproc) geogram
+cd <repo>
+
+# Then build and run the comparison test:
+make test_geogram_comparison
+make test_geogram    # runs ./test_geogram_comparison tests/data/gt.obj
 ```
 
 ---
