@@ -24,6 +24,7 @@
 #include <GTE/Mathematics/Vector3.h>
 #include <GTE/Mathematics/DelaunayNN.h>
 #include <GTE/Mathematics/RestrictedVoronoiDiagramN.h>
+#include <GTE/Mathematics/SurfaceRVDN.h>
 #include <GTE/Mathematics/Logger.h>
 #include <algorithm>
 #include <array>
@@ -464,24 +465,27 @@ namespace gte
 
         // Compute Restricted Delaunay Triangulation from current sites.
         //
-        // This is the equivalent of Geogram's CVT::compute_surface() — it builds
-        // a brand-new mesh topology from the optimized seed positions.
+        // This is the equivalent of Geogram's CVT::compute_surface().
         //
-        // Algorithm (matches Geogram's RVD/RDT dual construction):
-        //   1. For each input triangle, assign it to its nearest seed (using the
-        //      full N-dimensional metric — position + scaled normal for N=6).
-        //   2. Each input triangle whose 3 vertices map to 3 distinct seeds also
-        //      contributes a candidate RDT triangle {S[a], S[b], S[c]}.
-        //   3. Deduplicate (canonical sort) and fix winding from accumulated
-        //      original face normals.
-        //   4. Output vertices = RVC centroids (area-weighted 3D centroid of the
-        //      triangles assigned to each seed), matching Geogram's
-        //      RDT_RVC_CENTROIDS flag which places output vertices ON the surface.
+        // multinerve=true (default): Full geometric RVD via SurfaceRVDN —
+        //   a direct translation of Geogram's
+        //   GenRestrictedVoronoiDiagram<DIM>::compute_surfacic_with_cnx_priority()
+        //   + GetConnectedComponentsPrimalTriangles callback.
+        //   Each connected component of a seed's Restricted Voronoi Cell (RVC)
+        //   becomes one output vertex, matching Geogram's RDT_MULTINERVE mode.
+        //   The surface mesh is lifted to N-D (vertex normals scaled by the
+        //   same factor used during Lloyd iterations) so the clipping is done
+        //   in the correct N-D metric for both isotropic (N=3) and anisotropic
+        //   (N=6) cases.
+        //
+        // multinerve=false: simplified path — one RVC centroid vertex per seed,
+        //   connectivity from vertex-to-seed Voronoi assignment.
         //
         // Returns true if a non-empty triangulation was produced.
         bool ComputeRDT(
             std::vector<Point3>& outVertices,
-            std::vector<std::array<int32_t, 3>>& outTriangles) const
+            std::vector<std::array<int32_t, 3>>& outTriangles,
+            bool multinerve = true) const
         {
             if (mSites.empty() || mSurfaceVertices.empty() || mSurfaceTriangles.empty())
             {
@@ -490,169 +494,221 @@ namespace gte
 
             size_t numSeeds = mSites.size();
 
-            // Estimate normal scale for N > 3 (same as RestrictedVoronoiDiagramN)
-            Real normalScale = static_cast<Real>(0);
-            if constexpr (N > 3)
+            if (multinerve)
             {
-                for (size_t s = 0; s < numSeeds; ++s)
+                // ------------------------------------------------------------
+                // Full geometric multi-nerve RDT via SurfaceRVDN.
+                //
+                // Step 1: Lift mesh vertices to N-D.
+                //   For N=3 (isotropic): identity — dims 0-2 are 3D position.
+                //   For N=6 (anisotropic): append scaled vertex normals so
+                //     the clipping metric matches the N-D Lloyd iterations.
+                //   Vertex normals are area-weighted averages of adjacent face
+                //   normals, scaled by the same normalScale used for the sites.
+                // ------------------------------------------------------------
+                std::vector<PointN> liftedVerts(mSurfaceVertices.size());
+
+                // Estimate normal scale from the sites' dims 3-N-1 magnitudes
+                // (same formula as RestrictedVoronoiDiagramN::ComputeCentroids)
+                Real normalScale = static_cast<Real>(0);
+                if constexpr (N > 3)
                 {
-                    Real normSq = static_cast<Real>(0);
-                    for (size_t d = 3; d < N; ++d)
-                    {
-                        normSq += mSites[s][d] * mSites[s][d];
-                    }
-                    normalScale += std::sqrt(normSq);
-                }
-                if (numSeeds > 0)
-                {
-                    normalScale /= static_cast<Real>(numSeeds);
-                }
-            }
-
-            // Step 1: For each input mesh vertex, find the nearest seed (3D distance).
-            // The RDT topology is defined by the 3D Voronoi partition of the surface.
-            // RestrictedVoronoiDiagramN::ComputeCentroids uses the full 6D metric for
-            // the Lloyd centroid computation (driving seed positions during iteration),
-            // but RDT connectivity is read from the 3D surface structure — vertex
-            // assignments use 3D distance to produce a valid surface triangulation.
-            std::vector<int32_t> vertToSeed(mSurfaceVertices.size(), 0);
-            for (size_t v = 0; v < mSurfaceVertices.size(); ++v)
-            {
-                Real const px = mSurfaceVertices[v][0];
-                Real const py = mSurfaceVertices[v][1];
-                Real const pz = mSurfaceVertices[v][2];
-
-                Real minDistSq = std::numeric_limits<Real>::max();
-                int32_t nearest = 0;
-                for (size_t s = 0; s < numSeeds; ++s)
-                {
-                    Real dx = px - mSites[s][0];
-                    Real dy = py - mSites[s][1];
-                    Real dz = pz - mSites[s][2];
-                    Real dSq = dx * dx + dy * dy + dz * dz;
-                    if (dSq < minDistSq)
-                    {
-                        minDistSq = dSq;
-                        nearest = static_cast<int32_t>(s);
-                    }
-                }
-                vertToSeed[v] = nearest;
-            }
-
-            // Step 2: Collect candidate RDT triangles.
-            // Each input triangle whose 3 vertices map to 3 distinct seeds contributes
-            // one candidate.  We accumulate the original face normal (unnormalized) to
-            // determine the correct output winding.
-            // Simultaneously accumulate RVC centroid data for Step 3.
-            using TriKey = std::array<int32_t, 3>;
-            struct NormalAccum { Point3 normal{}; };
-            std::map<TriKey, NormalAccum> candidates;
-
-            // RVC centroid accumulators (for output vertex placement ON the surface)
-            std::vector<Point3> rvcWeightedPos(numSeeds, Point3{});
-            std::vector<Real>   rvcTotalArea(numSeeds, static_cast<Real>(0));
-
-            for (auto const& tri : mSurfaceTriangles)
-            {
-                int32_t s0 = vertToSeed[tri[0]];
-                int32_t s1 = vertToSeed[tri[1]];
-                int32_t s2 = vertToSeed[tri[2]];
-
-                Point3 const& va = mSurfaceVertices[tri[0]];
-                Point3 const& vb = mSurfaceVertices[tri[1]];
-                Point3 const& vc = mSurfaceVertices[tri[2]];
-                Point3 triCentroid = (va + vb + vc) / static_cast<Real>(3);
-                Real area = ComputeTriangleArea(va, vb, vc);
-
-                // RVC centroid: assign the whole triangle to its centroid's nearest seed
-                // (3D assignment — centroid's position drives placement)
-                {
-                    Real minDistSq = std::numeric_limits<Real>::max();
-                    int32_t sC = 0;
                     for (size_t s = 0; s < numSeeds; ++s)
                     {
-                        Real dx = triCentroid[0] - mSites[s][0];
-                        Real dy = triCentroid[1] - mSites[s][1];
-                        Real dz = triCentroid[2] - mSites[s][2];
-                        Real dSq = dx * dx + dy * dy + dz * dz;
-                        if (dSq < minDistSq)
+                        Real normSq = static_cast<Real>(0);
+                        for (size_t d = 3; d < N; ++d)
                         {
-                            minDistSq = dSq;
-                            sC = static_cast<int32_t>(s);
+                            normSq += mSites[s][d] * mSites[s][d];
+                        }
+                        normalScale += std::sqrt(normSq);
+                    }
+                    if (numSeeds > 0)
+                    {
+                        normalScale /= static_cast<Real>(numSeeds);
+                    }
+                }
+
+                if constexpr (N > 3)
+                {
+                    // Accumulate area-weighted face normals per vertex
+                    std::vector<std::array<Real, 3>> vertNorm(
+                        mSurfaceVertices.size(), {Real(0), Real(0), Real(0)});
+
+                    for (auto const& tri : mSurfaceTriangles)
+                    {
+                        Point3 const& v0 = mSurfaceVertices[tri[0]];
+                        Point3 const& v1 = mSurfaceVertices[tri[1]];
+                        Point3 const& v2 = mSurfaceVertices[tri[2]];
+                        Point3 faceN = Cross(v1 - v0, v2 - v0);  // area * 2 * unit_normal
+                        for (int i = 0; i < 3; ++i)
+                        {
+                            vertNorm[tri[i]][0] += faceN[0];
+                            vertNorm[tri[i]][1] += faceN[1];
+                            vertNorm[tri[i]][2] += faceN[2];
                         }
                     }
-                    rvcWeightedPos[sC] += triCentroid * area;
-                    rvcTotalArea[sC]   += area;
-                }
 
-                // RDT triangle candidate
-                if (s0 == s1 || s1 == s2 || s0 == s2)
-                {
-                    continue;  // degenerate: two vertices in same Voronoi cell
-                }
-
-                // Canonical key (sort seed indices so duplicates are detected)
-                TriKey key = {s0, s1, s2};
-                std::sort(key.begin(), key.end());
-
-                // Accumulate face normal for winding determination
-                Point3 faceN = Cross(vb - va, vc - va);
-                candidates[key].normal += faceN;
-            }
-
-            if (candidates.empty())
-            {
-                return false;
-            }
-
-            // Step 3: Extract output vertices — RVC centroids ON the original surface.
-            // This matches Geogram's RDT_RVC_CENTROIDS | RDT_PREFER_SEEDS mode: the
-            // output vertex for each Voronoi cell is the area-weighted centroid of the
-            // triangles in that cell (which lies on the original surface mesh), not the
-            // seed position which may have drifted off-surface during Lloyd iterations.
-            outVertices.resize(numSeeds);
-            for (size_t s = 0; s < numSeeds; ++s)
-            {
-                if (rvcTotalArea[s] > static_cast<Real>(1e-10))
-                {
-                    outVertices[s] = rvcWeightedPos[s] / rvcTotalArea[s];
+                    // Build 6-D lifted vertices
+                    for (size_t v = 0; v < mSurfaceVertices.size(); ++v)
+                    {
+                        liftedVerts[v][0] = mSurfaceVertices[v][0];
+                        liftedVerts[v][1] = mSurfaceVertices[v][1];
+                        liftedVerts[v][2] = mSurfaceVertices[v][2];
+                        // Normalize and scale
+                        Real nx = vertNorm[v][0], ny = vertNorm[v][1], nz = vertNorm[v][2];
+                        Real len = std::sqrt(nx*nx + ny*ny + nz*nz);
+                        if (len > static_cast<Real>(1e-10))
+                        {
+                            nx /= len; ny /= len; nz /= len;
+                        }
+                        if constexpr (N >= 6)
+                        {
+                            liftedVerts[v][3] = nx * normalScale;
+                            liftedVerts[v][4] = ny * normalScale;
+                            liftedVerts[v][5] = nz * normalScale;
+                        }
+                        for (size_t d = 6; d < N; ++d)
+                        {
+                            liftedVerts[v][d] = static_cast<Real>(0);
+                        }
+                    }
                 }
                 else
                 {
-                    // Empty cell: fall back to seed position
-                    outVertices[s][0] = mSites[s][0];
-                    outVertices[s][1] = mSites[s][1];
-                    outVertices[s][2] = mSites[s][2];
+                    // N=3: copy 3D positions directly
+                    for (size_t v = 0; v < mSurfaceVertices.size(); ++v)
+                    {
+                        liftedVerts[v][0] = mSurfaceVertices[v][0];
+                        liftedVerts[v][1] = mSurfaceVertices[v][1];
+                        liftedVerts[v][2] = mSurfaceVertices[v][2];
+                    }
                 }
-            }
 
-            // Step 4: Output RDT triangles with correct winding.
-            outTriangles.clear();
-            outTriangles.reserve(candidates.size());
-            for (auto const& kv : candidates)
+                // Step 2: Build Delaunay/NN over current seeds (same as LloydIterations)
+                DelaunayNN<Real, N> delaunay(32);
+                delaunay.SetVertices(numSeeds, mSites.data());
+
+                // Convert mSites (std::vector<PointN>) to std::vector<std::array<Real,N>>
+                // (PointN = Vector<N,Real>; std::array is needed by SurfaceRVDN)
+                std::vector<std::array<Real, N>> seedsArr(numSeeds);
+                std::vector<std::array<Real, N>> liftedArr(mSurfaceVertices.size());
+
+                for (size_t s = 0; s < numSeeds; ++s)
+                {
+                    for (size_t d = 0; d < N; ++d)
+                    {
+                        seedsArr[s][d] = mSites[s][d];
+                    }
+                }
+                for (size_t v = 0; v < mSurfaceVertices.size(); ++v)
+                {
+                    for (size_t d = 0; d < N; ++d)
+                    {
+                        liftedArr[v][d] = liftedVerts[v][d];
+                    }
+                }
+
+                // Step 3: Run the full geometric multi-nerve RDT
+                return ComputeMultiNerveRDT<Real, N>(
+                    seedsArr, liftedArr, mSurfaceTriangles, delaunay,
+                    outVertices, outTriangles);
+            }
+            else
             {
-                TriKey const& key = kv.first;
-                Point3 const& accNormal = kv.second.normal;
+                // ------------------------------------------------------------
+                // Simplified non-multinerve path: one vertex per seed placed
+                // at the RVC area-weighted 3D centroid (on-surface position).
+                // Connectivity from vertex-to-seed Voronoi assignment.
+                // ------------------------------------------------------------
 
-                int32_t a = key[0], b = key[1], c = key[2];
-
-                // Compute normal of output triangle (a, b, c)
-                Point3 outN = Cross(
-                    outVertices[b] - outVertices[a],
-                    outVertices[c] - outVertices[a]);
-
-                // Align winding with accumulated original surface normal
-                if (Dot(outN, accNormal) >= static_cast<Real>(0))
+                // Vertex to nearest seed (3D distance)
+                std::vector<int32_t> vertToSeed(mSurfaceVertices.size(), 0);
+                for (size_t v = 0; v < mSurfaceVertices.size(); ++v)
                 {
-                    outTriangles.push_back({a, b, c});
+                    Real const px = mSurfaceVertices[v][0];
+                    Real const py = mSurfaceVertices[v][1];
+                    Real const pz = mSurfaceVertices[v][2];
+                    Real minD = std::numeric_limits<Real>::max();
+                    for (size_t s = 0; s < numSeeds; ++s)
+                    {
+                        Real dx = px - mSites[s][0];
+                        Real dy = py - mSites[s][1];
+                        Real dz = pz - mSites[s][2];
+                        Real d2 = dx*dx + dy*dy + dz*dz;
+                        if (d2 < minD) { minD = d2; vertToSeed[v] = static_cast<int32_t>(s); }
+                    }
                 }
-                else
+
+                // RVC centroids and RDT triangle candidates
+                std::vector<Point3> rvcPos(numSeeds, Point3{});
+                std::vector<Real>   rvcArea(numSeeds, static_cast<Real>(0));
+
+                using TriKey = std::array<int32_t, 3>;
+                struct NormalAccum { Point3 normal{}; };
+                std::map<TriKey, NormalAccum> candidates;
+
+                for (auto const& tri : mSurfaceTriangles)
                 {
-                    outTriangles.push_back({a, c, b});
+                    int32_t s0 = vertToSeed[tri[0]];
+                    int32_t s1 = vertToSeed[tri[1]];
+                    int32_t s2 = vertToSeed[tri[2]];
+                    Point3 const& va = mSurfaceVertices[tri[0]];
+                    Point3 const& vb = mSurfaceVertices[tri[1]];
+                    Point3 const& vc = mSurfaceVertices[tri[2]];
+                    Real area = ComputeTriangleArea(va, vb, vc);
+                    Point3 cen = (va + vb + vc) / static_cast<Real>(3);
+
+                    // Assign triangle to centroid's nearest seed for RVC centroid
+                    {
+                        Real minD = std::numeric_limits<Real>::max(); int32_t sC = 0;
+                        for (size_t s = 0; s < numSeeds; ++s)
+                        {
+                            Real dx = cen[0]-mSites[s][0], dy = cen[1]-mSites[s][1], dz = cen[2]-mSites[s][2];
+                            Real d2 = dx*dx+dy*dy+dz*dz;
+                            if (d2 < minD) { minD = d2; sC = static_cast<int32_t>(s); }
+                        }
+                        rvcPos[sC]  += cen * area;
+                        rvcArea[sC] += area;
+                    }
+
+                    if (s0 == s1 || s1 == s2 || s0 == s2) { continue; }
+                    TriKey key = {s0, s1, s2};
+                    std::sort(key.begin(), key.end());
+                    candidates[key].normal += Cross(vb - va, vc - va);
                 }
+
+                if (candidates.empty()) { return false; }
+
+                outVertices.resize(numSeeds);
+                for (size_t s = 0; s < numSeeds; ++s)
+                {
+                    if (rvcArea[s] > static_cast<Real>(1e-10))
+                    {
+                        outVertices[s] = rvcPos[s] / rvcArea[s];
+                    }
+                    else
+                    {
+                        outVertices[s] = {mSites[s][0], mSites[s][1], mSites[s][2]};
+                    }
+                }
+
+                outTriangles.clear();
+                outTriangles.reserve(candidates.size());
+                for (auto const& kv : candidates)
+                {
+                    int32_t a = kv.first[0], b = kv.first[1], c = kv.first[2];
+                    Point3 outN = Cross(outVertices[b]-outVertices[a], outVertices[c]-outVertices[a]);
+                    if (Dot(outN, kv.second.normal) >= static_cast<Real>(0))
+                    {
+                        outTriangles.push_back({a, b, c});
+                    }
+                    else
+                    {
+                        outTriangles.push_back({a, c, b});
+                    }
+                }
+                return !outTriangles.empty();
             }
-
-            return !outTriangles.empty();
         }
 
     private:
