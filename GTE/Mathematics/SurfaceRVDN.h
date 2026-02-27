@@ -402,12 +402,6 @@ namespace gte
                         int32_t f = adjacentFacets.top();
                         adjacentFacets.pop();
 
-                        // Skip if already visited for this (facet,seed) pair
-                        if (mFacetSeedComp.count(FacetSeedKey(f, curS)))
-                        {
-                            continue;
-                        }
-
                         // Re-initialize from mesh facet only when facet changes
                         if (P_orig_idx != f)
                         {
@@ -417,6 +411,31 @@ namespace gte
 
                         // Clip facet f against curS's Voronoi cell
                         Polygon* poly = ClipCellFacet(curS, P_orig, P1, P2);
+
+                        // If this (facet,seed) pair was already recorded from a previous
+                        // connected component of the same seed, we must still propagate
+                        // adjacency through f so the BFS covers the full Voronoi cell
+                        // region on each mesh connected component (matching Geogram's
+                        // behaviour of no inner-BFS early-exit).  We skip the polygon
+                        // action and adjSeed re-pushes to avoid double-counting, but we
+                        // DO traverse the mesh edges so adjacent facets are not missed.
+                        if (mFacetSeedComp.count(FacetSeedKey(f, curS)))
+                        {
+                            // Propagate adjacency only (no action, no adjSeed pushes)
+                            for (auto const& v : poly->V)
+                            {
+                                if (v.adjFacet >= 0
+                                    && facetStamp[v.adjFacet] != curS)
+                                {
+                                    facetStamp[v.adjFacet] = curS;
+                                    adjacentFacets.push(v.adjFacet);
+                                }
+                            }
+                            // Update component mapping so triangles use the current
+                            // component (same overwrite-last behaviour as Geogram)
+                            mFacetSeedComp[FacetSeedKey(f, curS)] = mCurrentComp;
+                            continue;
+                        }
 
                         if (!poly->empty())
                         {
