@@ -880,10 +880,33 @@ namespace gte
         // ── 5. PostprocessRDT — direct translation of Geogram's
         //        mesh_postprocess_RDT (mesh_repair.cpp).
         //
-        // Iteratively remove "bad" triangles: any triangle where at least
-        // one vertex appears in only one non-bad triangle (isolated peninsula).
-        // This collapses the many single-facet spurious components that arise
-        // from the highly-fragmented GT mesh, matching Geogram's output count.
+        // Step 5a: Remove degenerate triangles (same vertex twice) and
+        //          duplicate triangles (same set of 3 vertices), matching
+        //          Geogram's detect_bad_facets(check_duplicates=true).
+        {
+            // Canonicalize each triangle by sorting its vertex indices.
+            // After sorting, degenerate triangles have key[0]==key[1] or key[1]==key[2].
+            // Duplicate triangles share the same canonical key; keep only the first.
+            std::map<std::array<int32_t,3>, bool> seen;
+            auto end = std::remove_if(rawTris.begin(), rawTris.end(),
+                [&](std::array<int32_t,3> const& tri) -> bool
+                {
+                    std::array<int32_t,3> key = tri;
+                    std::sort(key.begin(), key.end());
+                    // degenerate: any two vertices are the same
+                    if (key[0] == key[1] || key[1] == key[2]) { return true; }
+                    // duplicate: already seen this triangle
+                    if (seen.count(key)) { return true; }
+                    seen[key] = true;
+                    return false;
+                });
+            rawTris.erase(end, rawTris.end());
+        }
+
+        // Step 5b: Iteratively remove "bad" triangles: any triangle where at least
+        //          one vertex appears in only one non-bad triangle (isolated peninsula).
+        //          Translation of the iterative detect_bad_facets loop in
+        //          Geogram's mesh_postprocess_RDT.
         {
             bool changed = true;
             while (changed)

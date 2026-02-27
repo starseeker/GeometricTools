@@ -154,7 +154,7 @@ namespace gte
                 return false;
             }
 
-            ClassifyAndOutput(candidateTriangles, outTriangles);
+            ClassifyAndOutput(points, candidateTriangles, outTriangles);
 
             outVertices = points;
 
@@ -218,7 +218,7 @@ namespace gte
                 return false;
             }
 
-            ClassifyAndOutput(candidateTriangles, outTriangles);
+            ClassifyAndOutput(points, candidateTriangles, outTriangles);
 
             outVertices = points;
 
@@ -762,12 +762,18 @@ namespace gte
         //   count  < 3  ->  T12:           one or two vertices agree
         //   count  > 3  ->  discard:       over-proposed, geometry ambiguous
         //
-        // T3 triangles are always output.  T12 triangles are also always output,
-        // matching Geogram's strategy, UNLESS they form a Möbius configuration.
-        // A T12 triangle forms a Möbius configuration when one of its directed
-        // edges (a->b) already appears in the accepted set with the same
-        // orientation — adding it would create a non-orientable surface patch.
+        // T3 triangles are always output.
+        // T12 triangles are accepted iteratively, matching Geogram's
+        // Co3NeManifoldExtraction::connect_and_validate_triangle() non-strict mode:
+        //   1. The triangle must share ≥2 edges with already-accepted triangles.
+        //   2. Its normal must agree with each adjacent triangle's normal
+        //      (dot product > -0.8, same threshold as Geogram).
+        //   3. It must not create a Möbius (non-orientable) configuration.
+        //   4. Up to 50 iterations are performed (same as Geogram's max_iter=50).
+        // This prevents T12 triangles from "floating" disconnected from the
+        // main surface, which was creating excess boundary edges in GTE.
         static void ClassifyAndOutput(
+            std::vector<Vector3<Real>> const& points,
             std::vector<std::array<int32_t, 3>> const& candidateTriangles,
             std::vector<std::array<int32_t, 3>>& outTriangles)
         {
@@ -792,38 +798,91 @@ namespace gte
                 ++info.count;
             }
 
-            // Build directed half-edge set from accepted triangles.
-            // Key: {a, b} means directed edge a->b exists in an accepted triangle.
+            // Directed half-edge set: {a,b} means directed edge a→b exists
+            // (for Möbius / orientability check).
             using EdgeKey = std::array<int32_t, 2>;
-            struct EdgeHash
+            // Boost-style hash for a pair of int32_t.
+            struct EdgePairHash
             {
                 size_t operator()(EdgeKey const& e) const noexcept
                 {
-                    // Boost-style hash combining using the golden-ratio constant.
                     size_t h = std::hash<int32_t>{}(e[0]);
                     h ^= std::hash<int32_t>{}(e[1]) + size_t{0x9e3779b9u} + (h << 6) + (h >> 2);
                     return h;
                 }
             };
-            // Each accepted triangle contributes 3 directed half-edges.
-            std::unordered_set<EdgeKey, EdgeHash> acceptedEdges;
-            acceptedEdges.reserve(candidateTriangles.size() * 3);
+            std::unordered_set<EdgeKey, EdgePairHash> dirEdges;
+            dirEdges.reserve(candidateTriangles.size() * 3);
+
+            // Undirected edge → list of accepted triangle indices that contain it
+            // (for ≥2-adjacency check and normal-agreement check).
+            using UEdge = std::array<int32_t, 2>;  // [min(a,b), max(a,b)]
+            std::unordered_map<UEdge, std::vector<int32_t>, EdgePairHash> uEdgeToTris;
+            uEdgeToTris.reserve(candidateTriangles.size() * 3);
 
             auto RegisterTriangle = [&](std::array<int32_t, 3> const& t)
             {
+                int32_t idx = static_cast<int32_t>(outTriangles.size());
                 outTriangles.push_back(t);
-                acceptedEdges.insert({t[0], t[1]});
-                acceptedEdges.insert({t[1], t[2]});
-                acceptedEdges.insert({t[2], t[0]});
+                dirEdges.insert({t[0], t[1]});
+                dirEdges.insert({t[1], t[2]});
+                dirEdges.insert({t[2], t[0]});
+                uEdgeToTris[{std::min(t[0],t[1]), std::max(t[0],t[1])}].push_back(idx);
+                uEdgeToTris[{std::min(t[1],t[2]), std::max(t[1],t[2])}].push_back(idx);
+                uEdgeToTris[{std::min(t[2],t[0]), std::max(t[2],t[0])}].push_back(idx);
             };
 
+            // Möbius check: triangle t would create a non-orientable patch if any
+            // of its directed edges already appears in the accepted set.
             auto IsMobius = [&](std::array<int32_t, 3> const& t) -> bool
             {
-                return acceptedEdges.count({t[0], t[1]}) ||
-                       acceptedEdges.count({t[1], t[2]}) ||
-                       acceptedEdges.count({t[2], t[0]});
+                return dirEdges.count({t[0], t[1]}) ||
+                       dirEdges.count({t[1], t[2]}) ||
+                       dirEdges.count({t[2], t[0]});
             };
 
+            // Normal agreement check (translation of Geogram's
+            // Co3NeManifoldExtraction::triangles_normals_agree()).
+            // Dot product of unit normals must be > -0.8.
+            // Normals are flipped if the two triangles share an edge in the
+            // SAME orientation (i.e., they face the same direction across the edge).
+            auto NormalsAgree = [&](
+                std::array<int32_t, 3> const& t1,
+                std::array<int32_t, 3> const& t2) -> bool
+            {
+                Vector3<Real> e1 = points[t1[1]] - points[t1[0]];
+                Vector3<Real> e2 = points[t1[2]] - points[t1[0]];
+                Vector3<Real> n1 = Cross(e1, e2);
+                Real len1 = Length(n1);
+                if (len1 < Real(1e-10)) { return false; }
+                n1 /= len1;
+
+                Vector3<Real> f1 = points[t2[1]] - points[t2[0]];
+                Vector3<Real> f2 = points[t2[2]] - points[t2[0]];
+                Vector3<Real> n2 = Cross(f1, f2);
+                Real len2 = Length(n2);
+                if (len2 < Real(1e-10)) { return false; }
+                n2 /= len2;
+
+                Real d = Dot(n1, n2);
+
+                // Geogram flips d when triangles share an edge in the same
+                // orientation (they are then combinatorially oriented the same way,
+                // but should be facing away from each other across the shared edge).
+                // Check all 9 same-direction edge pairs:
+                auto SameOrient = [&]() -> bool
+                {
+                    for (int i = 0; i < 3; ++i)
+                        for (int j = 0; j < 3; ++j)
+                            if (t1[i] == t2[j] && t1[(i+1)%3] == t2[(j+1)%3])
+                                return true;
+                    return false;
+                };
+                if (SameOrient()) { d = -d; }
+                return d > Real(-0.8);
+            };
+
+            // Separate T3 and T12
             std::vector<std::array<int32_t, 3>> t12;
             for (auto const& [key, info] : seen)
             {
@@ -835,17 +894,65 @@ namespace gte
                 {
                     t12.push_back(info.oriented);
                 }
-                // count > 3: discard
+                // count > 3: discard (over-proposed, ambiguous geometry)
             }
 
-            // Emit T12 triangles, skipping Möbius configurations.
-            // This matches Geogram's behavior: T12 triangles are always considered,
-            // not just used as a last-resort fallback.
-            for (auto const& t : t12)
+            // Iterative T12 insertion (translation of Geogram's
+            // Co3NeManifoldExtraction::add_triangles(), non-strict mode).
+            // Accept T12 only when it:
+            //   (a) has ≥2 edges adjacent to already-accepted triangles,
+            //   (b) its normal agrees with each adjacent triangle (dot > -0.8),
+            //   (c) does not create a Möbius configuration.
+            // Repeat until convergence (some T12s become eligible only after
+            // earlier T12s are accepted).
+            // MaxT12Iterations matches Geogram's max_iter in non-strict mode.
+            constexpr int MaxT12Iterations = 50;
+            std::vector<bool> t12Done(t12.size(), false);
+            bool changed = true;
+            int maxIter = MaxT12Iterations;
+            while (changed && maxIter-- > 0)
             {
-                if (!IsMobius(t))
+                changed = false;
+                for (size_t i = 0; i < t12.size(); ++i)
                 {
+                    if (t12Done[i]) { continue; }
+                    auto const& t = t12[i];
+
+                    // Count edges adjacent to already-accepted triangles
+                    UEdge e0 = {std::min(t[0],t[1]), std::max(t[0],t[1])};
+                    UEdge e1 = {std::min(t[1],t[2]), std::max(t[1],t[2])};
+                    UEdge e2 = {std::min(t[2],t[0]), std::max(t[2],t[0])};
+                    auto it0 = uEdgeToTris.find(e0);
+                    auto it1 = uEdgeToTris.find(e1);
+                    auto it2 = uEdgeToTris.find(e2);
+                    int nb = (it0 != uEdgeToTris.end() ? 1 : 0)
+                           + (it1 != uEdgeToTris.end() ? 1 : 0)
+                           + (it2 != uEdgeToTris.end() ? 1 : 0);
+                    if (nb < 2) { continue; }   // need ≥2 adjacent edges
+
+                    // Normal agreement with each adjacent accepted triangle
+                    bool normOK = true;
+                    for (auto it : {it0, it1, it2})
+                    {
+                        if (it == uEdgeToTris.end()) { continue; }
+                        for (int32_t adjIdx : it->second)
+                        {
+                            if (!NormalsAgree(t, outTriangles[adjIdx]))
+                            {
+                                normOK = false;
+                                break;
+                            }
+                        }
+                        if (!normOK) { break; }
+                    }
+                    if (!normOK) { continue; }
+
+                    // Möbius (orientability) check
+                    if (IsMobius(t)) { continue; }
+
                     RegisterTriangle(t);
+                    t12Done[i] = true;
+                    changed = true;
                 }
             }
         }
