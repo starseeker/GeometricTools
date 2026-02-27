@@ -196,7 +196,197 @@ namespace gte
             return true;
         }
 
+        // CVT-based remeshing that matches Geogram's remesh_smooth approach.
+        //
+        // Creates a brand-new mesh topology with approximately params.targetVertexCount
+        // vertices by:
+        //   1. Sampling targetVertexCount random seeds on the input surface
+        //      (area-weighted, matching Geogram's compute_initial_sampling)
+        //   2. Running Lloyd CVT iterations to distribute seeds evenly
+        //      (in 6D for anisotropic when params.useAnisotropic=true, matching
+        //       Geogram's set_anisotropy + Lloyd_iterations)
+        //   3. Extracting a brand-new triangulation from the seed positions via
+        //      the Restricted Delaunay Triangulation (matching Geogram's compute_surface)
+        //
+        // This is the GTE equivalent of:
+        //   CentroidalVoronoiTesselation CVT(&M_in);
+        //   CVT.compute_initial_sampling(nb_points, true);
+        //   CVT.Lloyd_iterations(nb_Lloyd_iter);
+        //   CVT.compute_surface(&M_out);
+        static bool RemeshCVT(
+            std::vector<Vector3<Real>> const& inVertices,
+            std::vector<std::array<int32_t, 3>> const& inTriangles,
+            std::vector<Vector3<Real>>& outVertices,
+            std::vector<std::array<int32_t, 3>>& outTriangles,
+            Parameters const& params = Parameters())
+        {
+            size_t targetCount = params.targetVertexCount;
+            if (targetCount == 0 || inVertices.empty() || inTriangles.empty())
+            {
+                return false;
+            }
+
+            // Use 6D anisotropic CVT when requested (position + scaled normal),
+            // otherwise use 3D isotropic CVT.
+            if (params.useAnisotropic)
+            {
+                return RemeshCVTAnisotropic(inVertices, inTriangles,
+                                            outVertices, outTriangles, params);
+            }
+            else
+            {
+                return RemeshCVTIsotropic(inVertices, inTriangles,
+                                          outVertices, outTriangles, params);
+            }
+        }
+
     private:
+        // Isotropic CVT remesh (3D): sample → Lloyd → RDT
+        static bool RemeshCVTIsotropic(
+            std::vector<Vector3<Real>> const& inVertices,
+            std::vector<std::array<int32_t, 3>> const& inTriangles,
+            std::vector<Vector3<Real>>& outVertices,
+            std::vector<std::array<int32_t, 3>>& outTriangles,
+            Parameters const& params)
+        {
+            // Use Vector<3, Real> (CVTN requires Vector<N, Real> type)
+            using Vec3 = Vector<3, Real>;
+
+            std::vector<Vec3> verts3;
+            verts3.reserve(inVertices.size());
+            for (auto const& v : inVertices)
+            {
+                verts3.push_back(v);
+            }
+
+            CVTN<Real, 3> cvt;
+            if (!cvt.Initialize(verts3, inTriangles))
+            {
+                return false;
+            }
+            if (!cvt.ComputeInitialSampling(params.targetVertexCount))
+            {
+                return false;
+            }
+            if (params.lloydIterations > 0 && !cvt.LloydIterations(params.lloydIterations))
+            {
+                return false;
+            }
+
+            std::vector<Vec3> seeds3;
+            if (!cvt.ComputeRDT(seeds3, outTriangles))
+            {
+                return false;
+            }
+
+            outVertices.clear();
+            outVertices.reserve(seeds3.size());
+            for (auto const& s : seeds3)
+            {
+                outVertices.push_back(Vector3<Real>{s[0], s[1], s[2]});
+            }
+
+            return !outTriangles.empty();
+        }
+
+        // Anisotropic CVT remesh (6D): sample → set normals → Lloyd → RDT
+        // Matches Geogram's set_anisotropy(gm, scale) + remesh_smooth(gm, out, nb_pts, dim=6)
+        static bool RemeshCVTAnisotropic(
+            std::vector<Vector3<Real>> const& inVertices,
+            std::vector<std::array<int32_t, 3>> const& inTriangles,
+            std::vector<Vector3<Real>>& outVertices,
+            std::vector<std::array<int32_t, 3>>& outTriangles,
+            Parameters const& params)
+        {
+            using Vec3 = Vector<3, Real>;
+            using Vec6 = Vector<6, Real>;
+
+            std::vector<Vec3> verts3;
+            verts3.reserve(inVertices.size());
+            for (auto const& v : inVertices)
+            {
+                verts3.push_back(v);
+            }
+
+            // Compute vertex normals and apply anisotropy scale
+            std::vector<Vec3> normals;
+            MeshAnisotropy<Real>::ComputeVertexNormals(inVertices, inTriangles, normals);
+            Real bboxDiag = MeshAnisotropy<Real>::ComputeBBoxDiagonal(inVertices);
+            Real normalScale = params.anisotropyScale * bboxDiag;
+            for (auto& n : normals)
+            {
+                Normalize(n);
+                n *= normalScale;
+            }
+
+            // Initialize CVT on the 3D surface mesh
+            CVTN<Real, 6> cvt;
+            if (!cvt.Initialize(verts3, inTriangles))
+            {
+                return false;
+            }
+
+            // Sample initial seeds as 3D points (will be augmented to 6D below)
+            if (!cvt.ComputeInitialSampling(params.targetVertexCount))
+            {
+                return false;
+            }
+
+            // Augment each seed with the interpolated surface normal.
+            // For each seed, find the nearest input vertex and use its scaled normal.
+            // This converts the 3D seeds to proper 6D positions (pos + scaled normal).
+            auto const& rawSites = cvt.GetSites();
+            std::vector<Vec6> sites6D(rawSites.size());
+            for (size_t s = 0; s < rawSites.size(); ++s)
+            {
+                // Copy 3D position
+                sites6D[s][0] = rawSites[s][0];
+                sites6D[s][1] = rawSites[s][1];
+                sites6D[s][2] = rawSites[s][2];
+
+                // Find nearest input vertex to get normal at this seed position
+                Real minDistSq = std::numeric_limits<Real>::max();
+                size_t nearestVert = 0;
+                for (size_t v = 0; v < verts3.size(); ++v)
+                {
+                    Real dx = verts3[v][0] - rawSites[s][0];
+                    Real dy = verts3[v][1] - rawSites[s][1];
+                    Real dz = verts3[v][2] - rawSites[s][2];
+                    Real dSq = dx * dx + dy * dy + dz * dz;
+                    if (dSq < minDistSq)
+                    {
+                        minDistSq = dSq;
+                        nearestVert = v;
+                    }
+                }
+
+                sites6D[s][3] = normals[nearestVert][0];
+                sites6D[s][4] = normals[nearestVert][1];
+                sites6D[s][5] = normals[nearestVert][2];
+            }
+            cvt.SetSites(sites6D);
+
+            if (params.lloydIterations > 0 && !cvt.LloydIterations(params.lloydIterations))
+            {
+                return false;
+            }
+
+            std::vector<Vec3> seeds3;
+            if (!cvt.ComputeRDT(seeds3, outTriangles))
+            {
+                return false;
+            }
+
+            outVertices.clear();
+            outVertices.reserve(seeds3.size());
+            for (auto const& s : seeds3)
+            {
+                outVertices.push_back(Vector3<Real>{s[0], s[1], s[2]});
+            }
+
+            return !outTriangles.empty();
+        }
+
         struct EdgeKey
         {
             int32_t v0, v1;

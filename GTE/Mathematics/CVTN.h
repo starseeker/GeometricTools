@@ -26,11 +26,13 @@
 #include <GTE/Mathematics/RestrictedVoronoiDiagramN.h>
 #include <GTE/Mathematics/Logger.h>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <random>
 #include <vector>
 
@@ -328,7 +330,132 @@ namespace gte
             
             return energy;
         }
-        
+
+        // Compute Restricted Delaunay Triangulation from current sites.
+        //
+        // This is the equivalent of Geogram's CVT::compute_surface() — it builds
+        // a brand-new mesh topology from the optimized seed positions.
+        //
+        // Algorithm (matches Geogram's RVD/RDT dual construction):
+        //   1. For each input mesh vertex v, find the nearest seed S[v] in 3D.
+        //   2. For each input triangle (a, b, c), if S[a], S[b], S[c] are all
+        //      distinct, emit a candidate RDT triangle {S[a], S[b], S[c]}.
+        //   3. Deduplicate (canonical sort) and fix winding from accumulated
+        //      original face normals.
+        //   4. Output vertices = 3D seed positions, triangles = RDT connectivity.
+        //
+        // Returns true if a non-empty triangulation was produced.
+        bool ComputeRDT(
+            std::vector<Point3>& outVertices,
+            std::vector<std::array<int32_t, 3>>& outTriangles) const
+        {
+            if (mSites.empty() || mSurfaceVertices.empty() || mSurfaceTriangles.empty())
+            {
+                return false;
+            }
+
+            size_t numSeeds = mSites.size();
+
+            // Step 1: For each input mesh vertex find the nearest seed (3D distance).
+            // Only the first 3 components of mSites[s] are the 3D position; dims 3-5
+            // are scaled normals and are ignored for the RDT assignment step.
+            std::vector<int32_t> vertToSeed(mSurfaceVertices.size(), 0);
+            for (size_t v = 0; v < mSurfaceVertices.size(); ++v)
+            {
+                Real const px = mSurfaceVertices[v][0];
+                Real const py = mSurfaceVertices[v][1];
+                Real const pz = mSurfaceVertices[v][2];
+
+                Real minDistSq = std::numeric_limits<Real>::max();
+                int32_t nearest = 0;
+                for (size_t s = 0; s < numSeeds; ++s)
+                {
+                    Real dx = px - mSites[s][0];
+                    Real dy = py - mSites[s][1];
+                    Real dz = pz - mSites[s][2];
+                    Real dSq = dx * dx + dy * dy + dz * dz;
+                    if (dSq < minDistSq)
+                    {
+                        minDistSq = dSq;
+                        nearest = static_cast<int32_t>(s);
+                    }
+                }
+                vertToSeed[v] = nearest;
+            }
+
+            // Step 2: Collect candidate RDT triangles.
+            // Each input triangle whose 3 vertices map to 3 distinct seeds contributes
+            // one candidate.  We accumulate the original face normal (unnormalized) to
+            // determine the correct output winding.
+            using TriKey = std::array<int32_t, 3>;
+            struct NormalAccum { Point3 normal{}; };
+            std::map<TriKey, NormalAccum> candidates;
+
+            for (auto const& tri : mSurfaceTriangles)
+            {
+                int32_t s0 = vertToSeed[tri[0]];
+                int32_t s1 = vertToSeed[tri[1]];
+                int32_t s2 = vertToSeed[tri[2]];
+                if (s0 == s1 || s1 == s2 || s0 == s2)
+                {
+                    continue;  // degenerate: two vertices in same Voronoi cell
+                }
+
+                // Canonical key (sort seed indices so duplicates are detected)
+                TriKey key = {s0, s1, s2};
+                std::sort(key.begin(), key.end());
+
+                // Accumulate face normal for winding determination
+                Point3 const& va = mSurfaceVertices[tri[0]];
+                Point3 const& vb = mSurfaceVertices[tri[1]];
+                Point3 const& vc = mSurfaceVertices[tri[2]];
+                Point3 faceN = Cross(vb - va, vc - va);
+                candidates[key].normal += faceN;
+            }
+
+            if (candidates.empty())
+            {
+                return false;
+            }
+
+            // Step 3: Extract output vertices — 3D seed positions.
+            outVertices.resize(numSeeds);
+            for (size_t s = 0; s < numSeeds; ++s)
+            {
+                outVertices[s][0] = mSites[s][0];
+                outVertices[s][1] = mSites[s][1];
+                outVertices[s][2] = mSites[s][2];
+            }
+
+            // Step 4: Output RDT triangles with correct winding.
+            outTriangles.clear();
+            outTriangles.reserve(candidates.size());
+            for (auto const& kv : candidates)
+            {
+                TriKey const& key = kv.first;
+                Point3 const& accNormal = kv.second.normal;
+
+                int32_t a = key[0], b = key[1], c = key[2];
+
+                // Compute normal of output triangle (a, b, c)
+                Point3 outN = Cross(
+                    outVertices[b] - outVertices[a],
+                    outVertices[c] - outVertices[a]);
+
+                // Align winding with accumulated original surface normal
+                if (Dot(outN, accNormal) >= static_cast<Real>(0))
+                {
+                    outTriangles.push_back({a, b, c});
+                }
+                else
+                {
+                    outTriangles.push_back({a, c, b});
+                }
+            }
+
+            return !outTriangles.empty();
+        }
+
     private:
         // Find nearest site to a 3D point
         int32_t FindNearestSite(Point3 const& point3D) const

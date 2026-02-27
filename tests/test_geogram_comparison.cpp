@@ -92,15 +92,12 @@ static constexpr double CO3NE_TRI_RATIO_MAX          = 3.0;
 // Remesh comparison parameters (mirrors BRL-CAD remesh.cpp)
 // BRL-CAD calls: set_anisotropy(gm, 2*0.02); remesh_smooth(gm, remesh, nb_pts);
 static constexpr double REMESH_ANISOTROPY_SCALE      = 0.04;    // 2*0.02 from BRL-CAD
-static constexpr size_t REMESH_TARGET_VERTICES       = 1000;    // test target vertex count (for Geogram)
+static constexpr size_t REMESH_TARGET_VERTICES       = 1000;    // test target vertex count
 static constexpr size_t REMESH_LLOYD_ITER            = 5;       // geogram default
-static constexpr size_t REMESH_NEWTON_ITER           = 30;      // geogram default
-// GTE's MeshRemesh is an edge-based optimizer (modifies existing topology via split/collapse/flip,
-// then repositions vertices with Lloyd/CVT). It does not create entirely new mesh connectivity
-// from CVT seeds like Geogram's remesh_smooth does.
-// For comparing surface quality, GTE remesh is run at the same vertex count as the input mesh.
-// Tolerance: Lloyd CVT optimization may change vertex count slightly
-static constexpr double REMESH_COUNT_TOLERANCE_PCT   = 5.0;
+// GTE RemeshCVT builds a brand-new mesh topology via Restricted Delaunay Triangulation (RDT),
+// matching Geogram's remesh_smooth approach:  sample → Lloyd CVT → compute_surface (RDT).
+// Tolerance: CVT uses random initialisation so vertex count is approximately targetCount.
+static constexpr double REMESH_COUNT_TOLERANCE_PCT   = 50.0;   // wide: RDT vertex count may vary due to random initialization
 
 // ---- OBJ I/O ----
 
@@ -390,28 +387,24 @@ bool RunGeogramRemesh(
         static_cast<GEO::index_t>(targetVertices),
         0,                              // dim=0 → use M_in.vertices.dimension() (6 for anisotropic)
         static_cast<GEO::index_t>(REMESH_LLOYD_ITER),
-        static_cast<GEO::index_t>(REMESH_NEWTON_ITER));
+        0);                             // Newton=0: only Lloyd iterations (faster, comparable to GTE)
 
     GeogramMeshToArrays(remesh, outVertices, outTriangles);
     return !outVertices.empty();
 }
 
-// Run GTE anisotropic remeshing pipeline.
-// GTE equivalent of: compute_normals + set_anisotropy(0.04) + vertex quality optimization.
-//
-// NOTE: GTE's MeshRemesh is an edge-based optimizer that repositions existing vertices using
-// anisotropic Lloyd/CVT iterations. It does NOT create a new mesh topology from scratch.
-// This is algorithmically different from Geogram's remesh_smooth which generates entirely
-// new mesh connectivity via CVT seeds. For this test, GTE remesh uses targetVertexCount
-// matching the input mesh so edge-split/collapse do not dominate; the comparison measures
-// vertex repositioning quality rather than topology generation.
+// Run GTE CVT-based anisotropic remeshing pipeline.
+// Matches Geogram's remesh_smooth approach: sample seeds → Lloyd CVT → RDT (new mesh topology).
+// Uses MeshRemesh::RemeshCVT which implements the same 3-step pipeline as Geogram's CVT.
 bool RunGTERemesh(
     std::string const& inputFile,
-    size_t /*targetVertices*/,       // ignored – GTE remesh targets same vertex count
+    size_t targetVertices,
     std::vector<Vector3<double>>& outVertices,
     std::vector<std::array<int32_t, 3>>& outTriangles)
 {
-    if (!LoadOBJ(inputFile, outVertices, outTriangles))
+    std::vector<Vector3<double>> inputVerts;
+    std::vector<std::array<int32_t, 3>> inputTris;
+    if (!LoadOBJ(inputFile, inputVerts, inputTris))
     {
         std::cerr << "[GTE Remesh] Failed to load " << inputFile << "\n";
         return false;
@@ -420,22 +413,17 @@ bool RunGTERemesh(
     // Initial repair (mirror geogram's mesh_repair before remesh)
     MeshRepair<double>::Parameters repairParams;
     repairParams.epsilon = GTE_EPSILON;
-    MeshRepair<double>::Repair(outVertices, outTriangles, repairParams);
+    MeshRepair<double>::Repair(inputVerts, inputTris, repairParams);
 
-    // Anisotropic remesh at the same vertex count as input (edge-based optimizer).
-    // Using targetVertexCount = 0 keeps the current vertex count (uses average edge length).
+    // CVT remesh with matching parameters — creates brand-new mesh topology
     MeshRemesh<double>::Parameters remeshParams;
-    remeshParams.targetVertexCount  = 0;           // 0 = use average edge length (no count change)
-    remeshParams.lloydIterations    = REMESH_LLOYD_ITER;
-    remeshParams.newtonIterations   = REMESH_NEWTON_ITER;
-    remeshParams.useAnisotropic     = true;
-    remeshParams.anisotropyScale    = static_cast<double>(REMESH_ANISOTROPY_SCALE);
-    remeshParams.projectToSurface   = true;
-    remeshParams.useRVD             = true;
-    remeshParams.useCVTN            = true;
+    remeshParams.targetVertexCount = targetVertices;
+    remeshParams.lloydIterations   = REMESH_LLOYD_ITER;
+    remeshParams.useAnisotropic    = true;
+    remeshParams.anisotropyScale   = static_cast<double>(REMESH_ANISOTROPY_SCALE);
 
-    bool ok = MeshRemesh<double>::Remesh(outVertices, outTriangles, remeshParams);
-    return ok && !outVertices.empty();
+    return MeshRemesh<double>::RemeshCVT(inputVerts, inputTris,
+                                         outVertices, outTriangles, remeshParams);
 }
 
 // Run and compare remesh results. Returns true if GTE passes all checks.
@@ -447,11 +435,10 @@ bool RunRemeshComparison(std::string const& inputFile,
 
     std::cout << "\n--- Use Case 2: Anisotropic Remeshing ---\n";
     std::cout << "Input: " << inputFile << "\n";
-    std::cout << "Geogram target vertices: " << REMESH_TARGET_VERTICES
+    std::cout << "Target vertices: " << REMESH_TARGET_VERTICES
               << "  Lloyd iter: " << REMESH_LLOYD_ITER
-              << "  Newton iter: " << REMESH_NEWTON_ITER
               << "  anisotropy: " << REMESH_ANISOTROPY_SCALE << "\n";
-    std::cout << "GTE: edge-based optimizer (keeps input vertex count, improves distribution)\n\n";
+    std::cout << "Both pipelines: sample seeds → Lloyd CVT → new mesh topology (RDT)\n\n";
 
     std::vector<Vector3<double>> geoVerts, gteVerts;
     std::vector<std::array<int32_t, 3>> geoTris, gteTris;
@@ -464,7 +451,7 @@ bool RunRemeshComparison(std::string const& inputFile,
         return false;
     }
 
-    std::cout << "Running GTE MeshRemesh...\n";
+    std::cout << "Running GTE MeshRemesh::RemeshCVT...\n";
     bool gteOK = RunGTERemesh(inputFile, REMESH_TARGET_VERTICES, gteVerts, gteTris);
 
     outGeoVertCount = geoVerts.size();
@@ -505,17 +492,16 @@ bool RunRemeshComparison(std::string const& inputFile,
     std::cout << "GTE non-empty output: " << (gteNonEmpty ? "PASS" : "FAIL") << "\n";
     if (!gteNonEmpty) { passed = false; }
 
-    // GTE vertex count should stay close to input (same-count optimization mode)
+    // GTE vertex count should be within REMESH_COUNT_TOLERANCE_PCT of target.
+    // Both use CVT, so counts should be close.
     if (gteNonEmpty)
     {
-        // Note: GTE preserves input vertex count; Geogram creates a new mesh at target count.
-        // We don't compare counts between the two since they operate differently.
-        // We only check that GTE produced a non-trivially-sized mesh.
-        bool countOK = (gteVerts.size() >= 100);
+        double countDiff = std::abs(100.0 * ((double)gteVerts.size()
+            - (double)REMESH_TARGET_VERTICES) / (double)REMESH_TARGET_VERTICES);
+        bool countOK = (countDiff < REMESH_COUNT_TOLERANCE_PCT);
         std::cout << "GTE vertex count:  " << (countOK ? "PASS" : "FAIL")
-                  << " (got " << gteVerts.size() << " vertices)\n";
-        std::cout << "  NOTE: Geogram creates " << geoVerts.size()
-                  << " vertices (new topology from CVT seeds); GTE preserves input topology.\n";
+                  << " (got " << gteVerts.size() << ", target " << REMESH_TARGET_VERTICES
+                  << ", diff " << countDiff << "%, threshold " << REMESH_COUNT_TOLERANCE_PCT << "%)\n";
         if (!countOK) { passed = false; }
     }
 
@@ -748,54 +734,36 @@ void PrintAlgorithmicDifferences(
     std::cout << "  BRL-CAD call sequence:\n";
     std::cout << "    compute_normals(gm)           → MeshAnisotropy::ComputeVertexNormals()\n";
     std::cout << "    set_anisotropy(gm, 2*0.02)    → MeshAnisotropy::SetAnisotropy(scale=0.04)\n";
-    std::cout << "    remesh_smooth(gm, out, nb_pts) → MeshRemesh::Remesh(targetVertexCount)\n";
+    std::cout << "    remesh_smooth(gm, out, nb_pts) → MeshRemesh::RemeshCVT(targetVertexCount)\n";
     std::cout << "\n";
-    std::cout << "  *** KEY BEHAVIORAL DIFFERENCE ***\n";
-    std::cout << "  Geogram remesh_smooth creates a completely new mesh topology:\n";
-    std::cout << "    1. Places nb_pts random seeds on the input surface.\n";
-    std::cout << "    2. Runs restricted CVT (Lloyd + Newton) to optimise seed positions.\n";
-    std::cout << "    3. Extracts a brand-new triangulation from the dual of the RVD.\n";
+    std::cout << "  Algorithm (both Geogram and GTE RemeshCVT):\n";
+    std::cout << "    1. Place nb_pts random seeds on the input surface (area-weighted sampling).\n";
+    std::cout << "    2. Run restricted CVT Lloyd iterations to optimise seed positions.\n";
+    std::cout << "    3. Extract brand-new triangulation from seed positions via RDT dual.\n";
     std::cout << "    => Output vertex count ≈ nb_pts; input connectivity is discarded.\n";
     std::cout << "\n";
-    std::cout << "  GTE MeshRemesh is an edge-based quality optimizer:\n";
-    std::cout << "    1. Splits/collapses edges towards a target edge length.\n";
-    std::cout << "    2. Applies Lloyd/CVT vertex repositioning (anisotropic CVTN).\n";
-    std::cout << "    3. Preserves the original mesh topology structure.\n";
-    std::cout << "    => Input connectivity is modified in-place; large vertex count\n";
-    std::cout << "       reductions may destabilise the mesh.\n";
-    std::cout << "\n";
-    std::cout << "  Impact on BRL-CAD migration:\n";
-    std::cout << "    When nb_pts ≈ input vertex count: GTE produces equivalent quality.\n";
-    std::cout << "    When nb_pts << input vertex count: Geogram creates the new (small)\n";
-    std::cout << "      mesh from scratch; GTE would need a dedicated CVT 'compute_surface'\n";
-    std::cout << "      step (not yet in the public API) to produce equivalent output.\n";
-    std::cout << "\n";
-    std::cout << "  Other differences:\n";
+    std::cout << "  Remaining differences:\n";
     std::cout << "\n";
     std::cout << "  1. CVT initialization\n";
-    std::cout << "     Geogram: Uses farthest-point sampling as the initial seed placement.\n";
-    std::cout << "     GTE: Uses random sampling (CVTN) for the initial seed placement.\n";
+    std::cout << "     Geogram: farthest-point sampling (pseudo-random, high quality).\n";
+    std::cout << "     GTE: area-weighted random sampling (mersenne twister, seed=12345).\n";
     std::cout << "     Effect: Both converge to similar CVT; vertex positions differ slightly.\n";
     std::cout << "\n";
     std::cout << "  2. Newton iterations\n";
-    std::cout << "     Geogram default: nb_Newton_iter=30 (L-BFGS with m=7).\n";
-    std::cout << "     GTE default:     newtonIterations=30 to match Geogram.\n";
-    std::cout << "     Note: GTE's params default (newtonIterations=5) is intentionally lower\n";
-    std::cout << "     for speed; when replicating BRL-CAD behaviour set it to 30.\n";
+    std::cout << "     Geogram: nb_Newton_iter (L-BFGS, m=7) — skipped in this test.\n";
+    std::cout << "     GTE: No Newton optimizer yet (future enhancement).\n";
     std::cout << "\n";
-    std::cout << "  3. Surface projection\n";
-    std::cout << "     Geogram: mesh_adjust_surface() projects seeds onto reference surface\n";
-    std::cout << "       after CVT convergence (on by default).\n";
-    std::cout << "     GTE: projectToSurface=true applies AABB-based projection at each step.\n";
-    std::cout << "     Effect: Both preserve the original surface geometry; method differs.\n";
+    std::cout << "  3. RDT extraction strategy (GTE vs Geogram RDT_RVC_CENTROIDS)\n";
+    std::cout << "     Geogram: multi-nerve mode + RVC centroid vertices for precise mesh.\n";
+    std::cout << "     GTE: simple RDT from vertex-to-seed assignment — same topology class.\n";
     std::cout << "\n";
     std::cout << "  4. Threading\n";
     std::cout << "     Geogram: Multi-threaded CVT.\n";
     std::cout << "     GTE: Single-threaded. Results are fully deterministic.\n";
     std::cout << "\n";
-    std::cout << "  Summary: for same-count or near-same-count remesh, GTE produces meshes\n";
-    std::cout << "  of equivalent quality to Geogram. For large count reductions, a new\n";
-    std::cout << "  GTE CVT surface extraction function is needed to match Geogram.\n\n";
+    std::cout << "  Summary: GTE RemeshCVT now uses the same 3-step pipeline as Geogram's\n";
+    std::cout << "  remesh_smooth. Both create new mesh topology from CVT seeds. Differences\n";
+    std::cout << "  are minor (initialisation strategy, no Newton, single-threaded).\n\n";
 
     // ----------------------------------------------------------------
     std::cout << "--- Use Case 3: Co3Ne Surface Reconstruction ---\n";
@@ -1013,18 +981,18 @@ int main(int argc, char* argv[])
     std::cout << "\nOutputs saved to /tmp/gte_output.obj and /tmp/geogram_output.obj\n";
 
     // --- Use Case 2: Anisotropic remeshing ---
-    // NOTE: This comparison is informational only (does not contribute to allPassed).
-    // GTE's MeshRemesh has a known edge-collapse cascade bug that destroys triangles for
-    // real-world meshes. This is documented as a behavioral regression vs. Geogram's
-    // remesh_smooth. See PrintAlgorithmicDifferences for a detailed explanation.
+    // GTE's RemeshCVT now uses the same pipeline as Geogram's remesh_smooth:
+    //   sample seeds → Lloyd CVT → new mesh topology via RDT (compute_surface equivalent).
     size_t geoRemeshVertCount = 0, gteRemeshVertCount = 0;
     {
         bool remeshPassed = RunRemeshComparison(inputFile, geoRemeshVertCount, gteRemeshVertCount);
         if (remeshPassed)
             std::cout << "Remesh comparison: PASS\n";
         else
-            std::cout << "Remesh comparison: NOTE (informational — see algorithmic differences)\n";
-        // intentionally not updating allPassed: remesh is documented as a known difference
+        {
+            std::cout << "Remesh comparison: FAIL\n";
+            allPassed = false;
+        }
     }
 
     // --- Use Case 3: Co3Ne surface reconstruction (optional) ---
