@@ -829,31 +829,34 @@ namespace gte
             return false;
         }
 
-        // Build output vertices (3D component centroids)
-        outVertices.clear();
-        outVertices.reserve(comps.size());
+        // ── 3. Build all component centroids (indexed by component ID) ──────
+        // Component IDs are used as vertex indices in the raw triangle list.
+        // Ghost components (mass ≈ 0) produce a zero-position vertex that
+        // will be removed by the postprocessing step below.
+        std::vector<Vector3<Real>> rawVerts;
+        rawVerts.reserve(comps.size());
         for (auto const& cd : comps)
         {
-            outVertices.push_back({cd.wx, cd.wy, cd.wz});
+            rawVerts.push_back({cd.wx, cd.wy, cd.wz});
         }
+        const auto nRaw = static_cast<int32_t>(rawVerts.size());
 
-        // Build output triangles with winding corrected by accumulated normals
-        outTriangles.clear();
-        outTriangles.reserve(candidates.size());
-        const auto nOut = static_cast<int32_t>(outVertices.size());
+        // ── 4. Build raw triangles with winding corrected by face normal ─────
+        // Translation of the winding check in ComputeMultiNerveRDT.
+        std::vector<std::array<int32_t,3>> rawTris;
+        rawTris.reserve(candidates.size());
 
         for (auto const& kv : candidates)
         {
             int32_t a = kv.first[0];
             int32_t b = kv.first[1];
             int32_t c = kv.first[2];
-            if (a >= nOut || b >= nOut || c >= nOut) { continue; }
+            if (a >= nRaw || b >= nRaw || c >= nRaw) { continue; }
 
             auto const& na = kv.second;
-            // Cross product of output triangle edges
-            auto const& va = outVertices[a];
-            auto const& vb = outVertices[b];
-            auto const& vc = outVertices[c];
+            auto const& va = rawVerts[a];
+            auto const& vb = rawVerts[b];
+            auto const& vc = rawVerts[c];
             Real outNx = (vb[1]-va[1])*(vc[2]-va[2]) - (vb[2]-va[2])*(vc[1]-va[1]);
             Real outNy = (vb[2]-va[2])*(vc[0]-va[0]) - (vb[0]-va[0])*(vc[2]-va[2]);
             Real outNz = (vb[0]-va[0])*(vc[1]-va[1]) - (vb[1]-va[1])*(vc[0]-va[0]);
@@ -861,15 +864,89 @@ namespace gte
             Real dot = outNx * na.nx + outNy * na.ny + outNz * na.nz;
             if (dot >= Real(0))
             {
-                outTriangles.push_back({a, b, c});
+                rawTris.push_back({a, b, c});
             }
             else
             {
-                outTriangles.push_back({a, c, b});
+                rawTris.push_back({a, c, b});
             }
         }
 
-        return !outTriangles.empty();
+        if (rawTris.empty())
+        {
+            return false;
+        }
+
+        // ── 5. PostprocessRDT — direct translation of Geogram's
+        //        mesh_postprocess_RDT (mesh_repair.cpp).
+        //
+        // Iteratively remove "bad" triangles: any triangle where at least
+        // one vertex appears in only one non-bad triangle (isolated peninsula).
+        // This collapses the many single-facet spurious components that arise
+        // from the highly-fragmented GT mesh, matching Geogram's output count.
+        {
+            bool changed = true;
+            while (changed)
+            {
+                changed = false;
+                std::vector<int32_t> inc(nRaw, 0);
+                for (auto const& tri : rawTris)
+                {
+                    ++inc[tri[0]];
+                    ++inc[tri[1]];
+                    ++inc[tri[2]];
+                }
+                auto end = std::remove_if(rawTris.begin(), rawTris.end(),
+                    [&](std::array<int32_t,3> const& tri) -> bool
+                    {
+                        if (inc[tri[0]] == 1 || inc[tri[1]] == 1 ||
+                            inc[tri[2]] == 1)
+                        {
+                            changed = true;
+                            return true;
+                        }
+                        return false;
+                    });
+                rawTris.erase(end, rawTris.end());
+            }
+        }
+
+        if (rawTris.empty())
+        {
+            return false;
+        }
+
+        // ── 6. Compact: keep only vertices referenced by surviving triangles.
+        std::vector<int32_t> remap(nRaw, -1);
+        int32_t nextV = 0;
+        for (auto const& tri : rawTris)
+        {
+            for (int k = 0; k < 3; ++k)
+            {
+                if (remap[tri[k]] < 0)
+                {
+                    remap[tri[k]] = nextV++;
+                }
+            }
+        }
+
+        outVertices.resize(nextV);
+        for (int32_t i = 0; i < nRaw; ++i)
+        {
+            if (remap[i] >= 0)
+            {
+                outVertices[remap[i]] = rawVerts[i];
+            }
+        }
+
+        outTriangles.clear();
+        outTriangles.reserve(rawTris.size());
+        for (auto const& tri : rawTris)
+        {
+            outTriangles.push_back({remap[tri[0]], remap[tri[1]], remap[tri[2]]});
+        }
+
+        return true;
     }
 
 }  // namespace gte
