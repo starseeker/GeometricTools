@@ -264,7 +264,9 @@ namespace gte
             {
                 return false;
             }
-            if (!cvt.ComputeInitialSampling(params.targetVertexCount))
+            // Use farthest-point sampling (Mitchell's best-candidate) to match
+            // Geogram's evenly-spaced initial distribution.
+            if (!cvt.ComputeInitialSamplingFarthestPoint(params.targetVertexCount))
             {
                 return false;
             }
@@ -326,8 +328,9 @@ namespace gte
                 return false;
             }
 
-            // Sample initial seeds as 3D points (will be augmented to 6D below)
-            if (!cvt.ComputeInitialSampling(params.targetVertexCount))
+            // Use farthest-point sampling (Mitchell's best-candidate) to match
+            // Geogram's evenly-spaced initial distribution, then augment to 6D.
+            if (!cvt.ComputeInitialSamplingFarthestPoint(params.targetVertexCount))
             {
                 return false;
             }

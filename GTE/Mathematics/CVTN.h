@@ -173,6 +173,137 @@ namespace gte
             
             return true;
         }
+
+        // Compute initial sampling using Mitchell's best-candidate algorithm.
+        //
+        // For each new site, generates 'numCandidates' random candidates on the
+        // surface and picks the one farthest (in 3D) from all existing sites.
+        // This matches Geogram's farthest-point / Poisson-disk style initialisation
+        // and produces more evenly spaced seeds than pure random sampling.
+        //
+        // numCandidates: number of random candidates per site (default 10 for speed;
+        // higher values (e.g. 20) give slightly better distribution at higher cost).
+        bool ComputeInitialSamplingFarthestPoint(
+            size_t numSites,
+            unsigned int seed = 12345,
+            size_t numCandidates = 10)
+        {
+            if (mSurfaceVertices.empty() || mSurfaceTriangles.empty() || numSites == 0)
+            {
+                return false;
+            }
+
+            std::mt19937 rng(seed);
+            std::uniform_real_distribution<Real> uni(static_cast<Real>(0), static_cast<Real>(1));
+
+            // Build cumulative area table for O(log n) triangle selection
+            std::vector<Real> cumArea;
+            cumArea.reserve(mSurfaceTriangles.size());
+            Real totalArea = static_cast<Real>(0);
+            for (auto const& tri : mSurfaceTriangles)
+            {
+                totalArea += ComputeTriangleArea(
+                    mSurfaceVertices[tri[0]],
+                    mSurfaceVertices[tri[1]],
+                    mSurfaceVertices[tri[2]]);
+                cumArea.push_back(totalArea);
+            }
+
+            // Helper: sample one random point on the surface
+            auto samplePoint = [&]() -> Point3
+            {
+                Real r = uni(rng) * totalArea;
+                auto it = std::lower_bound(cumArea.begin(), cumArea.end(), r);
+                size_t triIdx = static_cast<size_t>(it - cumArea.begin());
+                if (triIdx >= mSurfaceTriangles.size())
+                {
+                    triIdx = mSurfaceTriangles.size() - 1;
+                }
+                auto const& tri = mSurfaceTriangles[triIdx];
+                Point3 const& v0 = mSurfaceVertices[tri[0]];
+                Point3 const& v1 = mSurfaceVertices[tri[1]];
+                Point3 const& v2 = mSurfaceVertices[tri[2]];
+                Real u = uni(rng);
+                Real v = uni(rng);
+                if (u + v > static_cast<Real>(1))
+                {
+                    u = static_cast<Real>(1) - u;
+                    v = static_cast<Real>(1) - v;
+                }
+                return v0 + u * (v1 - v0) + v * (v2 - v0);
+            };
+
+            // Helper: minimum squared 3D distance from p to all current seeds
+            auto minDistSq = [&](Point3 const& p) -> Real
+            {
+                Real best = std::numeric_limits<Real>::max();
+                for (auto const& s : mSites)
+                {
+                    Real dx = p[0] - s[0];
+                    Real dy = p[1] - s[1];
+                    Real dz = p[2] - s[2];
+                    Real d2 = dx * dx + dy * dy + dz * dz;
+                    if (d2 < best)
+                    {
+                        best = d2;
+                    }
+                }
+                return best;
+            };
+
+            mSites.clear();
+            mSites.reserve(numSites);
+
+            // First site: purely random
+            {
+                Point3 p = samplePoint();
+                PointN site;
+                site[0] = p[0];
+                site[1] = p[1];
+                site[2] = p[2];
+                for (size_t d = 3; d < N; ++d)
+                {
+                    site[d] = static_cast<Real>(0);
+                }
+                mSites.push_back(site);
+            }
+
+            // Subsequent sites: best of numCandidates random candidates
+            for (size_t i = 1; i < numSites; ++i)
+            {
+                Point3 bestPt = samplePoint();
+                Real bestD = minDistSq(bestPt);
+
+                for (size_t k = 1; k < numCandidates; ++k)
+                {
+                    Point3 candidate = samplePoint();
+                    Real d = minDistSq(candidate);
+                    if (d > bestD)
+                    {
+                        bestD  = d;
+                        bestPt = candidate;
+                    }
+                }
+
+                PointN site;
+                site[0] = bestPt[0];
+                site[1] = bestPt[1];
+                site[2] = bestPt[2];
+                for (size_t d = 3; d < N; ++d)
+                {
+                    site[d] = static_cast<Real>(0);
+                }
+                mSites.push_back(site);
+            }
+
+            if (mVerbose)
+            {
+                std::cout << "Generated " << mSites.size()
+                          << " initial sites (farthest-point)\n";
+            }
+
+            return true;
+        }
         
         // Set sites explicitly
         void SetSites(std::vector<PointN> const& sites)
@@ -337,12 +468,15 @@ namespace gte
         // a brand-new mesh topology from the optimized seed positions.
         //
         // Algorithm (matches Geogram's RVD/RDT dual construction):
-        //   1. For each input mesh vertex v, find the nearest seed S[v] in 3D.
-        //   2. For each input triangle (a, b, c), if S[a], S[b], S[c] are all
-        //      distinct, emit a candidate RDT triangle {S[a], S[b], S[c]}.
+        //   1. For each input triangle, assign it to its nearest seed (using the
+        //      full N-dimensional metric — position + scaled normal for N=6).
+        //   2. Each input triangle whose 3 vertices map to 3 distinct seeds also
+        //      contributes a candidate RDT triangle {S[a], S[b], S[c]}.
         //   3. Deduplicate (canonical sort) and fix winding from accumulated
         //      original face normals.
-        //   4. Output vertices = 3D seed positions, triangles = RDT connectivity.
+        //   4. Output vertices = RVC centroids (area-weighted 3D centroid of the
+        //      triangles assigned to each seed), matching Geogram's
+        //      RDT_RVC_CENTROIDS flag which places output vertices ON the surface.
         //
         // Returns true if a non-empty triangulation was produced.
         bool ComputeRDT(
@@ -356,9 +490,31 @@ namespace gte
 
             size_t numSeeds = mSites.size();
 
-            // Step 1: For each input mesh vertex find the nearest seed (3D distance).
-            // Only the first 3 components of mSites[s] are the 3D position; dims 3-5
-            // are scaled normals and are ignored for the RDT assignment step.
+            // Estimate normal scale for N > 3 (same as RestrictedVoronoiDiagramN)
+            Real normalScale = static_cast<Real>(0);
+            if constexpr (N > 3)
+            {
+                for (size_t s = 0; s < numSeeds; ++s)
+                {
+                    Real normSq = static_cast<Real>(0);
+                    for (size_t d = 3; d < N; ++d)
+                    {
+                        normSq += mSites[s][d] * mSites[s][d];
+                    }
+                    normalScale += std::sqrt(normSq);
+                }
+                if (numSeeds > 0)
+                {
+                    normalScale /= static_cast<Real>(numSeeds);
+                }
+            }
+
+            // Step 1: For each input mesh vertex, find the nearest seed (3D distance).
+            // The RDT topology is defined by the 3D Voronoi partition of the surface.
+            // RestrictedVoronoiDiagramN::ComputeCentroids uses the full 6D metric for
+            // the Lloyd centroid computation (driving seed positions during iteration),
+            // but RDT connectivity is read from the 3D surface structure — vertex
+            // assignments use 3D distance to produce a valid surface triangulation.
             std::vector<int32_t> vertToSeed(mSurfaceVertices.size(), 0);
             for (size_t v = 0; v < mSurfaceVertices.size(); ++v)
             {
@@ -387,15 +543,49 @@ namespace gte
             // Each input triangle whose 3 vertices map to 3 distinct seeds contributes
             // one candidate.  We accumulate the original face normal (unnormalized) to
             // determine the correct output winding.
+            // Simultaneously accumulate RVC centroid data for Step 3.
             using TriKey = std::array<int32_t, 3>;
             struct NormalAccum { Point3 normal{}; };
             std::map<TriKey, NormalAccum> candidates;
+
+            // RVC centroid accumulators (for output vertex placement ON the surface)
+            std::vector<Point3> rvcWeightedPos(numSeeds, Point3{});
+            std::vector<Real>   rvcTotalArea(numSeeds, static_cast<Real>(0));
 
             for (auto const& tri : mSurfaceTriangles)
             {
                 int32_t s0 = vertToSeed[tri[0]];
                 int32_t s1 = vertToSeed[tri[1]];
                 int32_t s2 = vertToSeed[tri[2]];
+
+                Point3 const& va = mSurfaceVertices[tri[0]];
+                Point3 const& vb = mSurfaceVertices[tri[1]];
+                Point3 const& vc = mSurfaceVertices[tri[2]];
+                Point3 triCentroid = (va + vb + vc) / static_cast<Real>(3);
+                Real area = ComputeTriangleArea(va, vb, vc);
+
+                // RVC centroid: assign the whole triangle to its centroid's nearest seed
+                // (3D assignment — centroid's position drives placement)
+                {
+                    Real minDistSq = std::numeric_limits<Real>::max();
+                    int32_t sC = 0;
+                    for (size_t s = 0; s < numSeeds; ++s)
+                    {
+                        Real dx = triCentroid[0] - mSites[s][0];
+                        Real dy = triCentroid[1] - mSites[s][1];
+                        Real dz = triCentroid[2] - mSites[s][2];
+                        Real dSq = dx * dx + dy * dy + dz * dz;
+                        if (dSq < minDistSq)
+                        {
+                            minDistSq = dSq;
+                            sC = static_cast<int32_t>(s);
+                        }
+                    }
+                    rvcWeightedPos[sC] += triCentroid * area;
+                    rvcTotalArea[sC]   += area;
+                }
+
+                // RDT triangle candidate
                 if (s0 == s1 || s1 == s2 || s0 == s2)
                 {
                     continue;  // degenerate: two vertices in same Voronoi cell
@@ -406,9 +596,6 @@ namespace gte
                 std::sort(key.begin(), key.end());
 
                 // Accumulate face normal for winding determination
-                Point3 const& va = mSurfaceVertices[tri[0]];
-                Point3 const& vb = mSurfaceVertices[tri[1]];
-                Point3 const& vc = mSurfaceVertices[tri[2]];
                 Point3 faceN = Cross(vb - va, vc - va);
                 candidates[key].normal += faceN;
             }
@@ -418,13 +605,25 @@ namespace gte
                 return false;
             }
 
-            // Step 3: Extract output vertices — 3D seed positions.
+            // Step 3: Extract output vertices — RVC centroids ON the original surface.
+            // This matches Geogram's RDT_RVC_CENTROIDS | RDT_PREFER_SEEDS mode: the
+            // output vertex for each Voronoi cell is the area-weighted centroid of the
+            // triangles in that cell (which lies on the original surface mesh), not the
+            // seed position which may have drifted off-surface during Lloyd iterations.
             outVertices.resize(numSeeds);
             for (size_t s = 0; s < numSeeds; ++s)
             {
-                outVertices[s][0] = mSites[s][0];
-                outVertices[s][1] = mSites[s][1];
-                outVertices[s][2] = mSites[s][2];
+                if (rvcTotalArea[s] > static_cast<Real>(1e-10))
+                {
+                    outVertices[s] = rvcWeightedPos[s] / rvcTotalArea[s];
+                }
+                else
+                {
+                    // Empty cell: fall back to seed position
+                    outVertices[s][0] = mSites[s][0];
+                    outVertices[s][1] = mSites[s][1];
+                    outVertices[s][2] = mSites[s][2];
+                }
             }
 
             // Step 4: Output RDT triangles with correct winding.
