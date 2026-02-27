@@ -735,28 +735,22 @@ namespace gte
             comps[comp].mass = curMass;
         };
 
-        // ForEachPolygon callback — translation of
-        // GetConnectedComponentsPrimalTriangles::operator()
+        // ForEachPolygon callback — direct translation of
+        // GetConnectedComponentsPrimalTriangles::operator() from Geogram's RVD.cpp.
         //
-        // Two-pass design (matching Geogram's "can be generated several times"):
-        //   Pass 1 (during walk): accumulate component centroids AND record raw
-        //     triangle candidates as (compID, seed2, seed3, facet) tuples.
-        //   Pass 2 (after walk): resolve seed component IDs via
-        //     GetFacetSeedComponent and deduplicate.
+        // Triangle candidates are emitted DURING THE WALK (not post-pass),
+        // matching Geogram exactly: "they can be generated several times,
+        // since we cannot know in advance whether the other instances of the
+        // Voronoi vertex were finalized or not. Duplicate triangles are then
+        // filtered-out by client code." (Geogram comment verbatim)
         //
-        // This avoids the ordering problem where a 2-bisector vertex is detected
-        // before the other two seeds have processed the same facet.
-
-        // Raw triangle candidate: (current_comp, s2, s3, facet, face_normal)
-        struct RawTriCandidate
-        {
-            int32_t comp;    // component ID of current seed at this facet
-            int32_t s2, s3;  // bisector seed indices
-            int32_t facet;   // mesh facet
-            Real nx, ny, nz; // face normal for winding
-        };
-        std::vector<RawTriCandidate> rawCands;
-        rawCands.reserve(4096);
+        // When a 2-bisector vertex is found, we immediately attempt to look up
+        // the components of the other two seeds on the current facet via
+        // GetFacetSeedComponent. If either lookup returns -1 (the other seed
+        // hasn't processed this facet yet, or has a degenerate RVC on it), the
+        // triangle is skipped — it will be re-emitted when a later seed processes
+        // the same (or adjacent) facet where all three components are available.
+        // The candidates map deduplicates via canonical sort.
 
         rvd.ForEachPolygon([&](
             int32_t seed, int32_t facet,
@@ -786,12 +780,13 @@ namespace gte
                 curMass += area;
             }
 
-            // Detect Voronoi vertices (nbBisectors==2) and record raw triangle
-            // candidates for post-walk resolution.
-            // Translation of the triangle-generation loop in
-            // GetConnectedComponentsPrimalTriangles::operator().
-            // The 3D face normal of the current mesh facet is accumulated for
-            // final winding correction (replacing Geogram's mesh_repair pass).
+            // Detect Voronoi vertices (nbBisectors==2) and emit RDT triangle
+            // candidates.  Matching Geogram's triangle-generation loop in
+            // GetConnectedComponentsPrimalTriangles::operator():
+            //   v1 = current_connected_component()
+            //   v2 = get_facet_seed_connected_component(f, s2)
+            //   v3 = get_facet_seed_connected_component(f, s3)
+            //   if(v2 != NO_INDEX && v3 != NO_INDEX) push triangle
             auto const& tri  = tris[facet];
             auto const& va3D = liftedVerts[tri[0]];  // first 3 coords = 3D pos
             auto const& vb3D = liftedVerts[tri[1]];
@@ -803,40 +798,33 @@ namespace gte
             for (auto const& v : P.V)
             {
                 if (v.nbBisectors != 2) { continue; }
-                rawCands.push_back({compID,
-                                    v.bisectors[0], v.bisectors[1],
-                                    facet, faceNx, faceNy, faceNz});
+
+                int32_t s2 = v.bisectors[0];
+                int32_t s3 = v.bisectors[1];
+
+                int32_t v1 = compID;
+                int32_t v2 = rvd.GetFacetSeedComponent(facet, s2);
+                int32_t v3 = rvd.GetFacetSeedComponent(facet, s3);
+
+                // Skip if s2 or s3 haven't recorded their component on this facet
+                // yet — the triangle will be re-emitted when a later seed processes
+                // a facet where all three are available (matching Geogram's strategy).
+                if (v2 < 0 || v3 < 0) { continue; }
+
+                TriKey key = {v1, v2, v3};
+                std::sort(key.begin(), key.end());
+                if (key[0] == key[1] || key[1] == key[2]) { continue; }
+
+                auto& na = candidates[key];
+                na.nx += faceNx;
+                na.ny += faceNy;
+                na.nz += faceNz;
             }
         });
 
         FinalizeComp(prevComp);
 
-        if (comps.empty() || rawCands.empty())
-        {
-            return false;
-        }
-
-        // Pass 2: resolve all raw candidates now that ALL (facet,seed) pairs
-        // have been processed and their component IDs are in mFacetSeedComp.
-        for (auto const& rc : rawCands)
-        {
-            int32_t v1 = rc.comp;
-            int32_t v2 = rvd.GetFacetSeedComponent(rc.facet, rc.s2);
-            int32_t v3 = rvd.GetFacetSeedComponent(rc.facet, rc.s3);
-
-            if (v2 < 0 || v3 < 0) { continue; }
-
-            TriKey key = {v1, v2, v3};
-            std::sort(key.begin(), key.end());
-            if (key[0] == key[1] || key[1] == key[2]) { continue; }
-
-            auto& na = candidates[key];
-            na.nx += rc.nx;
-            na.ny += rc.ny;
-            na.nz += rc.nz;
-        }
-
-        if (candidates.empty())
+        if (comps.empty() || candidates.empty())
         {
             return false;
         }
