@@ -20,7 +20,8 @@
 //   3. Disk-clipping RVC (Restricted Voronoi Cell) candidate triangle generation
 //      -- matches Geogram's Co3NeRestrictedVoronoiDiagram exactly
 //   4. T3/T12 triangle classification by occurrence count
-//   5. Output T3 triangles; T12 as fallback for sparse input
+//   5. Output T3 triangles always; also output T12 triangles unless they form
+//      a Möbius configuration (matching Geogram's T12 inclusion strategy)
 //   6. Optional post-reconstruction mesh repair (Geogram: co3ne:repair=true default)
 //
 // The equivalent Geogram call from BRL-CAD:
@@ -51,6 +52,7 @@
 #include <limits>
 #include <queue>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace gte
@@ -760,9 +762,11 @@ namespace gte
         //   count  < 3  ->  T12:           one or two vertices agree
         //   count  > 3  ->  discard:       over-proposed, geometry ambiguous
         //
-        // T3 triangles are output first.  If the input is too sparse or normals
-        // are poorly oriented to produce any T3 triangles, T12 triangles are
-        // used as a fallback so the caller always gets some output.
+        // T3 triangles are always output.  T12 triangles are also always output,
+        // matching Geogram's strategy, UNLESS they form a Möbius configuration.
+        // A T12 triangle forms a Möbius configuration when one of its directed
+        // edges (a->b) already appears in the accepted set with the same
+        // orientation — adding it would create a non-orientable surface patch.
         static void ClassifyAndOutput(
             std::vector<std::array<int32_t, 3>> const& candidateTriangles,
             std::vector<std::array<int32_t, 3>>& outTriangles)
@@ -788,12 +792,44 @@ namespace gte
                 ++info.count;
             }
 
+            // Build directed half-edge set from accepted triangles.
+            // Key: {a, b} means directed edge a->b exists in an accepted triangle.
+            using EdgeKey = std::array<int32_t, 2>;
+            struct EdgeHash
+            {
+                size_t operator()(EdgeKey const& e) const noexcept
+                {
+                    // Boost-style hash combining using the golden-ratio constant.
+                    size_t h = std::hash<int32_t>{}(e[0]);
+                    h ^= std::hash<int32_t>{}(e[1]) + size_t{0x9e3779b9u} + (h << 6) + (h >> 2);
+                    return h;
+                }
+            };
+            // Each accepted triangle contributes 3 directed half-edges.
+            std::unordered_set<EdgeKey, EdgeHash> acceptedEdges;
+            acceptedEdges.reserve(candidateTriangles.size() * 3);
+
+            auto RegisterTriangle = [&](std::array<int32_t, 3> const& t)
+            {
+                outTriangles.push_back(t);
+                acceptedEdges.insert({t[0], t[1]});
+                acceptedEdges.insert({t[1], t[2]});
+                acceptedEdges.insert({t[2], t[0]});
+            };
+
+            auto IsMobius = [&](std::array<int32_t, 3> const& t) -> bool
+            {
+                return acceptedEdges.count({t[0], t[1]}) ||
+                       acceptedEdges.count({t[1], t[2]}) ||
+                       acceptedEdges.count({t[2], t[0]});
+            };
+
             std::vector<std::array<int32_t, 3>> t12;
             for (auto const& [key, info] : seen)
             {
                 if (info.count == 3)
                 {
-                    outTriangles.push_back(info.oriented);
+                    RegisterTriangle(info.oriented);
                 }
                 else if (info.count < 3)
                 {
@@ -802,10 +838,15 @@ namespace gte
                 // count > 3: discard
             }
 
-            // Fallback to T12 when no T3 triangles were produced
-            if (outTriangles.empty())
+            // Emit T12 triangles, skipping Möbius configurations.
+            // This matches Geogram's behavior: T12 triangles are always considered,
+            // not just used as a last-resort fallback.
+            for (auto const& t : t12)
             {
-                outTriangles = std::move(t12);
+                if (!IsMobius(t))
+                {
+                    RegisterTriangle(t);
+                }
             }
         }
 
