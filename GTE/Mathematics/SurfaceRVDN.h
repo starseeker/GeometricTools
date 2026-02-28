@@ -31,10 +31,300 @@
 #include <unordered_map>
 #include <vector>
 
+#include <vector>
+
 namespace gte
 {
     // ========================================================================
-    // RVDVertex<Real, N>
+    // RDTRepair — topology-repair helpers for ComputeMultiNerveRDT.
+    //
+    // Implements three operations called in Geogram's mesh_postprocess_RDT
+    // after the initial peninsula removal:
+    //   ConnectFacets            ← repair_connect_facets
+    //   ReorientFacetsAntiMoebius← repair_reorient_facets_anti_moebius
+    //   SplitNonManifoldVertices ← repair_split_non_manifold_vertices
+    //
+    // The implementations are self-contained (no MeshRepair dependency) so
+    // that SurfaceRVDN.h can be included without pulling in the full repair
+    // pipeline (which would cause header-guard conflicts in some TUs).
+    // ========================================================================
+    struct RDTRepair
+    {
+        // ── ConnectFacets ────────────────────────────────────────────────────
+        // Build adj[f*3+e] for each half-edge:
+        //   ≥ 0  adjacent manifold triangle
+        //   −1   boundary (unmatched)
+        //   −2   non-manifold sentinel (3+ triangles on same undirected edge)
+        // Uses undirected edge keys, matching Geogram's repair_connect_facets
+        // which joins both same-direction and opposite-direction pairs.
+        static void ConnectFacets(
+            std::vector<std::array<int32_t,3>> const& tris,
+            std::vector<int32_t>& adj)
+        {
+            static constexpr int32_t NM = -2;
+            size_t n = tris.size();
+            adj.assign(n * 3, -1);
+
+            using EKey = std::pair<int32_t,int32_t>;
+            std::map<EKey, std::pair<int32_t,int32_t>> edgeMap;
+
+            for (size_t f = 0; f < n; ++f)
+            {
+                for (int e = 0; e < 3; ++e)
+                {
+                    int32_t va = tris[f][e];
+                    int32_t vb = tris[f][(e + 1) % 3];
+                    EKey key = {std::min(va,vb), std::max(va,vb)};
+
+                    auto [it, inserted] = edgeMap.emplace(key, std::make_pair(int32_t(-1), int32_t(-1)));
+                    if (it->second.first == NM) { /* already NM */ }
+                    else if (it->second.first  < 0) { it->second.first  = (int32_t)f; }
+                    else if (it->second.second < 0) { it->second.second = (int32_t)f; }
+                    else { it->second = {NM, NM}; }
+                }
+            }
+
+            for (size_t f = 0; f < n; ++f)
+            {
+                for (int e = 0; e < 3; ++e)
+                {
+                    int32_t va = tris[f][e];
+                    int32_t vb = tris[f][(e + 1) % 3];
+                    EKey key = {std::min(va,vb), std::max(va,vb)};
+                    auto it = edgeMap.find(key);
+                    if (it == edgeMap.end()) { continue; }
+                    int32_t f0 = it->second.first, f1 = it->second.second;
+                    if (f0 == NM || f1 < 0) { continue; }
+                    adj[f*3+e] = (f0 == (int32_t)f) ? f1 : f0;
+                }
+            }
+        }
+
+        // ── RelativeOrientation ──────────────────────────────────────────────
+        // +1 → f1,f2 consistently oriented (opposite directed edges on shared edge)
+        // −1 → inconsistently oriented (same directed edge)
+        //  0 → not sharing any edge
+        static int32_t RelativeOrientation(
+            std::vector<std::array<int32_t,3>> const& tris,
+            int32_t f1, int32_t f2)
+        {
+            for (int e1 = 0; e1 < 3; ++e1)
+            {
+                int32_t v11 = tris[f1][e1], v12 = tris[f1][(e1+1)%3];
+                for (int e2 = 0; e2 < 3; ++e2)
+                {
+                    int32_t v21 = tris[f2][e2], v22 = tris[f2][(e2+1)%3];
+                    if (v11 == v21 && v12 == v22) { return -1; }
+                    if (v11 == v22 && v12 == v21) { return  1; }
+                }
+            }
+            return 0;
+        }
+
+        // ── Dissociate ───────────────────────────────────────────────────────
+        // Remove the adjacency link between f1 and f2 in adj.
+        static void Dissociate(std::vector<int32_t>& adj, int32_t f1, int32_t f2)
+        {
+            for (int e = 0; e < 3; ++e)
+            {
+                if (adj[f1*3+e] == f2) { adj[f1*3+e] = -1; }
+                if (adj[f2*3+e] == f1) { adj[f2*3+e] = -1; }
+            }
+        }
+
+        // ── PropagateOrientation ─────────────────────────────────────────────
+        // Orient f relative to its already-visited neighbours; handle Möbius
+        // conflicts by dissociating the minority edges.
+        static void PropagateOrientation(
+            std::vector<std::array<int32_t,3>>& tris,
+            std::vector<int32_t>& adj,
+            int32_t f,
+            std::vector<bool> const& visited)
+        {
+            int32_t nbPlus = 0, nbMinus = 0;
+            for (int e = 0; e < 3; ++e)
+            {
+                int32_t g = adj[f*3+e];
+                if (g < 0 || !visited[(size_t)g]) { continue; }
+                int32_t ori = RelativeOrientation(tris, f, g);
+                if (ori ==  1) { ++nbPlus;  }
+                if (ori == -1) { ++nbMinus; }
+            }
+            if (nbPlus != 0 && nbMinus != 0)
+            {
+                if (nbPlus > nbMinus)
+                {
+                    nbMinus = 0;
+                    for (int e = 0; e < 3; ++e)
+                    {
+                        int32_t g = adj[f*3+e];
+                        if (g < 0 || !visited[(size_t)g]) { continue; }
+                        if (RelativeOrientation(tris, f, g) < 0) { Dissociate(adj, f, g); }
+                    }
+                }
+                else
+                {
+                    nbPlus = 0;
+                    for (int e = 0; e < 3; ++e)
+                    {
+                        int32_t g = adj[f*3+e];
+                        if (g < 0 || !visited[(size_t)g]) { continue; }
+                        if (RelativeOrientation(tris, f, g) > 0) { Dissociate(adj, f, g); }
+                    }
+                }
+            }
+            (void)nbPlus;
+            if (nbMinus != 0)
+            {
+                std::swap(tris[f][1], tris[f][2]);
+                // Update local-edge-to-adjacency mapping after the vertex swap:
+                // swap(v1,v2) maps old local edge 0 ↔ new local edge 2, edge 1 unchanged.
+                std::swap(adj[f*3+0], adj[f*3+2]);
+            }
+        }
+
+        // ── ReorientFacetsAntiMoebius ────────────────────────────────────────
+        // BFS from border triangles outward, reorienting for consistent normals.
+        // Template parameter V is a vertex type with operator[](size_t) for coords.
+        template <typename V>
+        static void ReorientFacetsAntiMoebius(
+            std::vector<V>& /*verts*/,
+            std::vector<std::array<int32_t,3>>& tris,
+            std::vector<int32_t>& adj)
+        {
+            size_t n = tris.size();
+            if (n == 0) { return; }
+
+            static constexpr int32_t MAX_ITER = 5;
+            std::vector<int8_t> dist(n, (int8_t)MAX_ITER);
+            for (size_t f = 0; f < n; ++f)
+                for (int e = 0; e < 3; ++e)
+                    if (adj[f*3+e] < 0) { dist[f] = 0; break; }
+
+            for (int32_t iter = 1; iter < MAX_ITER; ++iter)
+                for (size_t f = 0; f < n; ++f)
+                    if (dist[f] == (int8_t)MAX_ITER)
+                        for (int e = 0; e < 3; ++e)
+                        {
+                            int32_t g = adj[f*3+e];
+                            if (g >= 0 && dist[(size_t)g] == (int8_t)(iter-1))
+                            { dist[f] = (int8_t)iter; break; }
+                        }
+
+            std::vector<bool>    visited(n, false);
+            std::vector<int32_t> queue;
+            queue.reserve(n);
+
+            for (int32_t d = MAX_ITER; d >= 0; --d)
+            {
+                for (size_t f = 0; f < n; ++f)
+                {
+                    if (!visited[f] && dist[f] == (int8_t)d)
+                    {
+                        visited[f] = true;
+                        queue.push_back((int32_t)f);
+                        size_t head = 0;
+                        while (head < queue.size())
+                        {
+                            int32_t f1 = queue[head++];
+                            for (int e = 0; e < 3; ++e)
+                            {
+                                int32_t f2 = adj[f1*3+e];
+                                if (f2 < 0 || visited[(size_t)f2]) { continue; }
+                                visited[(size_t)f2] = true;
+                                PropagateOrientation(tris, adj, f2, visited);
+                                queue.push_back(f2);
+                            }
+                        }
+                        queue.clear();
+                    }
+                }
+            }
+        }
+
+        // ── SplitNonManifoldVertices ─────────────────────────────────────────
+        // Walk the fan of triangles around each vertex using adj.  If the fan
+        // has multiple disconnected components, introduce new vertex copies.
+        // Template parameter V is the vertex type (copied by value).
+        template <typename V>
+        static void SplitNonManifoldVertices(
+            std::vector<V>& vertices,
+            std::vector<std::array<int32_t,3>>& tris,
+            std::vector<int32_t> const& adj)
+        {
+            size_t nF = tris.size();
+            size_t nV = vertices.size();
+            std::vector<bool> cVisited(nF * 3, false);
+            std::vector<bool> vUsed(nV, false);
+            std::vector<V>    newVerts;
+
+            for (size_t f = 0; f < nF; ++f)
+            {
+                for (int lv = 0; lv < 3; ++lv)
+                {
+                    size_t c = f*3 + (size_t)lv;
+                    if (cVisited[c]) { continue; }
+
+                    int32_t oldV = tris[f][lv];
+                    int32_t newV = oldV;
+                    if (vUsed[(size_t)oldV])
+                    {
+                        newV = (int32_t)(nV + newVerts.size());
+                        newVerts.push_back(vertices[(size_t)oldV]);
+                    }
+                    else { vUsed[(size_t)oldV] = true; }
+
+                    // Walk forward: traverse adj through edge starting at oldV.
+                    // Matching Geogram's repair_split_non_manifold_vertices forward pass.
+                    size_t  curF  = f;
+                    int     curLv = lv;
+                    bool    hitBoundary = false;
+                    for (;;)
+                    {
+                        cVisited[curF*3 + (size_t)curLv] = true;
+                        tris[curF][curLv] = newV;
+
+                        int32_t nxtF = adj[curF*3 + (size_t)curLv];
+                        if (nxtF < 0) { hitBoundary = true; break; }   // boundary
+                        if ((size_t)nxtF == f) { break; }               // fan loop closed
+
+                        int found = -1;
+                        for (int k = 0; k < 3; ++k)
+                            if (tris[(size_t)nxtF][k] == oldV) { found = k; break; }
+                        if (found < 0) { hitBoundary = true; break; }  // lost v (shouldn't happen)
+                        curF  = (size_t)nxtF;
+                        curLv = found;
+                    }
+
+                    // Walk backward (only when forward hit a boundary, not a loop).
+                    // Translation of Geogram's backward pass in repair_split_non_manifold_vertices.
+                    if (hitBoundary)
+                    {
+                        curF  = f;
+                        curLv = lv;
+                        for (;;)
+                        {
+                            // prev corner in same facet = (curLv+2)%3, then traverse its edge
+                            int32_t prevF = adj[curF*3 + (size_t)((curLv + 2) % 3)];
+                            if (prevF < 0) { break; }
+                            int found = -1;
+                            for (int k = 0; k < 3; ++k)
+                                if (tris[(size_t)prevF][k] == oldV) { found = k; break; }
+                            if (found < 0) { break; }
+                            curF  = (size_t)prevF;
+                            curLv = found;
+                            cVisited[curF*3 + (size_t)curLv] = true;
+                            tris[curF][curLv] = newV;
+                        }
+                    }
+                }
+            }
+            if (!newVerts.empty())
+                vertices.insert(vertices.end(), newVerts.begin(), newVerts.end());
+        }
+    };  // struct RDTRepair
+
+
     //
     // A vertex in an RVC polygon.  Stores N-D position plus edge metadata used
     // to drive the surface walk.  Matches GEOGen::Vertex (simplified: no
@@ -281,7 +571,13 @@ namespace gte
             // through edge (tri[e], tri[(e+1)%3]), or -1 if boundary.
             mFacetAdj.assign(mNumFacets * 3, int32_t(-1));
 
+            // Build edge→triangle map.  Entry (-2,-2) flags a non-manifold
+            // edge (3+ incident triangles); those are treated as boundaries.
+            // Entry (f,-1) flags an unmatched (boundary) edge.
+            // Matching Geogram's repair_connect_facets which marks non-manifold
+            // edges as NON_MANIFOLD and does NOT set adjacency for them.
             using EKey = uint64_t;
+            static constexpr int32_t NM = -2;  // non-manifold sentinel
             std::unordered_map<EKey, std::pair<int32_t, int32_t>> edgeMap;
             edgeMap.reserve(mNumFacets * 3);
 
@@ -293,13 +589,22 @@ namespace gte
                     EKey key = EdgeKey(tri[e], tri[(e + 1) % 3]);
                     auto [it, ok] = edgeMap.emplace(key, std::make_pair(-1, -1));
                     (void)ok;
-                    if (it->second.first < 0)
+                    if (it->second.first == NM)
+                    {
+                        // Already flagged non-manifold — stay flagged
+                    }
+                    else if (it->second.first < 0)
                     {
                         it->second.first  = static_cast<int32_t>(f);
                     }
-                    else
+                    else if (it->second.second < 0)
                     {
                         it->second.second = static_cast<int32_t>(f);
+                    }
+                    else
+                    {
+                        // Third triangle on this edge → non-manifold; treat as boundary
+                        it->second = {NM, NM};
                     }
                 }
             }
@@ -315,6 +620,8 @@ namespace gte
                     {
                         int32_t f0 = it->second.first;
                         int32_t f1 = it->second.second;
+                        // Skip non-manifold edges (f0==NM) and boundary edges (f1<0)
+                        if (f0 == NM || f1 < 0) { continue; }
                         mFacetAdj[f * 3 + e] = (f0 == static_cast<int32_t>(f)) ? f1 : f0;
                     }
                 }
@@ -919,7 +1226,7 @@ namespace gte
         {
             rawVerts.push_back({cd.wx, cd.wy, cd.wz});
         }
-        const auto nRaw = static_cast<int32_t>(rawVerts.size());
+        auto nRaw = static_cast<int32_t>(rawVerts.size());
 
         // ── 4. Build raw triangles with winding corrected by face normal ─────
         // Translation of the winding check in ComputeMultiNerveRDT.
@@ -1019,7 +1326,59 @@ namespace gte
             return false;
         }
 
-        // ── 6. Compact: keep only vertices referenced by surviving triangles.
+        // Step 5c: Rebuild manifold adjacency, reorient triangles consistently
+        //          (anti-Möbius BFS), split non-manifold vertices.
+        //          Translation of the three Geogram repair functions called in
+        //          mesh_postprocess_RDT after the initial peninsula removal:
+        //            repair_connect_facets(M)
+        //            repair_reorient_facets_anti_moebius(M)
+        //            repair_split_non_manifold_vertices(M)
+        {
+            std::vector<int32_t> adj;
+            RDTRepair::ConnectFacets(rawTris, adj);
+            RDTRepair::ReorientFacetsAntiMoebius(rawVerts, rawTris, adj);
+            RDTRepair::SplitNonManifoldVertices(rawVerts, rawTris, adj);
+
+            // Update nRaw to reflect any vertices added by SplitNonManifoldVertices.
+            nRaw = static_cast<int32_t>(rawVerts.size());
+        }
+
+        // Step 5d: Second peninsula-removal pass.
+        // After the topology repair in Step 5c, SplitNonManifoldVertices may have
+        // introduced new vertices with low triangle incidence (degree-1 vertices).
+        // A second peninsula pass cleans up these isolated flaps, matching the
+        // significant output reduction that Geogram achieves from its repair steps.
+        {
+            bool changed = true;
+            while (changed)
+            {
+                changed = false;
+                std::vector<int32_t> inc(nRaw, 0);
+                for (auto const& tri : rawTris)
+                {
+                    ++inc[tri[0]];
+                    ++inc[tri[1]];
+                    ++inc[tri[2]];
+                }
+                auto end2 = std::remove_if(rawTris.begin(), rawTris.end(),
+                    [&](std::array<int32_t,3> const& tri) -> bool
+                    {
+                        if (inc[tri[0]] == 1 || inc[tri[1]] == 1 ||
+                            inc[tri[2]] == 1)
+                        {
+                            changed = true;
+                            return true;
+                        }
+                        return false;
+                    });
+                rawTris.erase(end2, rawTris.end());
+            }
+        }
+
+        if (rawTris.empty())
+        {
+            return false;
+        }
         std::vector<int32_t> remap(nRaw, -1);
         int32_t nextV = 0;
         for (auto const& tri : rawTris)
