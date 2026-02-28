@@ -45,6 +45,7 @@
 
 #include <GTE/Mathematics/Vector3.h>
 #include <GTE/Mathematics/ETManifoldMesh.h>
+#include <GTE/Mathematics/MeshHoleFilling.h>
 #include <GTE/Mathematics/MeshPreprocessing.h>
 #include <algorithm>
 #include <array>
@@ -85,6 +86,12 @@ namespace gte
             DEFAULT = COLOCATE | DUP_F | TRIANGULATE
         };
 
+        friend RepairMode operator|(RepairMode a, RepairMode b)
+        {
+            return static_cast<RepairMode>(
+                static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
+        }
+
         // Parameters for mesh repair operations.
         struct Parameters
         {
@@ -111,29 +118,82 @@ namespace gte
         {
             uint32_t mode = static_cast<uint32_t>(params.mode);
 
-            // Step 1: Colocate vertices if requested
+            // Step 1: Colocate vertices if requested.
             if (mode & static_cast<uint32_t>(RepairMode::COLOCATE))
             {
                 ColocateVertices(vertices, triangles, params.epsilon);
             }
 
-            // Step 2: Triangulate if needed (Geogram handles polygons, GTE assumes triangles)
-            // This is a no-op for GTE since we only handle triangle meshes
+            // Step 2: Triangulate if needed (GTE only handles triangles; no-op).
 
-            // Step 3: Remove bad facets (degenerate and duplicates)
+            // Step 3: Remove bad facets (degenerate and duplicates).
             bool checkDuplicates = (mode & static_cast<uint32_t>(RepairMode::DUP_F)) != 0;
             RemoveBadFacets(vertices, triangles, checkDuplicates);
 
-            // Step 4: Remove isolated vertices
+            // Step 4: Remove isolated vertices.
             RemoveIsolatedVertices(vertices, triangles);
 
-            // Step 5: Connect and reorient facets
-            // (Geogram does this internally, we'll rely on the mesh being properly oriented)
+            // Step 5: RECONSTRUCT post-processing — used after surface reconstruction
+            // (e.g., Co3Ne).  Matches Geogram's MESH_REPAIR_RECONSTRUCT sequence:
+            //   remove_small_connected_components (< 0.01% area, < 10 facets)
+            //   fill_holes                        (< 5% area, < 500 edges)
+            //   remove_small_connected_components (again)
+            //
+            // NOTE: Geogram additionally runs topology repair (connect+reorient+split)
+            // unconditionally in mesh_repair() (before the RECONSTRUCT block) and again
+            // inside the RECONSTRUCT block.  GTE intentionally does NOT mirror this:
+            // SplitNonManifoldVertices on the GT mesh or on Co3Ne output increases
+            // boundary edges (intentional multi-body connections / RVC seams get split
+            // into extra open loops).  Component removal + hole filling achieves the
+            // right outcome without topology changes.
+            if ((mode & static_cast<uint32_t>(RepairMode::RECONSTRUCT)) != 0
+                && !triangles.empty())
+            {
+                auto computeTotalArea = [&]() -> Real
+                {
+                    Real total = static_cast<Real>(0);
+                    for (auto const& tri : triangles)
+                    {
+                        Vector3<Real> const& a = vertices[tri[0]];
+                        Vector3<Real> const& b = vertices[tri[1]];
+                        Vector3<Real> const& c = vertices[tri[2]];
+                        Vector3<Real> ab = b - a, ac = c - a;
+                        Real area = static_cast<Real>(0.5) *
+                            std::sqrt(Dot(Cross(ab, ac), Cross(ab, ac)));
+                        total += area;
+                    }
+                    return total;
+                };
 
-            // Step 6: Orient normals consistently per connected component.
-            // Matches geogram's mesh_repair which always calls orient_normals()
-            // at the end to ensure outward-facing normals by flipping any component
-            // whose signed volume is negative.
+                // 5a: remove small components
+                {
+                    Real Marea = computeTotalArea();
+                    MeshPreprocessing<Real>::RemoveSmallComponents(
+                        vertices, triangles,
+                        Marea * static_cast<Real>(0.0001),  // 0.01% of total area
+                        10);                                 // < 10 facets
+                }
+
+                // 5b: fill small holes
+                {
+                    Real Marea = computeTotalArea();
+                    typename MeshHoleFilling<Real>::Parameters hp;
+                    hp.maxArea  = Marea * static_cast<Real>(0.05);  // 5% of total area
+                    hp.maxEdges = 500;
+                    MeshHoleFilling<Real>::FillHoles(vertices, triangles, hp);
+                }
+
+                // 5c: remove small components again (may appear after hole filling)
+                {
+                    Real Marea = computeTotalArea();
+                    MeshPreprocessing<Real>::RemoveSmallComponents(
+                        vertices, triangles,
+                        Marea * static_cast<Real>(0.0001),
+                        10);
+                }
+            }
+
+            // Step 7: Orient normals consistently per connected component.
             if (!triangles.empty())
             {
                 MeshPreprocessing<Real>::OrientNormals(vertices, triangles);
@@ -577,9 +637,8 @@ namespace gte
                         pq.push({dist[f], static_cast<int32_t>(f)});
                         while (!pq.empty())
                         {
-                            auto [dd, f1] = pq.top();
+                            int32_t f1 = pq.top().second;
                             pq.pop();
-                            (void)dd;
                             for (int e = 0; e < 3; ++e)
                             {
                                 int32_t f2 = adj[f1 * 3 + e];
@@ -783,16 +842,6 @@ namespace gte
             vertices = std::move(newVertices);
         }
     };
-
-    // Allow combining RepairMode flags with bitwise OR
-    template <typename Real>
-    inline typename MeshRepair<Real>::RepairMode operator|(
-        typename MeshRepair<Real>::RepairMode a,
-        typename MeshRepair<Real>::RepairMode b)
-    {
-        return static_cast<typename MeshRepair<Real>::RepairMode>(
-            static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
-    }
 }
 
 // Hash functions for GTE types to support unordered containers.

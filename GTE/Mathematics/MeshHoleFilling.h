@@ -25,7 +25,6 @@
 #include <GTE/Mathematics/Vector3.h>
 #include <GTE/Mathematics/Vector2.h>
 #include <GTE/Mathematics/ETManifoldMesh.h>
-#include <GTE/Mathematics/MeshRepair.h>
 #include <GTE/Mathematics/MeshValidation.h>
 #include <GTE/Mathematics/Polygon2Validation.h>
 #include <GTE/Mathematics/TriangulateEC.h>
@@ -82,7 +81,7 @@ namespace gte
             Parameters()
                 : maxArea(static_cast<Real>(0))
                 , maxEdges(0)                               // 0 = unlimited (fill all holes)
-                , repair(true)
+                , repair(false)                             // repair is caller's responsibility
                 , method(TriangulationMethod::EarClipping)  // Default to EC for compatibility
                 , planarityThreshold(static_cast<Real>(0))  // 0 = disabled
                 , autoFallback(true)                        // Enable automatic fallback
@@ -253,13 +252,10 @@ namespace gte
                 }
             }
 
-            // Step 4: Optional repair after filling
-            if (numFilled > 0 && params.repair)
-            {
-                typename MeshRepair<Real>::Parameters repairParams;
-                repairParams.mode = MeshRepair<Real>::RepairMode::DEFAULT;
-                MeshRepair<Real>::Repair(vertices, triangles, repairParams);
-            }
+            // Step 4: (repair after filling is the caller's responsibility)
+            // MeshRepair::Repair(RECONSTRUCT) or MeshRepair::Repair(DEFAULT)
+            // should be called by the user when topology cleanup is needed after
+            // FillHoles.  This avoids a circular include dependency.
 
             // Step 5: Optional output validation.  When requireManifold is set
             // and the result fails the manifold check, restore the pre-fill

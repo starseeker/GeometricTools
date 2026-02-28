@@ -83,6 +83,10 @@ namespace gte
             // Run MeshRepair after reconstruction (Geogram: co3ne:repair=true default).
             // Removes duplicate vertices, degenerate triangles, and isolated components.
             bool repairAfterReconstruct;
+            // Repair mode flags used when repairAfterReconstruct is true.
+            // DEFAULT | RECONSTRUCT matches Geogram's co3ne default
+            // (MESH_REPAIR_DEFAULT | MESH_REPAIR_RECONSTRUCT).
+            typename MeshRepair<Real>::RepairMode repairMode;
             // Optional RVD-based smoothing (Lloyd relaxation on the mesh).
             // NOTE: O(n^2) per iteration — disabled by default.
             // Only practical for small meshes (n < ~2000 vertices).
@@ -98,6 +102,7 @@ namespace gte
                 , useRVC(true)
                 , rvcDiskSamples(10)
                 , repairAfterReconstruct(false)  // disabled by default for API compatibility
+                , repairMode(MeshRepair<Real>::RepairMode::DEFAULT)
                 , smoothWithRVD(false)
                 , rvdSmoothIterations(3)
             {
@@ -1022,7 +1027,7 @@ namespace gte
             if (params.repairAfterReconstruct)
             {
                 typename MeshRepair<Real>::Parameters repairParams;
-                repairParams.mode = MeshRepair<Real>::RepairMode::DEFAULT;
+                repairParams.mode = params.repairMode;
                 MeshRepair<Real>::Repair(vertices, triangles, repairParams);
             }
         }

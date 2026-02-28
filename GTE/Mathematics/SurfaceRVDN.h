@@ -233,9 +233,8 @@ namespace gte
                         pq.push({dist[f], (int32_t)f});
                         while (!pq.empty())
                         {
-                            auto [dd, f1] = pq.top();
+                            int32_t f1 = pq.top().second;
                             pq.pop();
-                            (void)dd;
                             for (int e = 0; e < 3; ++e)
                             {
                                 int32_t f2 = adj[f1*3+e];
