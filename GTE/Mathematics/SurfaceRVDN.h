@@ -547,9 +547,12 @@ namespace gte
         }
 
         // -----------------------------------------------------------------
-        // Clip facet F against seed's Voronoi cell using all Delaunay
-        // neighbors.  Uses the security-radius criterion (matching Geogram's
-        // clip_by_cell_SR) to stop early once remaining seeds are too far.
+        // Clip facet F against seed's Voronoi cell using Delaunay neighbors.
+        // Direct translation of Geogram's clip_by_cell_SR: uses a dynamic
+        // neighborhood that is enlarged iteratively (matching Geogram's
+        // enlarge_neighborhood loop) until the security-radius criterion is
+        // satisfied, i.e. all remaining unprocessed neighbors are farther
+        // than 2*R from the seed (where R = max polygon vertex distance).
         // Ping-pong clipping: returns pointer to the result polygon.
         // -----------------------------------------------------------------
         Polygon* ClipCellFacet(
@@ -572,46 +575,104 @@ namespace gte
                 R2 = std::max(R2, DistSq(pi, v.pos));
             }
 
-            // Retrieve (and sort) Delaunay neighbors of this seed
-            std::vector<int32_t> neighbors = mDelaunay->GetNeighbors(seed);
+            // Direct translation of Geogram's clip_by_cell_SR:
+            // Iteratively enlarge the neighborhood until the security radius
+            // criterion is met (dij > 4.1*R2 for the next unclipped neighbor).
+            // jj tracks the position up to which we have already clipped;
+            // only newly-added neighbors are sorted and clipped on each
+            // enlargement pass, matching Geogram's incremental jj advance.
+            size_t nbTotalSeeds = mDelaunay->GetNumVertices();
 
-            // Sort neighbors by distance from pi (enables security-radius break)
+            // Fetch initial neighbor list and sort it by distance.
+            // neighbors is grown in-place on each enlargement pass; only the
+            // new suffix [prevSize..newSize) is sorted and merged each time.
+            std::vector<int32_t> neighbors = mDelaunay->GetNeighbors(seed);
             std::sort(neighbors.begin(), neighbors.end(),
                 [&](int32_t a, int32_t b) {
                     return DistSq(pi, (*mSeeds)[a]) < DistSq(pi, (*mSeeds)[b]);
                 });
 
-            for (int32_t j : neighbors)
+            size_t jj = 0;
+
+            while (true)
             {
-                if (j == seed)
+                bool srSatisfied = false;
+                for (; jj < neighbors.size(); ++jj)
                 {
-                    continue;
-                }
-                PointN const& pj = (*mSeeds)[j];
-                Real dij = DistSq(pi, pj);
+                    int32_t j = neighbors[jj];
+                    if (j == seed)
+                    {
+                        continue;
+                    }
+                    PointN const& pj = (*mSeeds)[j];
+                    Real dij = DistSq(pi, pj);
 
-                // Security radius: seed j cannot affect the polygon if
-                // d(pi,pj) > 2*R  ↔  d²(pi,pj) > 4*R²  (using 4.1 for safety)
-                if (dij > Real(4.1) * R2)
+                    // Security radius: if d(pi,pj) > 2*R the remaining
+                    // neighbors (sorted) cannot affect the polygon.
+                    if (dij > Real(4.1) * R2)
+                    {
+                        srSatisfied = true;
+                        break;
+                    }
+
+                    pong->clear();
+                    ping->clip_by_plane(*pong, pi, pj, j);
+                    std::swap(ping, pong);
+
+                    if (ping->empty())
+                    {
+                        return ping;
+                    }
+
+                    // Update R² after clipping (polygon shrinks)
+                    R2 = Real(0);
+                    for (auto const& v : ping->V)
+                    {
+                        R2 = std::max(R2, DistSq(pi, v.pos));
+                    }
+                }
+
+                if (srSatisfied)
                 {
-                    break;  // neighbors are sorted, so all remaining are also too far
+                    break;  // security radius satisfied; done
                 }
 
-                pong->clear();
-                ping->clip_by_plane(*pong, pi, pj, j);
-                std::swap(ping, pong);
-
-                if (ping->empty())
+                // All current neighbors processed and SR not yet satisfied:
+                // enlarge neighborhood (matching Geogram's enlarge_neighborhood
+                // growth schedule: nb += nb/8 for nb>8, else nb++)
+                size_t prevSize = neighbors.size();
+                size_t nb = prevSize;
+                if (nb > 8)
                 {
-                    return ping;
+                    nb += nb / 8;
                 }
-
-                // Update R² after clipping (polygon may have shrunk)
-                R2 = Real(0);
-                for (auto const& v : ping->V)
+                else
                 {
-                    R2 = std::max(R2, DistSq(pi, v.pos));
+                    nb++;
                 }
+                nb = std::min(nb, nbTotalSeeds - 1);
+                if (nb <= prevSize)
+                {
+                    break;  // can't enlarge further (already at max)
+                }
+                mDelaunay->EnlargeNeighborhood(seed, nb);
+
+                // Fetch the enlarged list and sort only the new suffix
+                // [prevSize..newSize), then merge it into the sorted prefix.
+                std::vector<int32_t> newNeighbors = mDelaunay->GetNeighbors(seed);
+                if (newNeighbors.size() <= prevSize)
+                {
+                    break;  // enlargement made no progress
+                }
+                // Sort the new suffix by distance and merge into neighbors.
+                std::sort(newNeighbors.begin() + static_cast<ptrdiff_t>(prevSize),
+                    newNeighbors.end(),
+                    [&](int32_t a, int32_t b) {
+                        return DistSq(pi, (*mSeeds)[a]) < DistSq(pi, (*mSeeds)[b]);
+                    });
+                neighbors = std::move(newNeighbors);
+                // jj remains at prevSize: process starting from the new suffix
+                // (the already-sorted prefix was fully processed in the prior pass)
             }
             return ping;
         }

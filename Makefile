@@ -87,7 +87,10 @@ test_geogram_comparison: $(TEST_DIR)/test_geogram_comparison.cpp \
                          GTE/Mathematics/MeshValidation.h \
                          GTE/Mathematics/MeshRemesh.h \
                          GTE/Mathematics/MeshAnisotropy.h \
-                         GTE/Mathematics/Co3Ne.h
+                         GTE/Mathematics/Co3Ne.h \
+                         GTE/Mathematics/SurfaceRVDN.h \
+                         GTE/Mathematics/CVTN.h \
+                         GTE/Mathematics/DelaunayNN.h
 	$(CXX) $(CXXFLAGS) $(GEOGRAM_INC) -o test_geogram_comparison \
 	    $(TEST_DIR)/test_geogram_comparison.cpp \
 	    $(GEOGRAM_LIBS) $(LDFLAGS)
@@ -114,7 +117,7 @@ test_enhanced_manifold: $(TEST_DIR)/test_enhanced_manifold.cpp
 	$(CXX) $(CXXFLAGS) $(PTHREAD) -o test_enhanced_manifold $(TEST_DIR)/test_enhanced_manifold.cpp $(LDFLAGS)
 
 # Anisotropic remeshing test
-test_anisotropic_remesh: $(TEST_DIR)/test_anisotropic_remesh.cpp GTE/Mathematics/MeshAnisotropy.h GTE/Mathematics/MeshRemesh.h
+test_anisotropic_remesh: $(TEST_DIR)/test_anisotropic_remesh.cpp GTE/Mathematics/MeshAnisotropy.h GTE/Mathematics/MeshRemesh.h GTE/Mathematics/SurfaceRVDN.h
 	$(CXX) $(CXXFLAGS) -o test_anisotropic_remesh $(TEST_DIR)/test_anisotropic_remesh.cpp $(LDFLAGS)
 
 # 6D Delaunay test
@@ -138,7 +141,7 @@ test_rvd_n: $(TEST_DIR)/test_rvd_n.cpp GTE/Mathematics/RestrictedVoronoiDiagramN
 	$(CXX) $(CXXFLAGS) -o test_rvd_n $(TEST_DIR)/test_rvd_n.cpp $(LDFLAGS)
 
 # CVTN (N-dimensional CVT) test
-test_cvt_n: $(TEST_DIR)/test_cvt_n.cpp GTE/Mathematics/CVTN.h GTE/Mathematics/RestrictedVoronoiDiagramN.h GTE/Mathematics/DelaunayNN.h GTE/Mathematics/MeshAnisotropy.h
+test_cvt_n: $(TEST_DIR)/test_cvt_n.cpp GTE/Mathematics/CVTN.h GTE/Mathematics/RestrictedVoronoiDiagramN.h GTE/Mathematics/DelaunayNN.h GTE/Mathematics/MeshAnisotropy.h GTE/Mathematics/SurfaceRVDN.h
 	$(CXX) $(CXXFLAGS) -o test_cvt_n $(TEST_DIR)/test_cvt_n.cpp $(LDFLAGS)
 
 # Demonstration programs
@@ -175,11 +178,11 @@ clean:
 .PHONY: all clean test test_geogram stress generate_test_data build_geogram
 
 # Phase 4 integration test
-test_phase4_integration: $(TEST_DIR)/test_phase4_integration.cpp GTE/Mathematics/CVTN.h GTE/Mathematics/MeshRemesh.h
+test_phase4_integration: $(TEST_DIR)/test_phase4_integration.cpp GTE/Mathematics/CVTN.h GTE/Mathematics/MeshRemesh.h GTE/Mathematics/SurfaceRVDN.h
 	$(CXX) $(CXXFLAGS) -o test_phase4_integration $(TEST_DIR)/test_phase4_integration.cpp $(LDFLAGS)
 
 # Comprehensive anisotropic remeshing end-to-end test
-test_anisotropic_end_to_end: $(TEST_DIR)/test_anisotropic_end_to_end.cpp GTE/Mathematics/MeshRemesh.h GTE/Mathematics/CVTN.h GTE/Mathematics/MeshAnisotropy.h
+test_anisotropic_end_to_end: $(TEST_DIR)/test_anisotropic_end_to_end.cpp GTE/Mathematics/MeshRemesh.h GTE/Mathematics/CVTN.h GTE/Mathematics/MeshAnisotropy.h GTE/Mathematics/SurfaceRVDN.h
 	$(CXX) $(CXXFLAGS) -o test_anisotropic_end_to_end $(TEST_DIR)/test_anisotropic_end_to_end.cpp $(LDFLAGS)
 
 # Co3Ne Manifold Stitcher test
