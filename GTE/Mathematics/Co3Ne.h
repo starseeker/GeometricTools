@@ -548,11 +548,15 @@ namespace gte
             Normalize(Nn);
 
             // Compute an arbitrary perpendicular to Nn
+            // Matches Geogram's Geom::perpendicular(N) exactly:
+            //   case 0 (|N.x| min): (0, -N.z, N.y)
+            //   case 1 (|N.y| min): (N.z, 0, -N.x)
+            //   case 2 (|N.z| min): (-N.y, N.x, 0)
             Vector3<Real> U;
             if (std::abs(Nn[0]) <= std::abs(Nn[1]) && std::abs(Nn[0]) <= std::abs(Nn[2]))
                 U = { static_cast<Real>(0), -Nn[2], Nn[1] };
             else if (std::abs(Nn[1]) <= std::abs(Nn[2]))
-                U = { -Nn[2], static_cast<Real>(0), Nn[0] };
+                U = { Nn[2], static_cast<Real>(0), -Nn[0] };
             else
                 U = { -Nn[1], Nn[0], static_cast<Real>(0) };
             Normalize(U);
@@ -562,9 +566,13 @@ namespace gte
             static constexpr Real kPi = static_cast<Real>(3.14159265358979323846);
             size_t nb = diskSamples;
             outPoly.reserve(nb);
+            // Geogram's sincos table uses divisor (sincos_nb-1) so vertex 0 and vertex nb-1
+            // coincide, giving a 9-unique-vertex polygon for sincos_nb=10.
+            // Using (nb-1) as divisor matches Geogram's get_circle() exactly.
+            Real angleDivisor = static_cast<Real>(nb > 1 ? nb - 1 : 1);
             for (size_t k = 0; k < nb; ++k)
             {
-                Real alpha = static_cast<Real>(2) * kPi * static_cast<Real>(k) / static_cast<Real>(nb);
+                Real alpha = static_cast<Real>(2) * kPi * static_cast<Real>(k) / angleDivisor;
                 Real s = std::sin(alpha);
                 Real c = std::cos(alpha);
                 DiskVertex dv;
@@ -597,7 +605,28 @@ namespace gte
                 {
                     nbFetched = nnQuery.template FindNeighbors<MaxNeighbors>(
                         pi, searchRadius * static_cast<Real>(2), indices);
-                    // nbFetched is now the total found within 2*radius
+                    // NearestNeighborQuery::FindNeighbors extracts from a max-heap,
+                    // returning neighbors in FARTHEST-first order.
+                    // Geogram processes neighbors in CLOSEST-first order for correct
+                    // early stopping (sq_dist > 4*Rk). Sort by precomputed distances.
+                    if (nbFetched > 1)
+                    {
+                        // Pre-compute squared distances to avoid lambda capture issues
+                        std::array<Real, MaxNeighbors> sqDists;
+                        for (int32_t k = 0; k < nbFetched; ++k)
+                        {
+                            Vector3<Real> d = points[indices[k]] - pi;
+                            sqDists[k] = Dot(d, d);
+                        }
+                        // Sort an index array [0..nbFetched) by sqDists, then apply
+                        std::array<int32_t, MaxNeighbors> order;
+                        for (int32_t k = 0; k < nbFetched; ++k) order[k] = k;
+                        std::sort(order.begin(), order.begin() + nbFetched,
+                            [&](int32_t a, int32_t b) { return sqDists[a] < sqDists[b]; });
+                        std::array<int32_t, MaxNeighbors> sorted;
+                        for (int32_t k = 0; k < nbFetched; ++k) sorted[k] = indices[order[k]];
+                        for (int32_t k = 0; k < nbFetched; ++k) indices[k] = sorted[k];
+                    }
                     nbNeigh = maxNeigh;  // we got all of them in one query; done after this pass
                 }
 
@@ -615,10 +644,13 @@ namespace gte
                     Vector3<Real> d = pj - pi;
                     Real sq_dist = Dot(d, d);
 
-                    if (sq_dist > sqROS) break;
+                    // Match Geogram's get_RVC early-exit: when a neighbor is beyond
+                    // the radius of security or beyond 2x the polygon radius, RETURN
+                    // immediately (not just break from the inner loop).
+                    if (sq_dist > sqROS) return;
 
                     Real Rk = SquaredRadius(pi, outPoly);
-                    if (sq_dist > static_cast<Real>(4) * Rk) break;
+                    if (sq_dist > static_cast<Real>(4) * Rk) return;
 
                     ClipDiskByBisector(outPoly, pi, pj, nb_idx);
                     ++jj;
@@ -647,9 +679,6 @@ namespace gte
             NNTree const& nnQuery,
             Real searchRadius)
         {
-            static constexpr Real kPi = static_cast<Real>(3.14159265358979323846);
-            Real maxCosAngle = std::cos(params.maxNormalAngle * kPi / static_cast<Real>(180));
-
             std::vector<DiskVertex> poly;
 
             for (size_t i = 0; i < points.size(); ++i)
@@ -660,6 +689,7 @@ namespace gte
                 if (poly.size() < 3) continue;
 
                 // Extract triangles from consecutive polygon edges
+                // (matches Geogram's run_reconstruct: no co-cone filter applied here)
                 size_t nb = poly.size();
                 for (size_t v1 = 0; v1 < nb; ++v1)
                 {
@@ -668,10 +698,6 @@ namespace gte
                     int32_t k = poly[v2].adjacentSeed;
 
                     if (j < 0 || k < 0 || j == k) continue;
-
-                    // Co-cone test: both neighbors must have normals within maxNormalAngle
-                    if (Dot(normals[i], normals[j]) < maxCosAngle) continue;
-                    if (Dot(normals[i], normals[k]) < maxCosAngle) continue;
 
                     int32_t v0 = static_cast<int32_t>(i);
                     int32_t v1i = j;
@@ -889,18 +915,47 @@ namespace gte
 
             // Separate T3 and T12
             std::vector<std::array<int32_t, 3>> t12;
+            size_t t3Count = 0, t12Count = 0, discardCount = 0;
             for (auto const& [key, info] : seen)
             {
                 if (info.count == 3)
                 {
                     RegisterTriangle(info.oriented);
+                    ++t3Count;
                 }
                 else if (info.count < 3)
                 {
                     t12.push_back(info.oriented);
+                    ++t12Count;
                 }
-                // count > 3: discard (over-proposed, ambiguous geometry)
+                else
+                {
+                    ++discardCount;
+                    // count > 3: discard (over-proposed, ambiguous geometry)
+                }
             }
+#ifdef CO3NE_DEBUG_STAGES
+            {
+                // Count boundary edges from T3-only mesh
+                using DEBEdge = std::array<int32_t, 2>;
+                struct DEBH { size_t operator()(DEBEdge const& e) const {
+                    size_t h = std::hash<int32_t>{}(e[0]);
+                    h ^= std::hash<int32_t>{}(e[1]) + size_t{0x9e3779b9u} + (h << 6) + (h >> 2);
+                    return h; }};
+                std::unordered_map<DEBEdge, int, DEBH> debEdge;
+                for (auto const& t : outTriangles)
+                    for (int ii = 0; ii < 3; ++ii) {
+                        DEBEdge e = {std::min(t[ii], t[(ii+1)%3]), std::max(t[ii], t[(ii+1)%3])};
+                        ++debEdge[e];
+                    }
+                size_t bT3 = 0;
+                for (auto& [e, c] : debEdge) if (c == 1) ++bT3;
+                std::fprintf(stderr,"[CO3NE_DBG] candidates=%zu t3=%zu t12=%zu discard=%zu\n",
+                    candidateTriangles.size(), t3Count, t12Count, discardCount);
+                std::fprintf(stderr,"[CO3NE_DBG] after T3 only: %zu tris, %zu boundary edges\n",
+                    outTriangles.size(), bT3);
+            }
+#endif
 
             // Iterative T12 insertion (translation of Geogram's
             // Co3NeManifoldExtraction::add_triangles(), non-strict mode).
@@ -960,9 +1015,28 @@ namespace gte
                     changed = true;
                 }
             }
+#ifdef CO3NE_DEBUG_STAGES
+            {
+                size_t t12Accepted = 0;
+                for (bool d : t12Done) if (d) ++t12Accepted;
+                using DEBEdge = std::array<int32_t, 2>;
+                struct DEBH { size_t operator()(DEBEdge const& e) const {
+                    size_t h = std::hash<int32_t>{}(e[0]);
+                    h ^= std::hash<int32_t>{}(e[1]) + size_t{0x9e3779b9u} + (h << 6) + (h >> 2);
+                    return h; }};
+                std::unordered_map<DEBEdge, int, DEBH> debEdge;
+                for (auto const& tt : outTriangles)
+                    for (int ii = 0; ii < 3; ++ii) {
+                        DEBEdge e = {std::min(tt[ii], tt[(ii+1)%3]), std::max(tt[ii], tt[(ii+1)%3])};
+                        ++debEdge[e];
+                    }
+                size_t bFinal = 0;
+                for (auto& [e, c] : debEdge) if (c == 1) ++bFinal;
+                std::fprintf(stderr,"[CO3NE_DBG] T12 accepted=%zu/%zu, final tris=%zu, boundary=%zu\n",
+                    t12Accepted, t12Count, outTriangles.size(), bFinal);
+            }
+#endif
         }
-
-        // ===== UTILITIES =====
 
         static bool IsTriangleValid(
             std::vector<Vector3<Real>> const& points,
