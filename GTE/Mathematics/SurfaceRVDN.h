@@ -27,6 +27,7 @@
 #include <deque>
 #include <limits>
 #include <map>
+#include <queue>
 #include <stack>
 #include <unordered_map>
 #include <vector>
@@ -211,9 +212,16 @@ namespace gte
                             { dist[f] = (int8_t)iter; break; }
                         }
 
-            std::vector<bool>    visited(n, false);
-            std::vector<int32_t> queue;
-            queue.reserve(n);
+            std::vector<bool> visited(n, false);
+
+            // Priority queue (max-heap on border distance) matching Geogram's
+            // SimplePriorityQueue.  By always processing the highest-distance
+            // (most interior) facet first, all of a facet's inner neighbours
+            // are already oriented before its boundary neighbours are handled.
+            // This reduces the number of Möbius conflicts and edge dissociations,
+            // producing a cleaner adjacency for SplitNonManifoldVertices.
+            using PQEntry = std::pair<int8_t, int32_t>;  // {dist, facet}
+            std::priority_queue<PQEntry> pq;
 
             for (int32_t d = MAX_ITER; d >= 0; --d)
             {
@@ -222,21 +230,21 @@ namespace gte
                     if (!visited[f] && dist[f] == (int8_t)d)
                     {
                         visited[f] = true;
-                        queue.push_back((int32_t)f);
-                        size_t head = 0;
-                        while (head < queue.size())
+                        pq.push({dist[f], (int32_t)f});
+                        while (!pq.empty())
                         {
-                            int32_t f1 = queue[head++];
+                            auto [dd, f1] = pq.top();
+                            pq.pop();
+                            (void)dd;
                             for (int e = 0; e < 3; ++e)
                             {
                                 int32_t f2 = adj[f1*3+e];
                                 if (f2 < 0 || visited[(size_t)f2]) { continue; }
                                 visited[(size_t)f2] = true;
                                 PropagateOrientation(tris, adj, f2, visited);
-                                queue.push_back(f2);
+                                pq.push({dist[(size_t)f2], f2});
                             }
                         }
-                        queue.clear();
                     }
                 }
             }

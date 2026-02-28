@@ -50,6 +50,7 @@
 #include <array>
 #include <cstdint>
 #include <map>
+#include <queue>
 #include <set>
 #include <unordered_map>
 #include <vector>
@@ -557,12 +558,14 @@ namespace gte
             }
 
             // BFS from border outward, propagating consistent orientation.
-            // Matches Geogram's SimplePriorityQueue strategy: process in
-            // decreasing border-distance order so interior triangles are visited
-            // after their neighbours have already been oriented.
-            std::vector<bool>    visited(n, false);
-            std::vector<int32_t> queue;
-            queue.reserve(n);
+            // Uses a priority queue (highest border distance first) matching
+            // Geogram's SimplePriorityQueue: interior facets are processed before
+            // boundary ones, so all inner neighbours are already oriented before
+            // border-adjacent facets are handled.  This reduces Möbius conflicts.
+            std::vector<bool> visited(n, false);
+
+            using PQEntry = std::pair<int8_t, int32_t>;  // {dist, facet}
+            std::priority_queue<PQEntry> pq;
 
             for (int32_t d = MAX_ITER; d >= 0; --d)
             {
@@ -571,21 +574,21 @@ namespace gte
                     if (!visited[f] && dist[f] == static_cast<int8_t>(d))
                     {
                         visited[f] = true;
-                        queue.push_back(static_cast<int32_t>(f));
-                        size_t head = 0;
-                        while (head < queue.size())
+                        pq.push({dist[f], static_cast<int32_t>(f)});
+                        while (!pq.empty())
                         {
-                            int32_t f1 = queue[head++];
+                            auto [dd, f1] = pq.top();
+                            pq.pop();
+                            (void)dd;
                             for (int e = 0; e < 3; ++e)
                             {
                                 int32_t f2 = adj[f1 * 3 + e];
                                 if (f2 < 0 || visited[static_cast<size_t>(f2)]) { continue; }
                                 visited[static_cast<size_t>(f2)] = true;
                                 PropagateOrientation(tris, adj, f2, visited);
-                                queue.push_back(f2);
+                                pq.push({dist[static_cast<size_t>(f2)], f2});
                             }
                         }
-                        queue.clear();
                     }
                 }
             }
