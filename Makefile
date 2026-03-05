@@ -27,7 +27,9 @@ TARGETS = test_mesh_repair test_full_algorithms test_rvd \
 all: $(TARGETS)
 
 # Basic functionality tests
-test_mesh_repair: $(TEST_DIR)/test_mesh_repair.cpp
+test_mesh_repair: $(TEST_DIR)/test_mesh_repair.cpp \
+                  GTE/Mathematics/MeshHoleFilling.h \
+                  GTE/Mathematics/LSCMParameterization.h
 	$(CXX) $(CXXFLAGS) -o test_mesh_repair $(TEST_DIR)/test_mesh_repair.cpp $(LDFLAGS)
 
 test_remesh: $(TEST_DIR)/test_remesh.cpp

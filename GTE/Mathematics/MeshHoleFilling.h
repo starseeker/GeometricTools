@@ -31,6 +31,7 @@
 #include <GTE/Mathematics/TriangulateCDT.h>
 #include <GTE/Mathematics/PolygonTree.h>
 #include <GTE/Mathematics/ArbitraryPrecision.h>
+#include <GTE/Mathematics/LSCMParameterization.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -47,9 +48,13 @@
 // ported from Geogram. It detects boundary loops in a triangle mesh and
 // fills them with new triangles using GTE's robust triangulation algorithms.
 //
-// Supports two triangulation methods:
-// - Ear Clipping (EC): Simple and fast, good for most holes
-// - Constrained Delaunay Triangulation (CDT): More robust, handles complex holes
+// Supports four triangulation methods (applied as a fallback chain):
+// - Ear Clipping (EC):     Project to best-fit plane, ear-clip in 2D  (fast)
+// - CDT:                   Project to best-fit plane, CDT in 2D       (robust)
+// - LSCM:                  Arc-length boundary-to-circle mapping + EC; always
+//                          succeeds for any simple closed 3D loop regardless
+//                          of planarity (second-to-last resort)
+// - EarClipping3D:         Ear clipping directly in 3D                (last resort)
 
 namespace gte
 {
@@ -60,9 +65,11 @@ namespace gte
         // Triangulation method for hole filling
         enum class TriangulationMethod
         {
-            EarClipping,    // Use ear clipping (fast, simple) - 2D projection
-            CDT,            // Use Constrained Delaunay Triangulation (robust, handles complex cases) - 2D projection
-            EarClipping3D   // Use 3D ear clipping (handles non-planar holes) - no projection
+            EarClipping,    // Project to best-fit plane, ear-clip in 2D (fast)
+            CDT,            // Project to best-fit plane, CDT in 2D (more robust)
+            LSCM,           // Arc-length circle map + EC in 2D; always succeeds for any simple
+                            // closed 3D boundary regardless of planarity (second-to-last resort)
+            EarClipping3D   // 3D ear clipping without any projection (last resort)
         };
 
         // Parameters for hole filling operations.
@@ -190,24 +197,24 @@ namespace gte
                 // Determine which method to use
                 TriangulationMethod actualMethod = params.method;
                 
-                // Check if we should use 3D method based on planarity
+                // When planarityThreshold is set and exceeded, skip the 2D projection
+                // methods and start from LSCM (which always produces a valid 2D polygon)
+                // rather than jumping straight to 3D.  LSCM will itself fall back to 3D
+                // if it also fails.
                 if (params.planarityThreshold > static_cast<Real>(0) &&
                     (params.method == TriangulationMethod::EarClipping ||
                      params.method == TriangulationMethod::CDT))
                 {
-                    // Compute hole normal and planarity
                     Vector3<Real> normal = ComputeHoleNormal(vertices, hole);
                     Real planarity = ComputeHolePlanarity(vertices, hole, normal);
-                    
-                    // Estimate hole size for relative threshold
                     Real holeSize = EstimateHoleSize(vertices, hole);
-                    Real relativeDeviation = holeSize > static_cast<Real>(0) ? 
+                    Real relativeDeviation = holeSize > static_cast<Real>(0) ?
                         planarity / holeSize : planarity;
-                    
+
                     if (relativeDeviation > params.planarityThreshold)
                     {
-                        // Hole is too non-planar, use 3D method
-                        actualMethod = TriangulationMethod::EarClipping3D;
+                        // Too non-planar for best-fit-plane projection; try LSCM first
+                        actualMethod = TriangulationMethod::LSCM;
                     }
                 }
                 
@@ -216,11 +223,26 @@ namespace gte
                 {
                     success = TriangulateHole3D(vertices, hole, newTriangles);
                 }
+                else if (actualMethod == TriangulationMethod::LSCM)
+                {
+                    // LSCM arc-length circle mapping: always succeeds for any simple loop
+                    success = TriangulateHoleLSCM(vertices, hole, newTriangles);
+                    // Fall back to 3D if LSCM somehow fails
+                    if (!success && params.autoFallback)
+                    {
+                        success = TriangulateHole3D(vertices, hole, newTriangles);
+                    }
+                }
                 else
                 {
+                    // EC or CDT: 2D projection methods
                     success = TriangulateHole(vertices, hole, newTriangles, actualMethod);
                     
-                    // Automatic fallback to 3D if 2D fails
+                    // Automatic fallback chain: LSCM → 3D
+                    if (!success && params.autoFallback)
+                    {
+                        success = TriangulateHoleLSCM(vertices, hole, newTriangles);
+                    }
                     if (!success && params.autoFallback)
                     {
                         success = TriangulateHole3D(vertices, hole, newTriangles);
@@ -603,6 +625,53 @@ namespace gte
             }
             
             return perimeter;
+        }
+
+        // Triangulate a hole using LSCM arc-length circle mapping.
+        //
+        // Maps the 3D boundary loop to a 2D polygon inscribed on a unit circle
+        // via arc-length parameterization, then triangulates in 2D using EC.
+        // Because a circle-inscribed polygon is always convex (vertices are laid
+        // out in arc-length order around the circle), EC never fails, making
+        // this method a reliable second-to-last resort before 3D ear clipping.
+        //
+        // The key advantage over orthographic projection: a non-planar boundary
+        // whose orthographic projection self-intersects still maps to a valid
+        // (non-self-intersecting) polygon under arc-length circle parameterization.
+        static bool TriangulateHoleLSCM(
+            std::vector<Vector3<Real>> const& vertices,
+            HoleBoundary const& hole,
+            std::vector<std::array<int32_t, 3>>& triangles)
+        {
+            if (hole.vertices.size() < 3)
+            {
+                return false;
+            }
+
+            // Map boundary to 2D circle positions via arc-length parameterization
+            std::vector<Vector2<Real>> uv;
+            if (!LSCMParameterization<Real>::MapBoundaryToCircle(vertices, hole.vertices, uv))
+            {
+                return false;
+            }
+
+            // uv is parallel to hole.vertices; build local triangles in UV space
+            std::vector<std::array<int32_t, 3>> localTriangles;
+            if (!TriangulateWithEC(uv, localTriangles))
+            {
+                return false;
+            }
+
+            // Map local indices back to global mesh indices
+            for (auto const& tri : localTriangles)
+            {
+                triangles.push_back({
+                    hole.vertices[tri[0]],
+                    hole.vertices[tri[1]],
+                    hole.vertices[tri[2]]
+                });
+            }
+            return true;
         }
 
         // Triangulate a hole working directly in 3D (no projection)
