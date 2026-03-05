@@ -21,7 +21,6 @@ Replace BRL-CAD's use of Geogram mesh processing algorithms with equivalent GTE-
 **Required Capabilities:**
 - ✅ Mesh repair (vertex deduplication, degenerate removal, topology validation)
 - ✅ Hole filling (with quality triangulation)
-- ✅ Surface reconstruction (Co3Ne algorithm)
 - ✅ CVT-based remeshing (isotropic)
 - ✅ **Anisotropic remeshing (COMPLETE - full 6D CVT implementation)**
 - ✅ Restricted Voronoi Diagram computation (3D and N-D)
@@ -153,6 +152,5 @@ From the initial project requirements:
 
 **Custom Implementations Only When Needed:**
 - Restricted Voronoi Diagram (no GTE equivalent)
-- Co3Ne manifold extraction (no GTE equivalent)
 - CVT optimization (specialized algorithm)
 

@@ -133,8 +133,8 @@ namespace gte
             // Step 4: Remove isolated vertices.
             RemoveIsolatedVertices(vertices, triangles);
 
-            // Step 5: RECONSTRUCT post-processing — used after surface reconstruction
-            // (e.g., Co3Ne).  Matches Geogram's MESH_REPAIR_RECONSTRUCT sequence:
+            // Step 5: RECONSTRUCT post-processing — used after surface reconstruction.
+            // Matches Geogram's MESH_REPAIR_RECONSTRUCT sequence:
             //   remove_small_connected_components (< 0.01% area, < 10 facets)
             //   fill_holes                        (< 5% area, < 500 edges)
             //   remove_small_connected_components (again)
@@ -142,8 +142,8 @@ namespace gte
             // NOTE: Geogram additionally runs topology repair (connect+reorient+split)
             // unconditionally in mesh_repair() (before the RECONSTRUCT block) and again
             // inside the RECONSTRUCT block.  GTE intentionally does NOT mirror this:
-            // SplitNonManifoldVertices on the GT mesh or on Co3Ne output increases
-            // boundary edges (intentional multi-body connections / RVC seams get split
+            // SplitNonManifoldVertices on the GT mesh increases boundary edges
+            // (intentional multi-body connections / RVC seams get split
             // into extra open loops).  Component removal + hole filling achieves the
             // right outcome without topology changes.
             if ((mode & static_cast<uint32_t>(RepairMode::RECONSTRUCT)) != 0

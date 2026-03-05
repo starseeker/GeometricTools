@@ -1,19 +1,22 @@
 # BRL-CAD's Geogram Usage Analysis
 
-**Date:** 2026-02-12  
+**Date:** 2026-02-12 (updated 2026-03-05)
 **Purpose:** Document BRL-CAD's specific use of Geogram to verify GTE provides all required capabilities
 
 ---
 
 ## Executive Summary
 
-Based on analysis of the `brlcad_user_code/` directory, BRL-CAD uses Geogram for **three specific purposes**:
+Based on analysis of the `brlcad_user_code/` directory, BRL-CAD uses Geogram for **two specific purposes**:
 
 1. **Mesh Repair** (`repair.cpp`) - Fix and fill holes in BoT meshes
-2. **Mesh Remeshing** (`remesh.cpp`) - Anisotropic remeshing for mesh quality improvement  
-3. **Surface Reconstruction** (`co3ne.cpp`) - Co3Ne point cloud to mesh conversion
+2. **Mesh Remeshing** (`remesh.cpp`) - Anisotropic remeshing for mesh quality improvement
 
-All three use cases are **fully supported** by the current GTE implementation.
+> **Note:** Co3Ne surface reconstruction (`co3ne.cpp`) has been removed from BRL-CAD use.
+> The Co3Ne algorithm proved unsuitable for BRL-CAD's requirements (it produces surface patches,
+> not closed manifold volumes). The GTE Co3Ne implementation has been removed accordingly.
+
+Both remaining use cases are **fully supported** by the current GTE implementation.
 
 ---
 
