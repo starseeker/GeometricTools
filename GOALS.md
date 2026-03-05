@@ -20,11 +20,20 @@ Replace BRL-CAD's use of Geogram mesh processing algorithms with equivalent GTE-
 
 **Required Capabilities:**
 - ✅ Mesh repair (vertex deduplication, degenerate removal, topology validation)
-- ✅ Hole filling (with quality triangulation)
-- ✅ Surface reconstruction (Co3Ne algorithm)
+- ✅ Hole filling (with quality triangulation: EC → CDT → LSCM → 3D fallback chain)
 - ✅ CVT-based remeshing (isotropic)
 - ✅ **Anisotropic remeshing (COMPLETE - full 6D CVT implementation)**
-- ✅ Restricted Voronoi Diagram computation (3D and N-D)
+- ✅ Restricted Voronoi Diagram (RVD) computation — required by the CVT remeshing pipeline
+
+> **Note on RVD:** The RVD infrastructure (RestrictedVoronoiDiagram.h, CVTN.h, SurfaceRVDN.h,
+> RestrictedVoronoiDiagramN.h, DelaunayNN.h, etc.) is **not** a Co3Ne artifact — it is the
+> core of the CVT Lloyd-relaxation loop used for both isotropic and anisotropic remeshing.
+> It should be retained.
+
+> **Note on LSCM:** LSCMParameterization.h provides an arc-length boundary-to-circle
+> mapping used as the second-to-last fallback during hole triangulation.  For a hole
+> boundary (no interior vertices) the full LSCM linear system reduces to the boundary
+> constraint alone, making this a lightweight but reliable step before 3D ear clipping.
 
 **Success Metric:** BRL-CAD can perform all mesh operations currently done with Geogram using GTE implementations instead.
 
@@ -152,7 +161,7 @@ From the initial project requirements:
 - ✅ **Exact Arithmetic:** Use GTE's BSNumber for robustness
 
 **Custom Implementations Only When Needed:**
-- Restricted Voronoi Diagram (no GTE equivalent)
-- Co3Ne manifold extraction (no GTE equivalent)
+- Restricted Voronoi Diagram (no GTE equivalent; required for CVT remeshing)
 - CVT optimization (specialized algorithm)
+- LSCM boundary arc-length parameterization (for non-projectable hole triangulation)
 

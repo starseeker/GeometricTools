@@ -16,28 +16,24 @@ GEOGRAM_LIB_DIR = $(GEOGRAM_BUILD_DIR)/lib
 GEOGRAM_LIBS = -L$(GEOGRAM_LIB_DIR) -lgeogram -Wl,-rpath,$(GEOGRAM_LIB_DIR)
 
 # Primary test targets
-TARGETS = test_mesh_repair test_co3ne test_full_algorithms test_rvd \
-          demo_rvd_cvt test_remesh_comparison test_co3ne_rvd test_newton_optimizer \
+TARGETS = test_mesh_repair test_full_algorithms test_rvd \
+          demo_rvd_cvt test_remesh_comparison test_newton_optimizer \
           test_rvd_performance stress_test test_threadpool test_parallel_rvd \
-          test_enhanced_manifold test_anisotropic_remesh test_delaunay6 test_cvt6d \
-          test_delaunay_n test_delaunay_nn test_rvd_n test_cvt_n test_phase4_integration \
-          test_anisotropic_end_to_end test_co3ne_stitcher test_ball_pivot_hole_filler \
-          test_ball_pivot_integration test_comprehensive_manifold_analysis test_progressive_merging \
-          test_parallel_nntree_queries test_co3ne_manifold_constrained \
-          test_patch_cluster_merger test_patch_cluster_xyz \
+          test_anisotropic_remesh test_delaunay6 test_cvt6d \
+          test_delaunay_n test_delaunay_nn test_rvd_n test_cvt_n \
+          test_anisotropic_end_to_end \
           compare_with_geogram
 
 all: $(TARGETS)
 
 # Basic functionality tests
-test_mesh_repair: $(TEST_DIR)/test_mesh_repair.cpp
+test_mesh_repair: $(TEST_DIR)/test_mesh_repair.cpp \
+                  GTE/Mathematics/MeshHoleFilling.h \
+                  GTE/Mathematics/LSCMParameterization.h
 	$(CXX) $(CXXFLAGS) -o test_mesh_repair $(TEST_DIR)/test_mesh_repair.cpp $(LDFLAGS)
 
 test_remesh: $(TEST_DIR)/test_remesh.cpp
 	$(CXX) $(CXXFLAGS) -o test_remesh $(TEST_DIR)/test_remesh.cpp $(LDFLAGS)
-
-test_co3ne: $(TEST_DIR)/test_co3ne.cpp
-	$(CXX) $(CXXFLAGS) -o test_co3ne $(TEST_DIR)/test_co3ne.cpp $(LDFLAGS)
 
 test_full_algorithms: $(TEST_DIR)/test_full_algorithms.cpp
 	$(CXX) $(CXXFLAGS) -o test_full_algorithms $(TEST_DIR)/test_full_algorithms.cpp $(LDFLAGS)
@@ -48,9 +44,6 @@ test_rvd: $(TEST_DIR)/test_rvd.cpp
 # Comparison and validation
 test_remesh_comparison: $(TEST_DIR)/test_remesh_comparison.cpp
 	$(CXX) $(CXXFLAGS) -o test_remesh_comparison $(TEST_DIR)/test_remesh_comparison.cpp $(LDFLAGS)
-
-test_co3ne_rvd: $(TEST_DIR)/test_co3ne_rvd.cpp
-	$(CXX) $(CXXFLAGS) -o test_co3ne_rvd $(TEST_DIR)/test_co3ne_rvd.cpp $(LDFLAGS)
 
 # GTE-only comparison (no geogram required, compares GTE output with a pre-generated geogram .obj)
 compare_with_geogram: $(TEST_DIR)/compare_with_geogram.cpp
@@ -87,7 +80,6 @@ test_geogram_comparison: $(TEST_DIR)/test_geogram_comparison.cpp \
                          GTE/Mathematics/MeshValidation.h \
                          GTE/Mathematics/MeshRemesh.h \
                          GTE/Mathematics/MeshAnisotropy.h \
-                         GTE/Mathematics/Co3Ne.h \
                          GTE/Mathematics/SurfaceRVDN.h \
                          GTE/Mathematics/CVTN.h \
                          GTE/Mathematics/DelaunayNN.h
@@ -160,11 +152,11 @@ test: test_mesh_repair
 	./test_mesh_repair $(TEST_DIR)/data/gt.obj $(TEST_DIR)/data/gt_repaired.obj
 
 # Run GTE vs Geogram comparison (requires test_geogram_comparison to be built first)
-# Runs all three use cases: repair+hole-filling, anisotropic remeshing, and Co3Ne reconstruction
+# Runs both use cases: repair+hole-filling and anisotropic remeshing
 # To build geogram automatically: make build_geogram test_geogram_comparison
 test_geogram: test_geogram_comparison
-	@echo "Running GTE vs Geogram comparison (repair, remesh, Co3Ne)..."
-	./test_geogram_comparison $(TEST_DIR)/data/gt.obj $(TEST_DIR)/data/r768_1000.xyz
+	@echo "Running GTE vs Geogram comparison (repair, remesh)..."
+	./test_geogram_comparison $(TEST_DIR)/data/gt.obj
 
 stress: stress_test
 	@echo "Running comprehensive stress tests..."
@@ -185,90 +177,6 @@ test_phase4_integration: $(TEST_DIR)/test_phase4_integration.cpp GTE/Mathematics
 test_anisotropic_end_to_end: $(TEST_DIR)/test_anisotropic_end_to_end.cpp GTE/Mathematics/MeshRemesh.h GTE/Mathematics/CVTN.h GTE/Mathematics/MeshAnisotropy.h GTE/Mathematics/SurfaceRVDN.h
 	$(CXX) $(CXXFLAGS) -o test_anisotropic_end_to_end $(TEST_DIR)/test_anisotropic_end_to_end.cpp $(LDFLAGS)
 
-# Co3Ne Manifold Stitcher test
-test_co3ne_stitcher: $(TEST_DIR)/test_co3ne_stitcher.cpp GTE/Mathematics/Co3NeManifoldStitcher.h GTE/Mathematics/Co3Ne.h GTE/Mathematics/MeshHoleFilling.h GTE/Mathematics/BallPivotReconstruction.h GTE/Mathematics/BallPivotReconstruction.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp
-	$(CXX) $(CXXFLAGS) -o test_co3ne_stitcher $(TEST_DIR)/test_co3ne_stitcher.cpp GTE/Mathematics/BallPivotReconstruction.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp $(LDFLAGS)
-
-# Topology-aware bridging test
-test_topology: $(TEST_DIR)/test_topology_bridging.cpp GTE/Mathematics/Co3NeManifoldStitcher.h GTE/Mathematics/Co3Ne.h GTE/Mathematics/BallPivotReconstruction.h GTE/Mathematics/BallPivotReconstruction.cpp
-	$(CXX) $(CXXFLAGS) -o test_topology $(TEST_DIR)/test_topology_bridging.cpp GTE/Mathematics/BallPivotReconstruction.cpp $(LDFLAGS)
-
-# Large input performance test
-test_large: $(TEST_DIR)/test_large_input.cpp GTE/Mathematics/Co3NeManifoldStitcher.h GTE/Mathematics/Co3Ne.h
-	$(CXX) $(CXXFLAGS) -o test_large $(TEST_DIR)/test_large_input.cpp GTE/Mathematics/BallPivotReconstruction.cpp $(LDFLAGS)
-
-# Hybrid Co3Ne + Poisson reconstruction test (requires PoissonRecon submodule)
-POISSON_INC = -I./PoissonRecon/Src
-POISSON_FLAGS = -fopenmp -Wno-deprecated -pthread
-test_hybrid: $(TEST_DIR)/test_hybrid_reconstruction.cpp GTE/Mathematics/HybridReconstruction.h GTE/Mathematics/PoissonWrapper.h GTE/Mathematics/Co3Ne.h
-	$(CXX) $(CXXFLAGS) $(POISSON_INC) $(POISSON_FLAGS) -o test_hybrid $(TEST_DIR)/test_hybrid_reconstruction.cpp GTE/Mathematics/BallPivotReconstruction.cpp $(LDFLAGS) -lgomp
-
-# Hybrid validation test - comprehensive validation of all merge strategies
-test_hybrid_validation: $(TEST_DIR)/test_hybrid_validation.cpp GTE/Mathematics/HybridReconstruction.h GTE/Mathematics/PoissonWrapper.h GTE/Mathematics/Co3Ne.h
-	$(CXX) $(CXXFLAGS) $(POISSON_INC) $(POISSON_FLAGS) -o test_hybrid_validation $(TEST_DIR)/test_hybrid_validation.cpp GTE/Mathematics/BallPivotReconstruction.cpp $(LDFLAGS) -lgomp
-
-# Ball Pivot Mesh Hole Filler test
-test_ball_pivot_hole_filler: $(TEST_DIR)/test_ball_pivot_hole_filler.cpp GTE/Mathematics/BallPivotMeshHoleFiller.h GTE/Mathematics/BallPivotMeshHoleFiller.cpp
-	$(CXX) $(CXXFLAGS) -o test_ball_pivot_hole_filler $(TEST_DIR)/test_ball_pivot_hole_filler.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp $(LDFLAGS)
-
-# Ball Pivot Integration test (with Co3Ne)
-test_ball_pivot_integration: $(TEST_DIR)/test_ball_pivot_integration.cpp GTE/Mathematics/BallPivotMeshHoleFiller.h GTE/Mathematics/BallPivotMeshHoleFiller.cpp GTE/Mathematics/Co3NeManifoldStitcher.h GTE/Mathematics/Co3Ne.h
-	$(CXX) $(CXXFLAGS) -o test_ball_pivot_integration $(TEST_DIR)/test_ball_pivot_integration.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp GTE/Mathematics/BallPivotReconstruction.cpp $(LDFLAGS)
-
-# Iterative component bridging test
-test_iterative_bridging: $(TEST_DIR)/test_iterative_bridging.cpp GTE/Mathematics/BallPivotMeshHoleFiller.h GTE/Mathematics/BallPivotMeshHoleFiller.cpp GTE/Mathematics/Co3Ne.h
-	$(CXX) $(CXXFLAGS) -o test_iterative_bridging $(TEST_DIR)/test_iterative_bridging.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp GTE/Mathematics/BallPivotReconstruction.cpp $(LDFLAGS)
-
-# Manifold Closure test with r768.xyz
-test_manifold_closure_r768: $(TEST_DIR)/test_manifold_closure_r768.cpp GTE/Mathematics/BallPivotMeshHoleFiller.h GTE/Mathematics/BallPivotMeshHoleFiller.cpp GTE/Mathematics/Co3NeManifoldStitcher.h GTE/Mathematics/Co3Ne.h
-	$(CXX) $(CXXFLAGS) -o test_manifold_closure_r768 $(TEST_DIR)/test_manifold_closure_r768.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp GTE/Mathematics/BallPivotReconstruction.cpp $(LDFLAGS)
-
-# Comprehensive manifold analysis tool
-test_comprehensive_manifold_analysis: $(TEST_DIR)/test_comprehensive_manifold_analysis.cpp GTE/Mathematics/BallPivotMeshHoleFiller.h GTE/Mathematics/BallPivotMeshHoleFiller.cpp GTE/Mathematics/Co3Ne.h
-	$(CXX) $(CXXFLAGS) -o test_comprehensive_manifold_analysis $(TEST_DIR)/test_comprehensive_manifold_analysis.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp GTE/Mathematics/BallPivotReconstruction.cpp $(LDFLAGS)
-
-
-# UV unwrapping assessment test
-test_uv_unwrapping_assessment: $(TEST_DIR)/test_uv_unwrapping_assessment.cpp GTE/Mathematics/BallPivotMeshHoleFiller.h GTE/Mathematics/BallPivotMeshHoleFiller.cpp GTE/Mathematics/LSCMParameterization.h GTE/Mathematics/Co3Ne.h
-	$(CXX) $(CXXFLAGS) -o test_uv_unwrapping_assessment $(TEST_DIR)/test_uv_unwrapping_assessment.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp GTE/Mathematics/BallPivotReconstruction.cpp $(LDFLAGS)
-
-
-# Manifold Production Pipeline test - comprehensive pipeline with UV unwrapping
-test_manifold_production_pipeline: $(TEST_DIR)/test_manifold_production_pipeline.cpp GTE/Mathematics/ManifoldProductionPipeline.h GTE/Mathematics/BallPivotMeshHoleFiller.h GTE/Mathematics/BallPivotMeshHoleFiller.cpp GTE/Mathematics/LSCMParameterization.h GTE/Mathematics/Co3Ne.h
-	$(CXX) $(CXXFLAGS) -o test_manifold_production_pipeline $(TEST_DIR)/test_manifold_production_pipeline.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp GTE/Mathematics/BallPivotReconstruction.cpp $(LDFLAGS)
-
-# Progressive component merging test
-test_progressive_merging: $(TEST_DIR)/test_progressive_merging.cpp GTE/Mathematics/Co3NeManifoldStitcher.h GTE/Mathematics/BallPivotReconstruction.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp
-	$(CXX) $(CXXFLAGS) -o test_progressive_merging $(TEST_DIR)/test_progressive_merging.cpp GTE/Mathematics/BallPivotReconstruction.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp $(LDFLAGS)
-
-# Bridging comparison analysis
-test_bridging_comparison: $(TEST_DIR)/test_bridging_comparison.cpp GTE/Mathematics/Co3NeManifoldStitcher.h
-	$(CXX) $(CXXFLAGS) -o test_bridging_comparison $(TEST_DIR)/test_bridging_comparison.cpp $(LDFLAGS)
-
 # BoundaryPolygonRTree correctness and performance test
 test_boundary_polygon_rtree: $(TEST_DIR)/test_boundary_polygon_rtree.cpp GTE/Mathematics/BoundaryPolygonRTree.h
 	$(CXX) $(CXXFLAGS) -o test_boundary_polygon_rtree $(TEST_DIR)/test_boundary_polygon_rtree.cpp $(LDFLAGS)
-
-# Performance benchmark test
-test_performance_benchmark: $(TEST_DIR)/test_performance_benchmark.cpp GTE/Mathematics/Co3NeManifoldStitcher.h GTE/Mathematics/Co3Ne.h GTE/Mathematics/BallPivotReconstruction.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp
-	$(CXX) $(CXXFLAGS) -o test_performance_benchmark $(TEST_DIR)/test_performance_benchmark.cpp GTE/Mathematics/BallPivotReconstruction.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp $(LDFLAGS)
-
-# Bottleneck analysis test
-test_bottleneck: $(TEST_DIR)/test_bottleneck.cpp GTE/Mathematics/Co3NeManifoldStitcher.h GTE/Mathematics/Co3Ne.h GTE/Mathematics/BallPivotReconstruction.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp
-	$(CXX) $(CXXFLAGS) -o test_bottleneck $(TEST_DIR)/test_bottleneck.cpp GTE/Mathematics/BallPivotReconstruction.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp $(LDFLAGS)
-
-# Parallel NNTree query correctness test
-test_parallel_nntree_queries: $(TEST_DIR)/test_parallel_nntree_queries.cpp GTE/Mathematics/Co3NeManifoldStitcher.h GTE/Mathematics/BallPivotMeshHoleFiller.cpp
-	$(CXX) $(CXXFLAGS) $(PTHREAD) -o test_parallel_nntree_queries $(TEST_DIR)/test_parallel_nntree_queries.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp $(LDFLAGS)
-
-# Manifold-constrained triangle generation test
-test_co3ne_manifold_constrained: $(TEST_DIR)/test_co3ne_manifold_constrained.cpp GTE/Mathematics/Co3Ne.h
-	$(CXX) $(CXXFLAGS) -o test_co3ne_manifold_constrained $(TEST_DIR)/test_co3ne_manifold_constrained.cpp $(LDFLAGS)
-
-# Patch cluster merger test
-test_patch_cluster_merger: $(TEST_DIR)/test_patch_cluster_merger.cpp GTE/Mathematics/PatchClusterMerger.h GTE/Mathematics/Co3NeManifoldStitcher.h GTE/Mathematics/Co3Ne.h GTE/Mathematics/BallPivotReconstruction.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp
-	$(CXX) $(CXXFLAGS) -o test_patch_cluster_merger $(TEST_DIR)/test_patch_cluster_merger.cpp GTE/Mathematics/BallPivotReconstruction.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp $(LDFLAGS)
-
-# XYZ pipeline integration test (PatchClusterMerger + Co3Ne)
-test_patch_cluster_xyz: $(TEST_DIR)/test_patch_cluster_xyz.cpp GTE/Mathematics/PatchClusterMerger.h GTE/Mathematics/Co3Ne.h GTE/Mathematics/Co3NeManifoldStitcher.h GTE/Mathematics/BallPivotReconstruction.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp
-	$(CXX) $(CXXFLAGS) -o test_patch_cluster_xyz $(TEST_DIR)/test_patch_cluster_xyz.cpp GTE/Mathematics/BallPivotReconstruction.cpp GTE/Mathematics/BallPivotMeshHoleFiller.cpp $(LDFLAGS)

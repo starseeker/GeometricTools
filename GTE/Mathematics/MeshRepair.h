@@ -111,6 +111,63 @@ namespace gte
         // vertices: vertex positions (3 coordinates per vertex)
         // triangles: triangle indices (3 vertex indices per triangle)
         // params: repair parameters
+        //
+        // ── Comparison with Geogram mesh_repair() ────────────────────────────
+        //
+        // Geogram's mesh_repair() sequence (mesh_repair.cpp, commit f5abd69):
+        //
+        //  G1.  mesh_colocate_vertices_no_check   if COLOCATE
+        //  G2.  M.facets.triangulate()             if TRIANGULATE
+        //  G3.  mesh_remove_bad_facets_no_check    always (degenerate + dup_f)
+        //  G4.  repair_connect_facets(M)           ALWAYS — build face adjacency
+        //  G5.  repair_reorient_facets_anti_moebius(M) ALWAYS — consistent winding
+        //  G6.  repair_split_non_manifold_vertices(M)  ALWAYS — topological split
+        //  G7.  if RECONSTRUCT:
+        //         remove_small_connected_components  (< min_comp_area / min_comp_facets)
+        //         fill_holes                          (< max_hole_area / max_hole_edges)
+        //         remove_small_connected_components   (again)
+        //         repair_connect_facets               (again)
+        //         repair_reorient_facets_anti_moebius (again)
+        //         repair_split_non_manifold_vertices  (again)
+        //  G8.  orient_normals(M)                  if dimension >= 3
+        //
+        // GTE Repair() sequence and mapping:
+        //
+        //  Step 1 = G1: ColocateVertices               if COLOCATE ✓
+        //  Step 2 = G2: (no-op, GTE is always triangulated) ✓
+        //  Step 3 = G3: RemoveBadFacets                always ✓
+        //  Step 4 = G4–G6: ** intentionally omitted ** (see note below)
+        //  Step 5a= G7 (first remove_small):           if RECONSTRUCT ✓
+        //  Step 5b= G7 (fill_holes):                   if RECONSTRUCT ✓
+        //  Step 5c= G7 (second remove_small):          if RECONSTRUCT ✓
+        //  Step 5d= G7 (second connect+reorient+split): ** omitted ** (see note)
+        //  Step 7 = G8: OrientNormals                  always ✓
+        //
+        //  Isolated vertex removal (RemoveIsolatedVertices, Step 4) is a GTE
+        //  addition not present in Geogram's mesh_repair(); Geogram removes them
+        //  indirectly through mesh element deletion routines.
+        //
+        // ** Note on G4–G6 (connect + reorient + split non-manifold) **
+        //
+        //  GTE deliberately does NOT call ConnectFacets / ReorientFacetsAntiMoebius
+        //  / SplitNonManifoldVertices unconditionally.  These functions are
+        //  implemented as public static methods (see below in this file) for
+        //  callers that need them explicitly.
+        //
+        //  Reason: for GTE's primary use case (repairing BRL-CAD solid geometry
+        //  meshes with intentional multi-body topology), calling
+        //  SplitNonManifoldVertices unconditionally causes boundary edges shared
+        //  between two bodies to be duplicated into extra open loops.  The
+        //  component-removal + hole-filling sequence (G7) already produces the
+        //  correct manifold outcome without disrupting legitimate shared topology.
+        //
+        //  Callers that need Geogram-equivalent unconditional topology repair
+        //  can call these directly in sequence:
+        //    std::vector<int32_t> adj;
+        //    MeshRepair<Real>::ConnectFacets(triangles, adj);
+        //    MeshRepair<Real>::ReorientFacetsAntiMoebius(vertices, triangles, adj);
+        //    MeshRepair<Real>::SplitNonManifoldVertices(vertices, triangles, adj);
+        // ─────────────────────────────────────────────────────────────────────
         static void Repair(
             std::vector<Vector3<Real>>& vertices,
             std::vector<std::array<int32_t, 3>>& triangles,
@@ -118,34 +175,28 @@ namespace gte
         {
             uint32_t mode = static_cast<uint32_t>(params.mode);
 
-            // Step 1: Colocate vertices if requested.
+            // Step 1: Colocate vertices if requested (Geogram G1).
             if (mode & static_cast<uint32_t>(RepairMode::COLOCATE))
             {
                 ColocateVertices(vertices, triangles, params.epsilon);
             }
 
-            // Step 2: Triangulate if needed (GTE only handles triangles; no-op).
+            // Step 2: Triangulate if needed — no-op; GTE always works with triangles.
 
-            // Step 3: Remove bad facets (degenerate and duplicates).
+            // Step 3: Remove degenerate and duplicate facets (Geogram G3).
             bool checkDuplicates = (mode & static_cast<uint32_t>(RepairMode::DUP_F)) != 0;
             RemoveBadFacets(vertices, triangles, checkDuplicates);
 
-            // Step 4: Remove isolated vertices.
+            // Step 4: Remove isolated vertices (GTE addition; not in Geogram Repair()).
             RemoveIsolatedVertices(vertices, triangles);
 
-            // Step 5: RECONSTRUCT post-processing — used after surface reconstruction
-            // (e.g., Co3Ne).  Matches Geogram's MESH_REPAIR_RECONSTRUCT sequence:
+            // Step 5: RECONSTRUCT post-processing (Geogram G7).
+            // Matches Geogram's sequence:
             //   remove_small_connected_components (< 0.01% area, < 10 facets)
             //   fill_holes                        (< 5% area, < 500 edges)
             //   remove_small_connected_components (again)
-            //
-            // NOTE: Geogram additionally runs topology repair (connect+reorient+split)
-            // unconditionally in mesh_repair() (before the RECONSTRUCT block) and again
-            // inside the RECONSTRUCT block.  GTE intentionally does NOT mirror this:
-            // SplitNonManifoldVertices on the GT mesh or on Co3Ne output increases
-            // boundary edges (intentional multi-body connections / RVC seams get split
-            // into extra open loops).  Component removal + hole filling achieves the
-            // right outcome without topology changes.
+            // The second connect+reorient+split within Geogram's RECONSTRUCT
+            // block is omitted for the same reason as G4-G6 (see note above).
             if ((mode & static_cast<uint32_t>(RepairMode::RECONSTRUCT)) != 0
                 && !triangles.empty())
             {
@@ -165,7 +216,7 @@ namespace gte
                     return total;
                 };
 
-                // 5a: remove small components
+                // 5a: remove small components (Geogram: first remove_small_connected_components)
                 {
                     Real Marea = computeTotalArea();
                     MeshPreprocessing<Real>::RemoveSmallComponents(
@@ -174,7 +225,7 @@ namespace gte
                         10);                                 // < 10 facets
                 }
 
-                // 5b: fill small holes
+                // 5b: fill small holes (Geogram: fill_holes)
                 {
                     Real Marea = computeTotalArea();
                     typename MeshHoleFilling<Real>::Parameters hp;
@@ -183,7 +234,7 @@ namespace gte
                     MeshHoleFilling<Real>::FillHoles(vertices, triangles, hp);
                 }
 
-                // 5c: remove small components again (may appear after hole filling)
+                // 5c: remove small components again (Geogram: second remove_small_connected_components)
                 {
                     Real Marea = computeTotalArea();
                     MeshPreprocessing<Real>::RemoveSmallComponents(
@@ -193,7 +244,7 @@ namespace gte
                 }
             }
 
-            // Step 7: Orient normals consistently per connected component.
+            // Step 7: Orient normals consistently per connected component (Geogram G8).
             if (!triangles.empty())
             {
                 MeshPreprocessing<Real>::OrientNormals(vertices, triangles);
@@ -403,6 +454,16 @@ namespace gte
         // Direct translation of Geogram's mesh_repair.cpp functions:
         //   repair_connect_facets, repair_reorient_facets_anti_moebius,
         //   repair_split_non_manifold_vertices.
+        //
+        // These are NOT called by Repair() by default (see the detailed
+        // comment in Repair() above), but are exposed here for callers that
+        // need the full Geogram-equivalent topology-repair sequence.  Call
+        // them in order:
+        //
+        //   std::vector<int32_t> adj;
+        //   MeshRepair<Real>::ConnectFacets(triangles, adj);
+        //   MeshRepair<Real>::ReorientFacetsAntiMoebius(vertices, triangles, adj);
+        //   MeshRepair<Real>::SplitNonManifoldVertices(vertices, triangles, adj);
         // ─────────────────────────────────────────────────────────────────────
 
         // Build per-facet adjacency adj[f*3+e] for the directed half-edge

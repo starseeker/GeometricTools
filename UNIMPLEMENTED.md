@@ -43,10 +43,8 @@
 - ✅ Some parallel RVD computation
 
 **What Could Be Enhanced:**
-- Parallel Co3Ne normal estimation
-- Parallel triangle generation
-- Full parallel RVD
-- Parallel Lloyd iterations
+- Parallel RVD computation
+- Full parallel Lloyd iterations
 
 **Priority:** HIGH - large meshes are likely to be encountered at some point
 
@@ -54,8 +52,6 @@
 
 1. **Code Comments to Update**
    - MeshAnisotropy.h line 59: Outdated TODO in comment block
-   - Co3Ne.h line 435: "for now" comment  
-   - Co3NeManifoldExtractor.h line 834: "simplified" note on minor helper
 
 2. **RVD Default Paths**
    - Need to verify which RVD version is used by default
@@ -79,7 +75,6 @@
 
 **What Could Be Enhanced:**
 - Remove unneeded/obsolete tests, make sure all valid ones work.  Enhance to address coverage of any issues like the MeshRemesh Bug
-- The repository has an xyz point file with normal data at r768.xyz - confirm that the Co3Ne algorithm can produce a manifold output mesh from that input point set (the automatic enhanced version should be able to adjust as needed to build up a final output manifold even if a fixed r parameter cannot - if it *doesn't* work, we need to isolate why and figure out how to fix it.  r768.xyz is representative of the data we will get from BRL-CAD to feed Co3Ne-enhanced to get manifolds - if it can't handle that then we don't have a viable solution.  **Priority:** HIGH
 
 ### Non-features
 

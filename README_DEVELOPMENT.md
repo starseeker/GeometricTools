@@ -27,8 +27,10 @@ GeometricTools/
 │       ├── MeshRepair.h         # Mesh repair operations
 │       ├── MeshHoleFilling.h    # Hole filling algorithms
 │       ├── MeshPreprocessing.h  # Mesh preprocessing
-│       ├── Co3NeFull.h          # Surface reconstruction
-│       ├── MeshRemeshFull.h     # CVT remeshing
+│       ├── MeshRemesh.h         # CVT remeshing
+│       ├── MeshAnisotropy.h     # Anisotropic remeshing support
+│       ├── SurfaceRVDN.h        # N-D surface RVD
+│       ├── CVTN.h               # N-D CVT
 │       ├── RestrictedVoronoiDiagram.h  # RVD base
 │       ├── RestrictedVoronoiDiagramOptimized.h  # Optimized RVD
 │       ├── CVTOptimizer.h       # CVT optimization
@@ -171,41 +173,12 @@ params.maxEdges = std::numeric_limits<size_t>::max();
 MeshHoleFilling<double>::FillHoles(vertices, triangles, params);
 ```
 
-### 3. Co3Ne.h
-
-**Purpose:** Surface reconstruction from point clouds
-
-**Key Classes:**
-- `Co3NeFull<Real>` - Main Co3Ne class
-
-**Algorithm Steps:**
-1. **Normal Estimation** - PCA on k-nearest neighbors
-2. **Normal Orientation** - Propagate consistent orientation
-3. **Triangle Generation** - Co-cone based triangle creation
-4. **Manifold Extraction** - Extract clean manifold surface
-
-**Usage Example:**
-```cpp
-#include <GTE/Mathematics/Co3NeFull.h>
-
-std::vector<Vector3<double>> points;
-// Load point cloud...
-
-Co3NeFull<double> co3ne;
-co3ne.kNeighbors = 12;  // Number of neighbors for PCA
-
-auto mesh = co3ne.Reconstruct(points);
-
-std::vector<Vector3<double>> vertices = mesh.vertices;
-std::vector<std::array<int32_t, 3>> triangles = mesh.triangles;
-```
-
-### 4. MeshRemeshFull.h & CVTOptimizer.h
+### 3. MeshRemesh.h & CVTOptimizer.h
 
 **Purpose:** CVT-based mesh remeshing
 
 **Key Classes:**
-- `MeshRemeshFull<Real>` - Main remeshing class
+- `MeshRemesh<Real>` - Main remeshing class
 - `CVTOptimizer<Real>` - CVT optimization engine
 
 **Algorithm Steps:**
@@ -217,22 +190,21 @@ std::vector<std::array<int32_t, 3>> triangles = mesh.triangles;
 
 **Usage Example:**
 ```cpp
-#include <GTE/Mathematics/MeshRemeshFull.h>
+#include <GTE/Mathematics/MeshRemesh.h>
 
 std::vector<Vector3<double>> vertices;
 std::vector<std::array<int32_t, 3>> triangles;
 // Load mesh...
 
-MeshRemeshFull<double>::Parameters params;
-params.numSamples = 1000;        // Target vertex count
-params.numLloydIter = 10;        // Lloyd iterations
-params.numNewtonIter = 5;        // Newton iterations
-params.projectToSurface = true;  // Project to original
+MeshRemesh<double>::Parameters params;
+params.targetVertexCount = 1000;  // Target vertex count
+params.lloydIterations   = 10;    // Lloyd iterations
+params.projectToSurface  = true;  // Project to original
 
-auto remeshed = MeshRemeshFull<double>::Remesh(vertices, triangles, params);
+MeshRemesh<double>::RemeshCVT(vertices, triangles, params);
 ```
 
-### 5. RestrictedVoronoiDiagram.h
+### 4. RestrictedVoronoiDiagram.h
 
 **Purpose:** Compute Voronoi diagram restricted to surface
 

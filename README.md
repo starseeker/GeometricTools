@@ -19,7 +19,6 @@ This repository includes GTE-style implementations of advanced mesh processing a
 
 - **Mesh Repair:** Topology validation, vertex deduplication, degenerate removal
 - **Hole Filling:** Multiple triangulation methods (Ear Clipping, Constrained Delaunay, 3D)
-- **Surface Reconstruction:** Co3Ne algorithm for point cloud reconstruction
 - **CVT Remeshing:** Centroidal Voronoi Tessellation-based remeshing
 - **Restricted Voronoi Diagram:** Surface-restricted Voronoi computation
 
@@ -29,7 +28,6 @@ This repository includes GTE-style implementations of advanced mesh processing a
 - [UNIMPLEMENTED.md](UNIMPLEMENTED.md) - Remaining features
 - [README_DEVELOPMENT.md](README_DEVELOPMENT.md) - Developer guide
 - [GTE_MESH_PROCESSING_README.md](GTE_MESH_PROCESSING_README.md) - Quick start guide
-- [docs/MANIFOLD_CLOSURE_SUMMARY.md](docs/MANIFOLD_CLOSURE_SUMMARY.md) - Co3Ne manifold closure implementation
 - [tests/README.md](tests/README.md) - Test suite documentation
 
 **Quick Start:**

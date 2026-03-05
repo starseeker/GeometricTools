@@ -1,7 +1,6 @@
 // Test program for full Geogram algorithm implementations
-// Tests Co3Ne and MeshRemesh
+// Tests MeshRemesh
 
-#include <GTE/Mathematics/Co3Ne.h>
 #include <GTE/Mathematics/MeshRemesh.h>
 #include <GTE/Mathematics/MeshValidation.h>
 #include <fstream>
@@ -83,53 +82,6 @@ bool SaveOBJ(std::string const& filename,
     return true;
 }
 
-// Test Co3Ne
-void TestCo3Ne()
-{
-    std::cout << "\n===== Testing Co3Ne =====" << std::endl;
-
-    // Create a simple point cloud (cube corners with normals)
-    std::vector<Vector3<double>> points = {
-        {0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {1.0, 1.0, 0.0}, {0.0, 1.0, 0.0},
-        {0.0, 0.0, 1.0}, {1.0, 0.0, 1.0}, {1.0, 1.0, 1.0}, {0.0, 1.0, 1.0},
-        {0.5, 0.5, 0.0}, {0.5, 0.5, 1.0}, {0.0, 0.5, 0.5}, {1.0, 0.5, 0.5},
-        {0.5, 0.0, 0.5}, {0.5, 1.0, 0.5}
-    };
-
-    std::vector<Vector3<double>> outVertices;
-    std::vector<std::array<int32_t, 3>> outTriangles;
-
-    Co3Ne<double>::Parameters params;
-    // kNeighbors=10: Reasonable for small point clouds (14 points)
-    // Fewer neighbors might not provide enough local structure
-    params.kNeighbors = 10;
-    params.orientNormals = true;
-    // maxNormalAngle=80: Permissive angle for synthetic cube data
-    // Stricter angles (e.g., 45-60) better for smooth surfaces
-    params.maxNormalAngle = 80.0;
-
-    bool success = Co3Ne<double>::Reconstruct(points, outVertices, outTriangles, params);
-
-    if (success)
-    {
-        std::cout << "Co3Ne SUCCESS: Generated " << outTriangles.size() << " triangles" << std::endl;
-        SaveOBJ("test_co3ne_full_output.obj", outVertices, outTriangles);
-
-        // Validate mesh
-        MeshValidation<double> validation;
-        auto result = validation.Validate(outVertices, outTriangles);
-        std::cout << "Validation: " << (result.isValid ? "VALID" : "INVALID") << std::endl;
-        if (!result.isValid)
-        {
-            std::cout << "  - " << result.errorMessage << std::endl;
-        }
-    }
-    else
-    {
-        std::cout << "Co3Ne FAILED" << std::endl;
-    }
-}
-
 // Test MeshRemesh
 void TestMeshRemesh()
 {
@@ -209,9 +161,8 @@ void TestMeshRemesh()
 int main(int argc, char* argv[])
 {
     std::cout << "===== Full Geogram Algorithms Test =====" << std::endl;
-    std::cout << "Testing Co3Ne and MeshRemesh implementations" << std::endl;
+    std::cout << "Testing MeshRemesh implementation" << std::endl;
 
-    TestCo3Ne();
     TestMeshRemesh();
 
     std::cout << "\n===== Tests Complete =====" << std::endl;
