@@ -113,7 +113,29 @@ namespace gte
             {
                 return false;
             }
-            
+
+            // For N > 3 (anisotropic), estimate the normal scale factor from the
+            // sites' dims 3-(N-1) magnitudes.  Geogram's set_anisotropy stores
+            // (x, y, z, s*bbox_diag*nx, ...) so the magnitude of dims 3-5 equals
+            // s*bbox_diag for unit normals.
+            Real normalScale = static_cast<Real>(0);
+            if constexpr (N > 3)
+            {
+                for (size_t i = 0; i < mNumSites; ++i)
+                {
+                    Real normSq = static_cast<Real>(0);
+                    for (size_t d = 3; d < N; ++d)
+                    {
+                        normSq += mSites[i][d] * mSites[i][d];
+                    }
+                    normalScale += std::sqrt(normSq);
+                }
+                if (mNumSites > 0)
+                {
+                    normalScale /= static_cast<Real>(mNumSites);
+                }
+            }
+
             // Initialize accumulators for each site
             std::vector<PointN> weightedSum(mNumSites);
             std::vector<Real> totalArea(mNumSites, static_cast<Real>(0));
@@ -136,30 +158,50 @@ namespace gte
                 
                 // Compute triangle centroid in 3D
                 Point3 triCentroid = (v0 + v1 + v2) / static_cast<Real>(3);
+
+                // Build the full N-dimensional query for this triangle centroid.
+                // Dims 0-2: 3D position.  Dims 3-5: scaled unit normal of the triangle.
+                // This matches Geogram's anisotropic embedding where each surface point
+                // is represented as (x, y, z, s*nx, s*ny, s*nz).
+                PointN queryN;
+                queryN[0] = triCentroid[0];
+                queryN[1] = triCentroid[1];
+                queryN[2] = triCentroid[2];
+                if constexpr (N > 3)
+                {
+                    // Compute unit normal of the triangle
+                    Point3 edge1 = v1 - v0;
+                    Point3 edge2 = v2 - v0;
+                    Point3 rawNormal = Cross(edge1, edge2);
+                    Real nlen = Length(rawNormal);
+                    if (nlen > static_cast<Real>(1e-10))
+                    {
+                        rawNormal /= nlen;
+                    }
+                    for (size_t d = 3; d < N; ++d)
+                    {
+                        // Dims 3, 4, 5 store the three components of the scaled normal.
+                        // Any higher dims (N > 6) are set to zero.
+                        queryN[d] = (d < 6) ? rawNormal[d - 3] * normalScale
+                                            : static_cast<Real>(0);
+                    }
+                }
                 
-                // Find nearest site to triangle centroid
-                // This assigns the triangle to a Voronoi cell
-                int32_t nearestSite = FindNearestSite(triCentroid);
+                // Find nearest site using full N-dimensional distance
+                int32_t nearestSite = FindNearestSiteND(queryN);
                 
                 if (nearestSite >= 0)
                 {
                     // Compute triangle area
                     Real area = ComputeTriangleArea(v0, v1, v2);
                     
-                    // Accumulate weighted position
-                    // The centroid is the area-weighted average of triangle centroids
-                    // in the N-dimensional space
-                    
-                    // For first 3 dimensions, use 3D triangle centroid
-                    weightedSum[nearestSite][0] += triCentroid[0] * area;
-                    weightedSum[nearestSite][1] += triCentroid[1] * area;
-                    weightedSum[nearestSite][2] += triCentroid[2] * area;
-                    
-                    // For dimensions > 3, use site's own values
-                    // (these represent anisotropic metric, not spatial coordinates)
-                    for (size_t d = 3; d < N; ++d)
+                    // Accumulate weighted position (area-weighted centroid in N-D).
+                    // Dims 0-2: 3D surface position.
+                    // Dims 3-5: scaled surface normal at this triangle (not the site's
+                    // own normal) — produces the correct anisotropic CVT centroid.
+                    for (size_t d = 0; d < N; ++d)
                     {
-                        weightedSum[nearestSite][d] += mSites[nearestSite][d] * area;
+                        weightedSum[nearestSite][d] += queryN[d] * area;
                     }
                     
                     totalArea[nearestSite] += area;
@@ -223,30 +265,19 @@ namespace gte
         }
         
     private:
-        // Find nearest site to a 3D point using N-dimensional distance
-        int32_t FindNearestSite(Point3 const& point3D) const
+        // Find nearest site to a full N-dimensional query point.
+        // This is the correct function to use — it computes distance in the
+        // full N-dimensional metric (position + scaled normal for N=6).
+        int32_t FindNearestSiteND(PointN const& queryN) const
         {
             if (mNumSites == 0)
             {
                 return -1;
             }
-            
-            // Create N-dimensional query point
-            // First 3 dimensions are the 3D position
-            // Remaining dimensions are 0 (or could use surface normal if available)
-            PointN queryN;
-            queryN[0] = point3D[0];
-            queryN[1] = point3D[1];
-            queryN[2] = point3D[2];
-            for (size_t d = 3; d < N; ++d)
-            {
-                queryN[d] = static_cast<Real>(0);
-            }
-            
-            // Find nearest site using N-dimensional distance
+
             int32_t nearest = 0;
             Real minDist = DistanceSquared(queryN, mSites[0]);
-            
+
             for (size_t i = 1; i < mNumSites; ++i)
             {
                 Real dist = DistanceSquared(queryN, mSites[i]);
@@ -256,8 +287,29 @@ namespace gte
                     nearest = static_cast<int32_t>(i);
                 }
             }
-            
+
             return nearest;
+        }
+
+        // Find nearest site to a 3D point using only 3D distance (ignoring dims 3+).
+        // Used by ComputeCellAreas when an exact surface normal is not available.
+        int32_t FindNearestSite(Point3 const& point3D) const
+        {
+            if (mNumSites == 0)
+            {
+                return -1;
+            }
+
+            PointN queryN;
+            queryN[0] = point3D[0];
+            queryN[1] = point3D[1];
+            queryN[2] = point3D[2];
+            for (size_t d = 3; d < N; ++d)
+            {
+                queryN[d] = static_cast<Real>(0);
+            }
+
+            return FindNearestSiteND(queryN);
         }
         
         // Compute squared N-dimensional distance

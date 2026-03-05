@@ -11,7 +11,8 @@ TEST_DIR = tests
 # Geogram submodule paths (used by test_geogram_comparison)
 GEOGRAM_SRC = geogram/src/lib
 GEOGRAM_INC = -I$(GEOGRAM_SRC) -I$(GEOGRAM_SRC)/geogram/third_party/OpenNL
-GEOGRAM_LIB_DIR = /tmp/geogram_build/lib
+GEOGRAM_BUILD_DIR = /tmp/geogram_build
+GEOGRAM_LIB_DIR = $(GEOGRAM_BUILD_DIR)/lib
 GEOGRAM_LIBS = -L$(GEOGRAM_LIB_DIR) -lgeogram -Wl,-rpath,$(GEOGRAM_LIB_DIR)
 
 # Primary test targets
@@ -55,13 +56,41 @@ test_co3ne_rvd: $(TEST_DIR)/test_co3ne_rvd.cpp
 compare_with_geogram: $(TEST_DIR)/compare_with_geogram.cpp
 	$(CXX) $(CXXFLAGS) -o compare_with_geogram $(TEST_DIR)/compare_with_geogram.cpp $(LDFLAGS)
 
-# Direct GTE vs Geogram comparison (requires geogram submodule to be built)
-# Build geogram first: cd /tmp && mkdir -p geogram_build && cd geogram_build && cmake <repo>/geogram && make -j$(nproc)
-# Then set GEOGRAM_LIB_DIR to the build directory containing libgeogram.so before running make.
+# Build the geogram library from the submodule.
+# Initializes the required nested submodules (OpenNL, libMeshb, rply, amgcl) and
+# runs a Release cmake build into $(GEOGRAM_BUILD_DIR).
+build_geogram:
+	@echo "Initializing geogram submodule and its dependencies..."
+	git submodule update --init geogram
+	cd geogram && git submodule update --init \
+	    src/lib/geogram/third_party/OpenNL \
+	    src/lib/geogram/third_party/libMeshb \
+	    src/lib/geogram/third_party/rply \
+	    src/lib/geogram/third_party/amgcl
+	@echo "Configuring geogram (Release, no graphics)..."
+	mkdir -p $(GEOGRAM_BUILD_DIR)
+	cd $(GEOGRAM_BUILD_DIR) && cmake $(CURDIR)/geogram \
+	    -DGEOGRAM_WITH_GRAPHICS=OFF \
+	    -DGEOGRAM_WITH_TETGEN=OFF \
+	    -DGEOGRAM_WITH_TRIANGLE=OFF \
+	    -DGEOGRAM_WITH_LEGACY_NUMERICS=OFF \
+	    -DCMAKE_BUILD_TYPE=Release
+	@echo "Building libgeogram..."
+	$(MAKE) -C $(GEOGRAM_BUILD_DIR) -j$$(nproc) geogram
+	@echo "geogram built successfully: $(GEOGRAM_LIB_DIR)/libgeogram.so"
+
+# Direct GTE vs Geogram comparison (requires geogram submodule to be built).
+# Run 'make build_geogram' first, or set GEOGRAM_LIB_DIR to an existing build.
 test_geogram_comparison: $(TEST_DIR)/test_geogram_comparison.cpp \
                          GTE/Mathematics/MeshRepair.h \
                          GTE/Mathematics/MeshHoleFilling.h \
-                         GTE/Mathematics/MeshValidation.h
+                         GTE/Mathematics/MeshValidation.h \
+                         GTE/Mathematics/MeshRemesh.h \
+                         GTE/Mathematics/MeshAnisotropy.h \
+                         GTE/Mathematics/Co3Ne.h \
+                         GTE/Mathematics/SurfaceRVDN.h \
+                         GTE/Mathematics/CVTN.h \
+                         GTE/Mathematics/DelaunayNN.h
 	$(CXX) $(CXXFLAGS) $(GEOGRAM_INC) -o test_geogram_comparison \
 	    $(TEST_DIR)/test_geogram_comparison.cpp \
 	    $(GEOGRAM_LIBS) $(LDFLAGS)
@@ -88,7 +117,7 @@ test_enhanced_manifold: $(TEST_DIR)/test_enhanced_manifold.cpp
 	$(CXX) $(CXXFLAGS) $(PTHREAD) -o test_enhanced_manifold $(TEST_DIR)/test_enhanced_manifold.cpp $(LDFLAGS)
 
 # Anisotropic remeshing test
-test_anisotropic_remesh: $(TEST_DIR)/test_anisotropic_remesh.cpp GTE/Mathematics/MeshAnisotropy.h GTE/Mathematics/MeshRemesh.h
+test_anisotropic_remesh: $(TEST_DIR)/test_anisotropic_remesh.cpp GTE/Mathematics/MeshAnisotropy.h GTE/Mathematics/MeshRemesh.h GTE/Mathematics/SurfaceRVDN.h
 	$(CXX) $(CXXFLAGS) -o test_anisotropic_remesh $(TEST_DIR)/test_anisotropic_remesh.cpp $(LDFLAGS)
 
 # 6D Delaunay test
@@ -112,7 +141,7 @@ test_rvd_n: $(TEST_DIR)/test_rvd_n.cpp GTE/Mathematics/RestrictedVoronoiDiagramN
 	$(CXX) $(CXXFLAGS) -o test_rvd_n $(TEST_DIR)/test_rvd_n.cpp $(LDFLAGS)
 
 # CVTN (N-dimensional CVT) test
-test_cvt_n: $(TEST_DIR)/test_cvt_n.cpp GTE/Mathematics/CVTN.h GTE/Mathematics/RestrictedVoronoiDiagramN.h GTE/Mathematics/DelaunayNN.h GTE/Mathematics/MeshAnisotropy.h
+test_cvt_n: $(TEST_DIR)/test_cvt_n.cpp GTE/Mathematics/CVTN.h GTE/Mathematics/RestrictedVoronoiDiagramN.h GTE/Mathematics/DelaunayNN.h GTE/Mathematics/MeshAnisotropy.h GTE/Mathematics/SurfaceRVDN.h
 	$(CXX) $(CXXFLAGS) -o test_cvt_n $(TEST_DIR)/test_cvt_n.cpp $(LDFLAGS)
 
 # Demonstration programs
@@ -131,9 +160,10 @@ test: test_mesh_repair
 	./test_mesh_repair $(TEST_DIR)/data/gt.obj $(TEST_DIR)/data/gt_repaired.obj
 
 # Run GTE vs Geogram comparison (requires test_geogram_comparison to be built first)
-# Runs both repair+hole-filling (use case 1) and Co3Ne reconstruction (use case 3)
+# Runs all three use cases: repair+hole-filling, anisotropic remeshing, and Co3Ne reconstruction
+# To build geogram automatically: make build_geogram test_geogram_comparison
 test_geogram: test_geogram_comparison
-	@echo "Running GTE vs Geogram comparison (repair + Co3Ne)..."
+	@echo "Running GTE vs Geogram comparison (repair, remesh, Co3Ne)..."
 	./test_geogram_comparison $(TEST_DIR)/data/gt.obj $(TEST_DIR)/data/r768_1000.xyz
 
 stress: stress_test
@@ -145,14 +175,14 @@ clean:
 	rm -f $(TARGETS) test_geogram_comparison
 	rm -f $(TEST_DIR)/data/*_repaired.obj $(TEST_DIR)/data/*_output.obj
 
-.PHONY: all clean test test_geogram stress generate_test_data
+.PHONY: all clean test test_geogram stress generate_test_data build_geogram
 
 # Phase 4 integration test
-test_phase4_integration: $(TEST_DIR)/test_phase4_integration.cpp GTE/Mathematics/CVTN.h GTE/Mathematics/MeshRemesh.h
+test_phase4_integration: $(TEST_DIR)/test_phase4_integration.cpp GTE/Mathematics/CVTN.h GTE/Mathematics/MeshRemesh.h GTE/Mathematics/SurfaceRVDN.h
 	$(CXX) $(CXXFLAGS) -o test_phase4_integration $(TEST_DIR)/test_phase4_integration.cpp $(LDFLAGS)
 
 # Comprehensive anisotropic remeshing end-to-end test
-test_anisotropic_end_to_end: $(TEST_DIR)/test_anisotropic_end_to_end.cpp GTE/Mathematics/MeshRemesh.h GTE/Mathematics/CVTN.h GTE/Mathematics/MeshAnisotropy.h
+test_anisotropic_end_to_end: $(TEST_DIR)/test_anisotropic_end_to_end.cpp GTE/Mathematics/MeshRemesh.h GTE/Mathematics/CVTN.h GTE/Mathematics/MeshAnisotropy.h GTE/Mathematics/SurfaceRVDN.h
 	$(CXX) $(CXXFLAGS) -o test_anisotropic_end_to_end $(TEST_DIR)/test_anisotropic_end_to_end.cpp $(LDFLAGS)
 
 # Co3Ne Manifold Stitcher test

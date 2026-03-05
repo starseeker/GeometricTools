@@ -83,6 +83,10 @@ namespace gte
             // Run MeshRepair after reconstruction (Geogram: co3ne:repair=true default).
             // Removes duplicate vertices, degenerate triangles, and isolated components.
             bool repairAfterReconstruct;
+            // Repair mode flags used when repairAfterReconstruct is true.
+            // DEFAULT | RECONSTRUCT matches Geogram's co3ne default
+            // (MESH_REPAIR_DEFAULT | MESH_REPAIR_RECONSTRUCT).
+            typename MeshRepair<Real>::RepairMode repairMode;
             // Optional RVD-based smoothing (Lloyd relaxation on the mesh).
             // NOTE: O(n^2) per iteration — disabled by default.
             // Only practical for small meshes (n < ~2000 vertices).
@@ -98,6 +102,7 @@ namespace gte
                 , useRVC(true)
                 , rvcDiskSamples(10)
                 , repairAfterReconstruct(false)  // disabled by default for API compatibility
+                , repairMode(MeshRepair<Real>::RepairMode::DEFAULT)
                 , smoothWithRVD(false)
                 , rvdSmoothIterations(3)
             {
@@ -154,7 +159,7 @@ namespace gte
                 return false;
             }
 
-            ClassifyAndOutput(candidateTriangles, outTriangles);
+            ClassifyAndOutput(points, candidateTriangles, outTriangles);
 
             outVertices = points;
 
@@ -218,7 +223,7 @@ namespace gte
                 return false;
             }
 
-            ClassifyAndOutput(candidateTriangles, outTriangles);
+            ClassifyAndOutput(points, candidateTriangles, outTriangles);
 
             outVertices = points;
 
@@ -543,11 +548,15 @@ namespace gte
             Normalize(Nn);
 
             // Compute an arbitrary perpendicular to Nn
+            // Matches Geogram's Geom::perpendicular(N) exactly:
+            //   case 0 (|N.x| min): (0, -N.z, N.y)
+            //   case 1 (|N.y| min): (N.z, 0, -N.x)
+            //   case 2 (|N.z| min): (-N.y, N.x, 0)
             Vector3<Real> U;
             if (std::abs(Nn[0]) <= std::abs(Nn[1]) && std::abs(Nn[0]) <= std::abs(Nn[2]))
                 U = { static_cast<Real>(0), -Nn[2], Nn[1] };
             else if (std::abs(Nn[1]) <= std::abs(Nn[2]))
-                U = { -Nn[2], static_cast<Real>(0), Nn[0] };
+                U = { Nn[2], static_cast<Real>(0), -Nn[0] };
             else
                 U = { -Nn[1], Nn[0], static_cast<Real>(0) };
             Normalize(U);
@@ -557,9 +566,13 @@ namespace gte
             static constexpr Real kPi = static_cast<Real>(3.14159265358979323846);
             size_t nb = diskSamples;
             outPoly.reserve(nb);
+            // Geogram's sincos table uses divisor (sincos_nb-1) so vertex 0 and vertex nb-1
+            // coincide, giving a 9-unique-vertex polygon for sincos_nb=10.
+            // Using (nb-1) as divisor matches Geogram's get_circle() exactly.
+            Real angleDivisor = static_cast<Real>(nb > 1 ? nb - 1 : 1);
             for (size_t k = 0; k < nb; ++k)
             {
-                Real alpha = static_cast<Real>(2) * kPi * static_cast<Real>(k) / static_cast<Real>(nb);
+                Real alpha = static_cast<Real>(2) * kPi * static_cast<Real>(k) / angleDivisor;
                 Real s = std::sin(alpha);
                 Real c = std::cos(alpha);
                 DiskVertex dv;
@@ -592,7 +605,28 @@ namespace gte
                 {
                     nbFetched = nnQuery.template FindNeighbors<MaxNeighbors>(
                         pi, searchRadius * static_cast<Real>(2), indices);
-                    // nbFetched is now the total found within 2*radius
+                    // NearestNeighborQuery::FindNeighbors extracts from a max-heap,
+                    // returning neighbors in FARTHEST-first order.
+                    // Geogram processes neighbors in CLOSEST-first order for correct
+                    // early stopping (sq_dist > 4*Rk). Sort by precomputed distances.
+                    if (nbFetched > 1)
+                    {
+                        // Pre-compute squared distances to avoid lambda capture issues
+                        std::array<Real, MaxNeighbors> sqDists;
+                        for (int32_t k = 0; k < nbFetched; ++k)
+                        {
+                            Vector3<Real> d = points[indices[k]] - pi;
+                            sqDists[k] = Dot(d, d);
+                        }
+                        // Sort an index array [0..nbFetched) by sqDists, then apply
+                        std::array<int32_t, MaxNeighbors> order;
+                        for (int32_t k = 0; k < nbFetched; ++k) order[k] = k;
+                        std::sort(order.begin(), order.begin() + nbFetched,
+                            [&](int32_t a, int32_t b) { return sqDists[a] < sqDists[b]; });
+                        std::array<int32_t, MaxNeighbors> sorted;
+                        for (int32_t k = 0; k < nbFetched; ++k) sorted[k] = indices[order[k]];
+                        for (int32_t k = 0; k < nbFetched; ++k) indices[k] = sorted[k];
+                    }
                     nbNeigh = maxNeigh;  // we got all of them in one query; done after this pass
                 }
 
@@ -610,10 +644,13 @@ namespace gte
                     Vector3<Real> d = pj - pi;
                     Real sq_dist = Dot(d, d);
 
-                    if (sq_dist > sqROS) break;
+                    // Match Geogram's get_RVC early-exit: when a neighbor is beyond
+                    // the radius of security or beyond 2x the polygon radius, RETURN
+                    // immediately (not just break from the inner loop).
+                    if (sq_dist > sqROS) return;
 
                     Real Rk = SquaredRadius(pi, outPoly);
-                    if (sq_dist > static_cast<Real>(4) * Rk) break;
+                    if (sq_dist > static_cast<Real>(4) * Rk) return;
 
                     ClipDiskByBisector(outPoly, pi, pj, nb_idx);
                     ++jj;
@@ -642,9 +679,6 @@ namespace gte
             NNTree const& nnQuery,
             Real searchRadius)
         {
-            static constexpr Real kPi = static_cast<Real>(3.14159265358979323846);
-            Real maxCosAngle = std::cos(params.maxNormalAngle * kPi / static_cast<Real>(180));
-
             std::vector<DiskVertex> poly;
 
             for (size_t i = 0; i < points.size(); ++i)
@@ -655,6 +689,7 @@ namespace gte
                 if (poly.size() < 3) continue;
 
                 // Extract triangles from consecutive polygon edges
+                // (matches Geogram's run_reconstruct: no co-cone filter applied here)
                 size_t nb = poly.size();
                 for (size_t v1 = 0; v1 < nb; ++v1)
                 {
@@ -663,10 +698,6 @@ namespace gte
                     int32_t k = poly[v2].adjacentSeed;
 
                     if (j < 0 || k < 0 || j == k) continue;
-
-                    // Co-cone test: both neighbors must have normals within maxNormalAngle
-                    if (Dot(normals[i], normals[j]) < maxCosAngle) continue;
-                    if (Dot(normals[i], normals[k]) < maxCosAngle) continue;
 
                     int32_t v0 = static_cast<int32_t>(i);
                     int32_t v1i = j;
@@ -762,12 +793,18 @@ namespace gte
         //   count  < 3  ->  T12:           one or two vertices agree
         //   count  > 3  ->  discard:       over-proposed, geometry ambiguous
         //
-        // T3 triangles are always output.  T12 triangles are also always output,
-        // matching Geogram's strategy, UNLESS they form a Möbius configuration.
-        // A T12 triangle forms a Möbius configuration when one of its directed
-        // edges (a->b) already appears in the accepted set with the same
-        // orientation — adding it would create a non-orientable surface patch.
+        // T3 triangles are always output.
+        // T12 triangles are accepted iteratively, matching Geogram's
+        // Co3NeManifoldExtraction::connect_and_validate_triangle() non-strict mode:
+        //   1. The triangle must share ≥2 edges with already-accepted triangles.
+        //   2. Its normal must agree with each adjacent triangle's normal
+        //      (dot product > -0.8, same threshold as Geogram).
+        //   3. It must not create a Möbius (non-orientable) configuration.
+        //   4. Up to 50 iterations are performed (same as Geogram's max_iter=50).
+        // This prevents T12 triangles from "floating" disconnected from the
+        // main surface, which was creating excess boundary edges in GTE.
         static void ClassifyAndOutput(
+            std::vector<Vector3<Real>> const& points,
             std::vector<std::array<int32_t, 3>> const& candidateTriangles,
             std::vector<std::array<int32_t, 3>>& outTriangles)
         {
@@ -792,65 +829,214 @@ namespace gte
                 ++info.count;
             }
 
-            // Build directed half-edge set from accepted triangles.
-            // Key: {a, b} means directed edge a->b exists in an accepted triangle.
+            // Directed half-edge set: {a,b} means directed edge a→b exists
+            // (for Möbius / orientability check).
             using EdgeKey = std::array<int32_t, 2>;
-            struct EdgeHash
+            // Boost-style hash for a pair of int32_t.
+            struct EdgePairHash
             {
                 size_t operator()(EdgeKey const& e) const noexcept
                 {
-                    // Boost-style hash combining using the golden-ratio constant.
                     size_t h = std::hash<int32_t>{}(e[0]);
                     h ^= std::hash<int32_t>{}(e[1]) + size_t{0x9e3779b9u} + (h << 6) + (h >> 2);
                     return h;
                 }
             };
-            // Each accepted triangle contributes 3 directed half-edges.
-            std::unordered_set<EdgeKey, EdgeHash> acceptedEdges;
-            acceptedEdges.reserve(candidateTriangles.size() * 3);
+            std::unordered_set<EdgeKey, EdgePairHash> dirEdges;
+            dirEdges.reserve(candidateTriangles.size() * 3);
+
+            // Undirected edge → list of accepted triangle indices that contain it
+            // (for ≥2-adjacency check and normal-agreement check).
+            using UEdge = std::array<int32_t, 2>;  // [min(a,b), max(a,b)]
+            std::unordered_map<UEdge, std::vector<int32_t>, EdgePairHash> uEdgeToTris;
+            uEdgeToTris.reserve(candidateTriangles.size() * 3);
 
             auto RegisterTriangle = [&](std::array<int32_t, 3> const& t)
             {
+                int32_t idx = static_cast<int32_t>(outTriangles.size());
                 outTriangles.push_back(t);
-                acceptedEdges.insert({t[0], t[1]});
-                acceptedEdges.insert({t[1], t[2]});
-                acceptedEdges.insert({t[2], t[0]});
+                dirEdges.insert({t[0], t[1]});
+                dirEdges.insert({t[1], t[2]});
+                dirEdges.insert({t[2], t[0]});
+                uEdgeToTris[{std::min(t[0],t[1]), std::max(t[0],t[1])}].push_back(idx);
+                uEdgeToTris[{std::min(t[1],t[2]), std::max(t[1],t[2])}].push_back(idx);
+                uEdgeToTris[{std::min(t[2],t[0]), std::max(t[2],t[0])}].push_back(idx);
             };
 
+            // Möbius check: triangle t would create a non-orientable patch if any
+            // of its directed edges already appears in the accepted set.
             auto IsMobius = [&](std::array<int32_t, 3> const& t) -> bool
             {
-                return acceptedEdges.count({t[0], t[1]}) ||
-                       acceptedEdges.count({t[1], t[2]}) ||
-                       acceptedEdges.count({t[2], t[0]});
+                return dirEdges.count({t[0], t[1]}) ||
+                       dirEdges.count({t[1], t[2]}) ||
+                       dirEdges.count({t[2], t[0]});
             };
 
+            // Normal agreement check (translation of Geogram's
+            // Co3NeManifoldExtraction::triangles_normals_agree()).
+            // Dot product of unit normals must be > -0.8.
+            // Normals are flipped if the two triangles share an edge in the
+            // SAME orientation (i.e., they face the same direction across the edge).
+            auto NormalsAgree = [&](
+                std::array<int32_t, 3> const& t1,
+                std::array<int32_t, 3> const& t2) -> bool
+            {
+                Vector3<Real> e1 = points[t1[1]] - points[t1[0]];
+                Vector3<Real> e2 = points[t1[2]] - points[t1[0]];
+                Vector3<Real> n1 = Cross(e1, e2);
+                Real len1 = Length(n1);
+                if (len1 < Real(1e-10)) { return false; }
+                n1 /= len1;
+
+                Vector3<Real> f1 = points[t2[1]] - points[t2[0]];
+                Vector3<Real> f2 = points[t2[2]] - points[t2[0]];
+                Vector3<Real> n2 = Cross(f1, f2);
+                Real len2 = Length(n2);
+                if (len2 < Real(1e-10)) { return false; }
+                n2 /= len2;
+
+                Real d = Dot(n1, n2);
+
+                // Geogram flips d when triangles share an edge in the same
+                // orientation (they are then combinatorially oriented the same way,
+                // but should be facing away from each other across the shared edge).
+                // Check all 9 same-direction edge pairs:
+                auto SameOrient = [&]() -> bool
+                {
+                    for (int i = 0; i < 3; ++i)
+                        for (int j = 0; j < 3; ++j)
+                            if (t1[i] == t2[j] && t1[(i+1)%3] == t2[(j+1)%3])
+                                return true;
+                    return false;
+                };
+                if (SameOrient()) { d = -d; }
+                return d > Real(-0.8);
+            };
+
+            // Separate T3 and T12
             std::vector<std::array<int32_t, 3>> t12;
+            size_t t3Count = 0, t12Count = 0, discardCount = 0;
             for (auto const& [key, info] : seen)
             {
                 if (info.count == 3)
                 {
                     RegisterTriangle(info.oriented);
+                    ++t3Count;
                 }
                 else if (info.count < 3)
                 {
                     t12.push_back(info.oriented);
+                    ++t12Count;
                 }
-                // count > 3: discard
-            }
-
-            // Emit T12 triangles, skipping Möbius configurations.
-            // This matches Geogram's behavior: T12 triangles are always considered,
-            // not just used as a last-resort fallback.
-            for (auto const& t : t12)
-            {
-                if (!IsMobius(t))
+                else
                 {
-                    RegisterTriangle(t);
+                    ++discardCount;
+                    // count > 3: discard (over-proposed, ambiguous geometry)
                 }
             }
-        }
+#ifdef CO3NE_DEBUG_STAGES
+            {
+                // Count boundary edges from T3-only mesh
+                using DEBEdge = std::array<int32_t, 2>;
+                struct DEBH { size_t operator()(DEBEdge const& e) const {
+                    size_t h = std::hash<int32_t>{}(e[0]);
+                    h ^= std::hash<int32_t>{}(e[1]) + size_t{0x9e3779b9u} + (h << 6) + (h >> 2);
+                    return h; }};
+                std::unordered_map<DEBEdge, int, DEBH> debEdge;
+                for (auto const& t : outTriangles)
+                    for (int ii = 0; ii < 3; ++ii) {
+                        DEBEdge e = {std::min(t[ii], t[(ii+1)%3]), std::max(t[ii], t[(ii+1)%3])};
+                        ++debEdge[e];
+                    }
+                size_t bT3 = 0;
+                for (auto& [e, c] : debEdge) if (c == 1) ++bT3;
+                std::fprintf(stderr,"[CO3NE_DBG] candidates=%zu t3=%zu t12=%zu discard=%zu\n",
+                    candidateTriangles.size(), t3Count, t12Count, discardCount);
+                std::fprintf(stderr,"[CO3NE_DBG] after T3 only: %zu tris, %zu boundary edges\n",
+                    outTriangles.size(), bT3);
+            }
+#endif
 
-        // ===== UTILITIES =====
+            // Iterative T12 insertion (translation of Geogram's
+            // Co3NeManifoldExtraction::add_triangles(), non-strict mode).
+            // Accept T12 only when it:
+            //   (a) has ≥2 edges adjacent to already-accepted triangles,
+            //   (b) its normal agrees with each adjacent triangle (dot > -0.8),
+            //   (c) does not create a Möbius configuration.
+            // Repeat until convergence (some T12s become eligible only after
+            // earlier T12s are accepted).
+            // MaxT12Iterations matches Geogram's max_iter in non-strict mode.
+            constexpr int MaxT12Iterations = 50;
+            std::vector<bool> t12Done(t12.size(), false);
+            bool changed = true;
+            int maxIter = MaxT12Iterations;
+            while (changed && maxIter-- > 0)
+            {
+                changed = false;
+                for (size_t i = 0; i < t12.size(); ++i)
+                {
+                    if (t12Done[i]) { continue; }
+                    auto const& t = t12[i];
+
+                    // Count edges adjacent to already-accepted triangles
+                    UEdge e0 = {std::min(t[0],t[1]), std::max(t[0],t[1])};
+                    UEdge e1 = {std::min(t[1],t[2]), std::max(t[1],t[2])};
+                    UEdge e2 = {std::min(t[2],t[0]), std::max(t[2],t[0])};
+                    auto it0 = uEdgeToTris.find(e0);
+                    auto it1 = uEdgeToTris.find(e1);
+                    auto it2 = uEdgeToTris.find(e2);
+                    int nb = (it0 != uEdgeToTris.end() ? 1 : 0)
+                           + (it1 != uEdgeToTris.end() ? 1 : 0)
+                           + (it2 != uEdgeToTris.end() ? 1 : 0);
+                    if (nb < 2) { continue; }   // need ≥2 adjacent edges
+
+                    // Normal agreement with each adjacent accepted triangle
+                    bool normOK = true;
+                    for (auto it : {it0, it1, it2})
+                    {
+                        if (it == uEdgeToTris.end()) { continue; }
+                        for (int32_t adjIdx : it->second)
+                        {
+                            if (!NormalsAgree(t, outTriangles[adjIdx]))
+                            {
+                                normOK = false;
+                                break;
+                            }
+                        }
+                        if (!normOK) { break; }
+                    }
+                    if (!normOK) { continue; }
+
+                    // Möbius (orientability) check
+                    if (IsMobius(t)) { continue; }
+
+                    RegisterTriangle(t);
+                    t12Done[i] = true;
+                    changed = true;
+                }
+            }
+#ifdef CO3NE_DEBUG_STAGES
+            {
+                size_t t12Accepted = 0;
+                for (bool d : t12Done) if (d) ++t12Accepted;
+                using DEBEdge = std::array<int32_t, 2>;
+                struct DEBH { size_t operator()(DEBEdge const& e) const {
+                    size_t h = std::hash<int32_t>{}(e[0]);
+                    h ^= std::hash<int32_t>{}(e[1]) + size_t{0x9e3779b9u} + (h << 6) + (h >> 2);
+                    return h; }};
+                std::unordered_map<DEBEdge, int, DEBH> debEdge;
+                for (auto const& tt : outTriangles)
+                    for (int ii = 0; ii < 3; ++ii) {
+                        DEBEdge e = {std::min(tt[ii], tt[(ii+1)%3]), std::max(tt[ii], tt[(ii+1)%3])};
+                        ++debEdge[e];
+                    }
+                size_t bFinal = 0;
+                for (auto& [e, c] : debEdge) if (c == 1) ++bFinal;
+                std::fprintf(stderr,"[CO3NE_DBG] T12 accepted=%zu/%zu, final tris=%zu, boundary=%zu\n",
+                    t12Accepted, t12Count, outTriangles.size(), bFinal);
+            }
+#endif
+        }
 
         static bool IsTriangleValid(
             std::vector<Vector3<Real>> const& points,
@@ -915,7 +1101,7 @@ namespace gte
             if (params.repairAfterReconstruct)
             {
                 typename MeshRepair<Real>::Parameters repairParams;
-                repairParams.mode = MeshRepair<Real>::RepairMode::DEFAULT;
+                repairParams.mode = params.repairMode;
                 MeshRepair<Real>::Repair(vertices, triangles, repairParams);
             }
         }
